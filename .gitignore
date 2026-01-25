@@ -39,6 +39,7 @@ seed_data/*.xml
 .env
 .venv
 venv/
+.direnv
 
 # --- Reverse Proxy (Caddy) ---
 # Ignore the generated SSL certificates and internal Caddy state.

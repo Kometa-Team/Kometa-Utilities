@@ -230,7 +230,7 @@ $DOMAIN_NAME {
     
     # Handle errors (like when the backend is down)
     handle_errors {
-        @maintenance expression {err.status_code in [502, 503, 504]}
+        @maintenance expression {err.status_code} in [502, 503, 504]
         handle @maintenance {
             rewrite * /maintenance.html
             file_server {

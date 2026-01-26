@@ -6,8 +6,7 @@ services:
     env_file:
       - .env
     volumes:
-      - anidb-db:/app/data
-      - anidb-db:/app
+      - anidb-data:/app/data
       - ./seed_data:/app/seed_data:ro
 
   caddy:

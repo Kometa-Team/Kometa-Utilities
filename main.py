@@ -37,7 +37,7 @@ API_PASS = os.getenv("API_PASS", "change_me_to_something_secure")
 
 # Global state
 security = HTTPBasic()
-update_queue: asyncio.Queue = asyncio.Queue()
+update_queue: Optional[asyncio.Queue] = None
 pending_aids: set = set()
 worker_task: Optional[asyncio.Task] = None
 
@@ -96,7 +96,7 @@ async def index_xml_to_db(aid: int, xml_text: str) -> None:
             # Index Relations
             rels = [
                 (aid, int(r.get("id") or "0"), r.get("type") or "")
-                for r in root.findall(".//relatedanime")
+                for r in root.findall(".//relatedanime/anime")
                 if r.get("id") and r.get("type")
             ]
             if rels:
@@ -158,12 +158,12 @@ def filter_mature_content(xml_text: str) -> str:
 
         # Remove mature categories
         mature_keywords = ["hentai", "pornography", "18 restricted", "adult"]
-        for category in root.findall(".//category"):
-            name = category.findtext("name", "").lower()
-            if any(keyword in name for keyword in mature_keywords):
-                parent = category.find("..")
-                if parent is not None:
-                    parent.remove(category)
+        categories_parent = root.find(".//categories")
+        if categories_parent is not None:
+            for category in list(categories_parent.findall("category")):
+                name = category.findtext("name", "").lower()
+                if any(keyword in name for keyword in mature_keywords):
+                    categories_parent.remove(category)
 
         return ET.tostring(root, encoding="unicode")
     except Exception as e:
@@ -258,12 +258,15 @@ async def anidb_worker() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context for startup/shutdown."""
-    global worker_task
+    global worker_task, update_queue
 
     # Startup
     print("🔧 Initializing AniDB Service...")
     XML_DIR.mkdir(parents=True, exist_ok=True)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create the queue in this event loop
+    update_queue = asyncio.Queue()
 
     # Extract seed data if data directory is empty
     extract_seed_data(XML_DIR, SEED_DATA_DIR)
@@ -591,31 +594,52 @@ async def get_anime(aid: int, mature: bool = True) -> Response:
                                 "X-Mature-Filter": "disabled" if mature else "enabled",
                             },
                         )
+                    else:
+                        # Cache exists but is stale - queue for update and return stale content
+                        if aid not in pending_aids:
+                            pending_aids.add(aid)
+                            await update_queue.put(aid)
+                        
+                        content = xml_file.read_text(encoding="utf-8")
+                        if not mature:
+                            content = filter_mature_content(content)
+                        
+                        return Response(
+                            content=content,
+                            media_type="application/xml",
+                            headers={
+                                "X-Cache": "STALE",
+                                "X-Status": "Refreshing",
+                                "X-Mature-Filter": "disabled" if mature else "enabled",
+                                "X-Age-Days": str(age.days),
+                            },
+                        )
+                else:
+                    # File exists but no DB entry - treat as stale
+                    if aid not in pending_aids:
+                        pending_aids.add(aid)
+                        await update_queue.put(aid)
+                    
+                    content = xml_file.read_text(encoding="utf-8")
+                    if not mature:
+                        content = filter_mature_content(content)
+                    
+                    return Response(
+                        content=content,
+                        media_type="application/xml",
+                        headers={
+                            "X-Cache": "STALE",
+                            "X-Status": "Refreshing",
+                            "X-Mature-Filter": "disabled" if mature else "enabled",
+                        },
+                    )
         except Exception as e:
             print(f"⚠️ Cache check error for AID {aid}: {e}")
 
-    # Queue for update if not already pending
+    # Queue for update if not in cache
     if aid not in pending_aids:
         pending_aids.add(aid)
         await update_queue.put(aid)
-
-    # If file exists but stale, serve it while queuing refresh
-    if xml_file.exists():
-        content = xml_file.read_text(encoding="utf-8")
-
-        # Filter mature content if requested
-        if not mature:
-            content = filter_mature_content(content)
-
-        return Response(
-            content=content,
-            media_type="application/xml",
-            headers={
-                "X-Cache": "STALE",
-                "X-Status": "Refreshing",
-                "X-Mature-Filter": "disabled" if mature else "enabled",
-            },
-        )
 
     # No cache available
     raise HTTPException(

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 
@@ -16,6 +17,7 @@ os.environ["API_PASS"] = "test_pass"
 os.environ["ANIDB_USERNAME"] = "test_anidb"
 os.environ["ANIDB_PASSWORD"] = "test_anidb_pass"
 os.environ["DAILY_LIMIT"] = "10"
+os.environ["UPDATE_THRESHOLD_DAYS"] = "7"  # Make 10-day cache properly stale
 
 from main import (
     app,
@@ -426,7 +428,7 @@ async def test_stale_cache_handling(
 
 
 @pytest.mark.asyncio
-async def test_anidb_api_authentication():
+async def test_anidb_api_authentication(clean_test_env):
     """Test that AniDB API receives authentication parameters."""
     from main import fetch_from_anidb
 
@@ -448,7 +450,7 @@ async def test_anidb_api_authentication():
 
 
 @pytest.mark.asyncio
-async def test_anidb_ban_detection():
+async def test_anidb_ban_detection(clean_test_env):
     """Test that AniDB ban responses are handled."""
     from main import fetch_from_anidb
 
@@ -460,10 +462,10 @@ async def test_anidb_ban_detection():
         mock_get = AsyncMock(return_value=mock_response)
         mock_client.return_value.__aenter__.return_value.get = mock_get
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(HTTPException) as exc_info:
             await fetch_from_anidb(1)
 
-        assert exc_info.value.status_code == 503  # type: ignore
+        assert exc_info.value.status_code == 503
 
 
 # ============================================================================

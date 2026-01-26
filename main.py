@@ -17,7 +17,7 @@ from common import extract_seed_data
 
 # --- CONFIG ---
 XML_DIR = Path(os.getenv("XML_DIR", "/app/data"))
-DB_PATH = Path(os.getenv("DB_PATH", "/app/database.db"))
+DB_PATH = Path(os.getenv("DB_PATH", "/app/database/anidb.db"))
 SEED_DATA_DIR = Path(os.getenv("SEED_DATA_DIR", "/app/seed_data"))
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "200"))
 THROTTLE_SECONDS = int(os.getenv("THROTTLE_SECONDS", "4"))

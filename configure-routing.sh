@@ -15,6 +15,12 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
+# Create Caddyfile from example if it doesn't exist
+if [ ! -f Caddyfile ] && [ -f Caddyfile.example ]; then
+    echo "📄 Creating Caddyfile from Caddyfile.example..."
+    cp Caddyfile.example Caddyfile
+fi
+
 echo "Choose routing mode:"
 echo "1) Path-based routing (e.g., yourdomain.com/anidb-service)"
 echo "2) Subdomain routing (e.g., anidb-service.yourdomain.com)"

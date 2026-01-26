@@ -224,6 +224,10 @@ print_success ".env file created"
 echo ""
 print_step "Step 8: Updating Caddyfile with domain..."
 
+if [ ! -f Caddyfile ]; then
+    cp Caddyfile.example Caddyfile
+fi
+
 cat > Caddyfile <<EOF
 $DOMAIN_NAME {
     # Authentication is handled by FastAPI - no duplicate auth layer needed

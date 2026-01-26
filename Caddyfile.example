@@ -1,0 +1,70 @@
+# Caddyfile Example for AniDB Service
+# Copy this file to 'Caddyfile' and customize for your deployment
+
+# ============================================================================
+# PATH-BASED ROUTING (Multiple services on one domain)
+# ============================================================================
+# Uncomment and customize this section if deploying at yourdomain.com/anidb-service
+
+yourdomain.com {
+    # Handle /anidb-service path
+    handle /anidb-service* {
+        uri strip_prefix /anidb-service
+        
+        # Handle errors (like when the backend is down)
+        handle_errors {
+            @maintenance expression {err.status_code} in [502, 503, 504]
+            handle @maintenance {
+                rewrite * /maintenance.html
+                file_server {
+                    root /var/www/html
+                }
+            }
+        }
+
+        # Proxy to FastAPI backend
+        reverse_proxy anidb-mirror:8000
+    }
+
+    # Optional: Handle root path for other services
+    # handle / {
+    #     respond "Welcome! Available services: /anidb-service"
+    # }
+}
+
+# ============================================================================
+# SUBDOMAIN ROUTING (Dedicated subdomain for this service)
+# ============================================================================
+# Uncomment and customize this section if deploying at anidb-service.yourdomain.com
+
+# anidb-service.yourdomain.com {
+#     # Handle errors (like when the backend is down)
+#     handle_errors {
+#         @maintenance expression {err.status_code} in [502, 503, 504]
+#         handle @maintenance {
+#             rewrite * /maintenance.html
+#             file_server {
+#                 root /var/www/html
+#             }
+#         }
+#     }
+# 
+#     # Proxy to FastAPI backend
+#     reverse_proxy anidb-mirror:8000
+# }
+
+# ============================================================================
+# NOTES
+# ============================================================================
+# 
+# Path-based routing:
+# - Set ROOT_PATH=/anidb-service in your .env file
+# - Access at: https://yourdomain.com/anidb-service
+# - Allows multiple services on one domain
+#
+# Subdomain routing:
+# - Leave ROOT_PATH empty in your .env file
+# - Access at: https://anidb-service.yourdomain.com
+# - Simpler configuration for single service
+#
+# See docs/PATH_BASED_ROUTING.md for detailed configuration guide

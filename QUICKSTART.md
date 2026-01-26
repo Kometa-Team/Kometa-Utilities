@@ -24,13 +24,26 @@ nano .env
 
 ### 2. Update Domain
 
-Edit `Caddyfile` and replace the domain:
+Copy and edit `Caddyfile`:
 
 ```bash
+# Copy example configuration
+cp Caddyfile.example Caddyfile
+
+# Edit with your domain
 nano Caddyfile
-# Change: anidb-service.kometa.wiki
+# Change: yourdomain.com
 # To: your-actual-domain.com
 ```
+
+**For path-based routing** (yourdomain.com/anidb-service):
+- Keep the handle /anidb-service* section
+- Set `ROOT_PATH=/anidb-service` in .env
+
+**For subdomain routing** (anidb-service.yourdomain.com):
+- Uncomment the subdomain section
+- Comment out the path-based section
+- Leave `ROOT_PATH` empty in .env
 
 ### 3. Start Services
 

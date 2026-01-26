@@ -41,6 +41,10 @@ seed_data/*.xml
 venv/
 .direnv
 
+# --- Local Configuration Files ---
+# Keep example files in git, but ignore customized versions
+Caddyfile
+
 # --- Reverse Proxy (Caddy) ---
 # Ignore the generated SSL certificates and internal Caddy state.
 caddy_data/

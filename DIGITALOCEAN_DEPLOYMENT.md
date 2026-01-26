@@ -387,6 +387,12 @@ S3_ENDPOINT=https://nyc3.digitaloceanspaces.com
 #### 6.3 Update Caddyfile
 
 ```bash
+# Copy example if needed
+if [ ! -f Caddyfile ]; then
+    cp Caddyfile.example Caddyfile
+fi
+
+# Edit configuration
 nano Caddyfile
 ```
 
@@ -394,6 +400,15 @@ Replace domain:
 ```
 anidb-service.yourdomain.com {
     # ... rest of config
+}
+```
+
+Or for path-based routing:
+```
+yourdomain.com {
+    handle /anidb-service* {
+        # ... rest of config
+    }
 }
 ```
 

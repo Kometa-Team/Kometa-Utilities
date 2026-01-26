@@ -41,7 +41,9 @@ case $choice in
         # Update Caddyfile
         cat > Caddyfile <<EOF
 ${DOMAIN} {
-    handle_path /${PATH_PREFIX}* {
+    handle /${PATH_PREFIX}* {
+        uri strip_prefix /${PATH_PREFIX}
+        
         handle_errors {
             @maintenance expression {err.status_code} in [502, 503, 504]
             handle @maintenance {

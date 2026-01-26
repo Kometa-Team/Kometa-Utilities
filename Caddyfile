@@ -1,7 +1,9 @@
 # Domain configuration - update yourdomain.com to your actual domain
 yourdomain.com {
     # Handle /anidb-service path
-    handle_path /anidb-service* {
+    handle /anidb-service* {
+        uri strip_prefix /anidb-service
+        
         # Handle errors (like when the backend is down)
         handle_errors {
             @maintenance expression {err.status_code} in [502, 503, 504]
@@ -14,7 +16,6 @@ yourdomain.com {
         }
 
         # Proxy to FastAPI backend
-        # The handle_path directive strips /anidb-service prefix before proxying
         reverse_proxy anidb-mirror:8000
     }
 

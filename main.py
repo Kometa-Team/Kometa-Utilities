@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 import aiosqlite
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status, Request
 from fastapi.responses import Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -340,40 +340,45 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)) -> str:
 
 
 @app.get("/")
-async def root():
+async def root(request: Request):
     """Root endpoint with API information."""
     from fastapi.responses import HTMLResponse
 
-    html_content = """
+    # Construct the base URL from the request
+    base_url = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    if ROOT_PATH:
+        base_url += ROOT_PATH
+
+    html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>AniDB Mirror Service</title>
         <style>
-            body {
+            body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 max-width: 800px;
                 margin: 50px auto;
                 padding: 20px;
                 line-height: 1.6;
                 color: #333;
-            }
-            h1 { color: #2c3e50; }
-            code {
+            }}
+            h1 {{ color: #2c3e50; }}
+            code {{
                 background: #f4f4f4;
                 padding: 2px 6px;
                 border-radius: 3px;
                 font-family: 'Courier New', monospace;
-            }
-            .endpoint {
+            }}
+            .endpoint {{
                 background: #f8f9fa;
                 padding: 15px;
                 margin: 10px 0;
                 border-left: 4px solid #007bff;
                 border-radius: 4px;
-            }
-            a { color: #007bff; text-decoration: none; }
-            a:hover { text-decoration: underline; }
+            }}
+            a {{ color: #007bff; text-decoration: none; }}
+            a:hover {{ text-decoration: underline; }}
         </style>
     </head>
     <body>
@@ -384,22 +389,18 @@ async def root():
         
         <div class="endpoint">
             <strong>GET /stats</strong> - Service statistics (no auth required)<br>
-            <code>curl http://localhost:8000/stats</code>
+            <code>curl {base_url}/stats</code>
         </div>
         
         <div class="endpoint">
-            <strong>GET /anime/{aid}</strong> - Get anime by AniDB ID (requires auth)<br>
-            <code>curl -u username:password http://localhost:8000/anime/1</code>
+            <strong>GET /anime/{{aid}}</strong> - Get anime by AniDB ID (requires auth)<br>
+            <code>curl -u username:password {base_url}/anime/1</code>
         </div>
         
         <div class="endpoint">
             <strong>GET /search/tags</strong> - Search by tags (requires auth)<br>
-            <code>curl -u username:password "http://localhost:8000/search/tags?tags=action,comedy&min_weight=300"</code>
+            <code>curl -u username:password "{base_url}/search/tags?tags=action,comedy&min_weight=300"</code>
         </div>
-        
-        <p style="margin-top: 40px; color: #666; font-size: 0.9em;">
-            Powered by FastAPI | <a href="https://github.com">GitHub</a>
-        </p>
     </body>
     </html>
     """

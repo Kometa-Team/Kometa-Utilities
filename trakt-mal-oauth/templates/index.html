@@ -55,6 +55,7 @@
                     <!-- Fields for Tab 2 -->
                     <input type="hidden" name="tab" value="mal">
                     <input type="hidden" id="code_verifier" name="code_verifier" value="{{ code_verifier }}">
+                    <input type="hidden" id="code_challenge" value="{{ code_challenge }}">
                     <div class="form-group">
                         <label for="input1">MyAnimeList Client ID:</label>
                         <input type="text" class="form-control" id="mal_client_id" name="mal_client_id" oninput="updateMALURL(); checkMALURLStart()" required>
@@ -105,11 +106,11 @@
 
         function updateMALURL() {
             var mal_client_id = document.getElementById('mal_client_id').value;
-            var code_verifier = document.getElementById('code_verifier').value;
+            var code_challenge = document.getElementById('code_challenge').value;
             var myURL = "";
             if (mal_client_id.length == 32)
             {
-                myURL = "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=" + mal_client_id + "&code_challenge=" + code_verifier;
+                myURL = "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=" + mal_client_id + "&code_challenge=" + code_challenge;
             }
             document.getElementById('mal_url').value = myURL;
         }

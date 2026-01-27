@@ -2,6 +2,8 @@ from flask import Flask, render_template, request
 import requests
 import secrets
 import re
+import hashlib
+import base64
 
 app = Flask(__name__)
 
@@ -105,7 +107,12 @@ def index():
     else:
         code_verifier = secrets.token_urlsafe(100)[:128]
 
-    return render_template('index.html', result=result, code_verifier=code_verifier)
+    # Generate code_challenge for MAL OAuth PKCE
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode('ascii')).digest()
+    ).decode('ascii').rstrip('=')
+
+    return render_template('index.html', result=result, code_verifier=code_verifier, code_challenge=code_challenge)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', debug=True, port=5000)

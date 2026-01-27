@@ -280,36 +280,44 @@ async def lifespan(app: FastAPI):
     # Start background indexing if database is empty
     async def index_seed_data_background():
         """Index seed data in background without blocking startup."""
-        import aiosqlite
-        import gc
-        
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM anime")
-            result = await cursor.fetchone()
-            count = result[0] if result else 0
+        try:
+            import aiosqlite
+            import gc
+            
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute("SELECT COUNT(*) FROM anime")
+                result = await cursor.fetchone()
+                count = result[0] if result else 0
 
-            if count == 0 and XML_DIR.exists():
-                xml_files = list(XML_DIR.glob("*.xml"))
-                if xml_files:
-                    print(f"📚 Indexing {len(xml_files)} seed files in background...")
-                    indexed_count = 0
-                    for xml_file in xml_files:
-                        try:
-                            aid = xml_file.stem.split("_")[1]
-                            xml_text = xml_file.read_text(encoding="utf-8")
-                            await index_xml_to_db(int(aid), xml_text)
-                            indexed_count += 1
-                            
-                            # Commit every 100 files to reduce memory pressure
-                            if indexed_count % 100 == 0:
-                                await db.commit()
-                                if len(xml_files) > 100:
-                                    print(f"   Progress: {indexed_count}/{len(xml_files)} files indexed...")
-                                gc.collect()
-                        except Exception as e:
-                            print(f"⚠️ Error indexing {xml_file.name}: {e}")
-                    await db.commit()
-                    print(f"✅ Indexed {indexed_count} files")
+                if count == 0 and XML_DIR.exists():
+                    xml_files = list(XML_DIR.glob("*.xml"))
+                    if xml_files:
+                        print(f"📚 Indexing {len(xml_files)} seed files in background...")
+                        indexed_count = 0
+                        for xml_file in xml_files:
+                            try:
+                                # Handle both formats: "123.xml" and "AnimeDoc_123.xml"
+                                if "_" in xml_file.stem:
+                                    aid = xml_file.stem.split("_")[1]
+                                else:
+                                    aid = xml_file.stem
+                                
+                                xml_text = xml_file.read_text(encoding="utf-8")
+                                await index_xml_to_db(int(aid), xml_text)
+                                indexed_count += 1
+                                
+                                # Commit every 100 files to reduce memory pressure
+                                if indexed_count % 100 == 0:
+                                    await db.commit()
+                                    if len(xml_files) > 100:
+                                        print(f"   Progress: {indexed_count}/{len(xml_files)} files indexed...")
+                                    gc.collect()
+                            except Exception as e:
+                                print(f"⚠️ Error indexing {xml_file.name}: {e}")
+                        await db.commit()
+                        print(f"✅ Indexed {indexed_count} files")
+        except Exception as e:
+            print(f"❌ Background indexing failed: {e}")
     
     # Start background tasks
     asyncio.create_task(index_seed_data_background())

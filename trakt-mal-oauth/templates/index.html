@@ -174,12 +174,10 @@
         // Call autoResize on page load for the result textarea
         window.onload = function() {
             var result_text = document.getElementById('result');
-            var trakt_url_text = document.getElementById('trakt_url');
-            var mal_url_text = document.getElementById('mal_url');
             autoResize(result_text);
             checkContentStart(result_text);
-            checkURLStart(trakt_url_text);
-            checkMALURLStart(mal_url_text)
+            checkURLStart();
+            checkMALURLStart();
         };
         
     </script>

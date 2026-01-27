@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+
+{% block title %}{{ app_name }} - Authenticate with Plex{% endblock %}
+
+{% block content %}
+<h1 id="main-title">{{ app_name }}</h1>
+<p class="subtitle" id="main-subtitle">Authenticate with your Plex account to get your access token for Kometa.</p>
+
+<div class="info-box" id="instructions">
+    <p>
+        <strong>What happens next:</strong><br>
+        1. Click the button below<br>
+        2. Sign in with your Plex account in the popup window<br>
+        3. Copy your access token to use with Kometa
+    </p>
+</div>
+
+<button id="auth-btn" class="btn" onclick="startAuth()">Authenticate with Plex</button>
+<div id="status-message" style="margin-top: 20px; display: none;"></div>
+<div id="result-container" style="display: none;">
+    <h2>Authentication Successful!</h2>
+    <div class="user-info">
+        <p><strong>Username:</strong> <span id="username"></span></p>
+        <p><strong>Email:</strong> <span id="email"></span></p>
+    </div>
+    <p style="margin: 20px 0;"><strong>Your Plex Access Token:</strong></p>
+    <div style="display: flex; align-items: center; gap: 10px;">
+        <div class="token-box" id="token-box" style="flex: 1; margin: 0;"></div>
+        <button onclick="copyToken()" style="background: #e5a00d; color: #1f1f1f; border: none; border-radius: 8px; padding: 15px 20px; cursor: pointer; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; min-width: 50px; height: 50px;" onmouseover="this.style.background='#cc8800'; this.style.transform='translateY(-2px)'" onmouseout="this.style.background='#e5a00d'; this.style.transform='translateY(0)'" title="Copy to clipboard">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+        </button>
+    </div>
+    <p id="copy-status" style="color: #4caf50; margin-top: 10px; display: none;">✓ Token copied to clipboard!</p>
+    <p style="color: #aaa; margin-top: 15px;">Keep this token secure!</p>
+</div>
+
+<script>
+let authWindow = null;
+let pollInterval = null;
+
+function startAuth() {
+    const btn = document.getElementById('auth-btn');
+    const statusMsg = document.getElementById('status-message');
+    
+    btn.disabled = true;
+    btn.textContent = 'Opening authentication window...';
+    
+    // Open the auth start endpoint in a popup
+    const width = 600;
+    const height = 700;
+    const left = (screen.width - width) / 2;
+    const top = (screen.height - height) / 2;
+    
+    authWindow = window.open(
+        '{{ url_for("auth_start") }}',
+        'PlexAuth',
+        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
+    );
+    
+    if (!authWindow) {
+        statusMsg.style.display = 'block';
+        statusMsg.className = 'error-box';
+        statusMsg.textContent = 'Popup blocked! Please allow popups for this site and try again.';
+        btn.disabled = false;
+        btn.textContent = 'Authenticate with Plex';
+        return;
+    }
+    
+    statusMsg.style.display = 'block';
+    statusMsg.className = 'info-box';
+    statusMsg.textContent = 'Please complete the authentication in the popup window...';
+    
+    // Listen for messages from the popup
+    window.addEventListener('message', handleAuthMessage);
+    
+    // Start polling for auth status
+    pollInterval = setInterval(checkAuthStatus, 2000);
+    
+    // Check if popup was closed
+    const checkClosed = setInterval(() => {
+        if (authWindow.closed) {
+            clearInterval(checkClosed);
+            if (pollInterval) {
+                // Continue polling for a bit in case auth completed
+                setTimeout(() => {
+                    if (pollInterval) {
+                        clearInterval(pollInterval);
+                        const resultContainer = document.getElementById('result-container');
+                        if (resultContainer.style.display === 'none') {
+                            statusMsg.className = 'error-box';
+                            statusMsg.textContent = 'Authentication window was closed. Please try again.';
+                            btn.disabled = false;
+                            btn.textContent = 'Authenticate with Plex';
+                        }
+                    }
+                }, 3000);
+            }
+        }
+    }, 500);
+}
+
+function handleAuthMessage(event) {
+    if (event.data.type === 'plex-auth-complete') {
+        checkAuthStatus();
+    }
+}
+
+function checkAuthStatus() {
+    fetch('{{ url_for("auth_check") }}')
+        .then(response => response.json())
+        .then(data => {
+            if (data.authenticated) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                window.removeEventListener('message', handleAuthMessage);
+                
+                const statusMsg = document.getElementById('status-message');
+                const resultContainer = document.getElementById('result-container');
+                const btn = document.getElementById('auth-btn');
+                const instructions = document.getElementById('instructions');
+                const mainTitle = document.getElementById('main-title');
+                const mainSubtitle = document.getElementById('main-subtitle');
+                
+                statusMsg.style.display = 'none';
+                resultContainer.style.display = 'block';
+                btn.style.display = 'none';
+                instructions.style.display = 'none';
+                mainTitle.style.display = 'none';
+                mainSubtitle.style.display = 'none';
+                
+                document.getElementById('username').textContent = data.username;
+                document.getElementById('email').textContent = data.email;
+                document.getElementById('token-box').textContent = data.token;
+                
+                if (authWindow && !authWindow.closed) {
+                    authWindow.close();
+                }
+            } else if (data.error) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                const statusMsg = document.getElementById('status-message');
+                statusMsg.className = 'error-box';
+                statusMsg.textContent = 'Error: ' + data.error;
+                const btn = document.getElementById('auth-btn');
+                btn.disabled = false;
+                btn.textContent = 'Authenticate with Plex';
+            }
+        })
+        .catch(error => {
+            console.error('Error checking auth status:', error);
+        });
+}
+
+function copyToken() {
+    const tokenBox = document.getElementById('token-box');
+    const copyStatus = document.getElementById('copy-status');
+    
+    // Create a temporary textarea to copy from
+    const textarea = document.createElement('textarea');
+    textarea.value = tokenBox.textContent;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    
+    try {
+        document.execCommand('copy');
+        copyStatus.style.display = 'block';
+        setTimeout(() => {
+            copyStatus.style.display = 'none';
+        }, 3000);
+    } catch (err) {
+        console.error('Failed to copy token:', err);
+        alert('Failed to copy token. Please select and copy manually.');
+    } finally {
+        document.body.removeChild(textarea);
+    }
+}
+</script>
+{% endblock %}

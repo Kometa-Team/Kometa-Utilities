@@ -1,0 +1,8 @@
+{
+    "flask": {
+        "image": ":kometa-auth-service.kometa-auth-container.1",
+        "ports": {
+            "5000": "HTTP"
+        }
+    }
+}

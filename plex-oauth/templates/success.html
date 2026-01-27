@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Authentication Successful{% endblock %}
+
+{% block content %}
+<h1>✓ Authentication Successful!</h1>
+
+<div class="user-info">
+    <p><strong>Username:</strong> {{ username }}</p>
+    <p><strong>Email:</strong> {{ email }}</p>
+</div>
+
+<h2>Your Plex Access Token</h2>
+<p>Copy this token and use it in your Kometa configuration:</p>
+
+<div class="token-box" id="token">{{ token }}</div>
+
+<button class="btn" onclick="copyToken()">Copy Token</button>
+
+<div class="info-box" style="margin-top: 20px;">
+    <p>
+        <strong>Keep this token secure!</strong><br>
+        This token provides access to your Plex account. Store it safely and never share it publicly.
+    </p>
+</div>
+
+<script>
+    function copyToken() {
+        const token = document.getElementById('token').textContent;
+        navigator.clipboard.writeText(token).then(() => {
+            const btn = document.querySelector('.btn');
+            const originalText = btn.textContent;
+            btn.textContent = 'Copied!';
+            btn.style.background = '#28a745';
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.style.background = '#e5a00d';
+            }, 2000);
+        });
+    }
+</script>
+{% endblock %}

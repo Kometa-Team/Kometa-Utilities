@@ -31,8 +31,8 @@ data/
 
 # --- Seed Data ---
 # Keep the directory structure but ignore large zip files
-seed_data/*.zip
-seed_data/*.xml
+anidb-service/seed_data/*.zip
+anidb-service/seed_data/*.xml
 
 # --- Credentials & Config ---
 # Even though we use Basic Auth in Caddy, don't track private env files.

@@ -1,14 +1,33 @@
 services:
   anidb-mirror:
-    build: .
+    build: ./anidb-service
     container_name: anidb-mirror
     restart: unless-stopped
     env_file:
-      - .env
+      - ./anidb-service/.env
     volumes:
       - anidb-data:/app/data
       - anidb-db:/app/database
-      - ./seed_data:/app/seed_data:ro
+      - ./anidb-service/seed_data:/app/seed_data:ro
+
+  plex-oauth:
+    build: ./plex-oauth
+    container_name: plex-oauth
+    restart: unless-stopped
+    env_file:
+      - ./plex-oauth/.env
+    environment:
+      - ROOT_PATH=/plex-oauth
+      - SECRET_KEY=${PLEX_SECRET_KEY:-changeme-generate-random-key}
+
+  trakt-mal-oauth:
+    build: ./trakt-mal-oauth
+    container_name: trakt-mal-oauth
+    restart: unless-stopped
+    env_file:
+      - ./trakt-mal-oauth/.env
+    environment:
+      - ROOT_PATH=/trakt-mal-oauth
 
   caddy:
     image: caddy:latest

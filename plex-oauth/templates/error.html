@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}Authentication Error{% endblock %}
+
+{% block content %}
+<h1>✗ Authentication Error</h1>
+
+<div class="error-box">
+    <p><strong>Error:</strong> {{ error }}</p>
+</div>
+
+<a href="{{ url_for('index') }}" class="btn">Try Again</a>
+{% endblock %}

@@ -5,10 +5,18 @@ services:
     restart: unless-stopped
     env_file:
       - ./anidb-service/.env
+    environment:
+      - UVICORN_WORKERS=1  # Reduce for low-memory systems
     volumes:
       - anidb-data:/app/data
       - anidb-db:/app/database
       - ./anidb-service/seed_data:/app/seed_data:ro
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
 
   plex-oauth:
     build: ./plex-oauth
@@ -19,6 +27,12 @@ services:
     environment:
       - ROOT_PATH=/plex-oauth
       - SECRET_KEY=${PLEX_SECRET_KEY:-changeme-generate-random-key}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
 
   trakt-mal-oauth:
     build: ./trakt-mal-oauth
@@ -28,6 +42,12 @@ services:
       - ./trakt-mal-oauth/.env
     environment:
       - ROOT_PATH=/trakt-mal-oauth
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
 
   caddy:
     image: caddy:latest

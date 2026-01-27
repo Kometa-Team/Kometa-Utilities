@@ -267,6 +267,9 @@ async def lifespan(app: FastAPI):
     
     # Create the queue in this event loop
     update_queue = asyncio.Queue()
+    
+    # Set startup flag for healthcheck
+    app.state.starting_up = True
 
     # Extract seed data if data directory is empty
     extract_seed_data(XML_DIR, SEED_DATA_DIR)
@@ -296,15 +299,25 @@ async def lifespan(app: FastAPI):
                         xml_text = xml_file.read_text(encoding="utf-8")
                         await index_xml_to_db(int(aid), xml_text)
                         indexed_count += 1
-                        if len(xml_files) > 100 and indexed_count % 1000 == 0:
-                            print(
-                                f"   Progress: {indexed_count}/{len(xml_files)} files indexed..."
-                            )
+                        
+                        # Commit every 100 files to reduce memory pressure
+                        if indexed_count % 100 == 0:
+                            await db.commit()
+                            if len(xml_files) > 100:
+                                print(
+                                    f"   Progress: {indexed_count}/{len(xml_files)} files indexed..."
+                                )
+                            # Force garbage collection on low-memory systems
+                            import gc
+                            gc.collect()
                     except Exception as e:
                         print(f"⚠️ Error indexing {xml_file.name}: {e}")
                 print(f"✅ Indexed {indexed_count} files")
 
     worker_task = asyncio.create_task(anidb_worker())
+    
+    # Clear startup flag
+    app.state.starting_up = False
     print("✅ Service ready")
 
     yield

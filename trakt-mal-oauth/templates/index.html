@@ -110,7 +110,7 @@
             var myURL = "";
             if (mal_client_id.length == 32)
             {
-                myURL = "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=" + mal_client_id + "&code_challenge=" + code_challenge;
+                myURL = "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=" + mal_client_id + "&code_challenge=" + code_challenge + "&code_challenge_method=S256";
             }
             document.getElementById('mal_url').value = myURL;
         }

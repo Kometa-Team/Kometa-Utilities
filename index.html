@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Kometa Services</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 900px;
+            width: 100%;
+        }
+        h1 {
+            color: #2c3e50;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .subtitle {
+            text-align: center;
+            color: #7f8c8d;
+            margin-bottom: 40px;
+            font-size: 1.1rem;
+        }
+        .services {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .service-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            padding: 30px;
+            text-decoration: none;
+            color: white;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        .service-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        .service-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+        .service-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        .service-desc {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        .footer {
+            text-align: center;
+            color: #95a5a6;
+            font-size: 0.9rem;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 Kometa Services</h1>
+        <p class="subtitle">Authentication & Metadata Services</p>
+        
+        <div class="services">
+            <a href="/plex-oauth" class="service-card">
+                <div class="service-icon">📺</div>
+                <div class="service-title">Plex OAuth</div>
+                <div class="service-desc">Authenticate with Plex Media Server</div>
+            </a>
+            
+            <a href="/trakt-mal-oauth" class="service-card">
+                <div class="service-icon">🎯</div>
+                <div class="service-title">Trakt & MAL OAuth</div>
+                <div class="service-desc">Connect Trakt & MyAnimeList accounts</div>
+            </a>
+            
+            <a href="/anidb-service" class="service-card">
+                <div class="service-icon">📊</div>
+                <div class="service-title">AniDB Service</div>
+                <div class="service-desc">Cached anime metadata & API</div>
+            </a>
+        </div>
+        
+        <div class="footer">
+            <p>Kometa Utilities • <a href="https://kometa.wiki" style="color: #667eea;">kometa.wiki</a></p>
+        </div>
+    </div>
+</body>
+</html>

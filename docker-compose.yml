@@ -60,7 +60,8 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
-      - ./maintenance.html:/var/www/html/maintenance.html # Mount the page here
+      - ./index.html:/var/www/html/index.html
+      - ./maintenance.html:/var/www/html/maintenance.html
       - caddy_data:/data
       - caddy_config:/config
 

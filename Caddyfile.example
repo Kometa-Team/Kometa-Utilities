@@ -71,21 +71,15 @@ yourdomain.com {
         reverse_proxy trakt-mal-oauth:5000
     }
 
-                                                    # Handle root path - landing page and stats
-                                                    handle / {
-                                                        reverse_proxy anidb-mirror:8000
-                                                    }
+    # Handle root path - serve static landing page
+    handle / {
+        root * /var/www/html
+        file_server
+    }
 
-                                                    # Fallback for any other paths
-                                                    handle {
-                                                        reverse_proxy anidb-mirror:8000
-                                                    }
-}
-
-# ============================================================================
-# SUBDOMAIN ROUTING (Dedicated subdomain for this service)
-# ============================================================================
-# Uncomment and customize this section if deploying at anidb-service.yourdomain.com
+    # Fallback for any other paths
+    handle {
+        respond "Service not found" 404
 
 # anidb-service.yourdomain.com {
 #     # Handle errors (like when the backend is down)

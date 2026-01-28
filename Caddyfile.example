@@ -18,6 +18,35 @@ yourdomain.com {
         }
     }
 
+    # ========================================================================
+    # IMPORTANT: OAuth Callback Routes - Must bypass authentication
+    # ========================================================================
+    # If using basic auth, these callback routes MUST be defined BEFORE the
+    # basicauth directive. External services (Plex, MyAnimeList) cannot 
+    # authenticate, so callbacks must be publicly accessible.
+    # ========================================================================
+    
+    # MyAnimeList OAuth callback - NO AUTH
+    handle /trakt-mal-oauth/mal/callback* {
+        uri strip_prefix /trakt-mal-oauth
+        reverse_proxy trakt-mal-oauth:5000
+    }
+    
+    # Plex OAuth callback - NO AUTH
+    handle /plex-oauth/auth/callback* {
+        uri strip_prefix /plex-oauth
+        reverse_proxy plex-oauth:5000
+    }
+
+    # ========================================================================
+    # Optional: Basic Authentication
+    # ========================================================================
+    # Uncomment to require authentication for all routes (except callbacks above)
+    # Generate password hash: caddy hash-password
+    # basicauth * {
+    #     username $2a$14$your_bcrypt_hash_here
+    # }
+
     # Handle /anidb-service path
     # NOTE: uri strip_prefix removes /anidb-service before sending to backend
     # FastAPI receives /stats instead of /anidb-service/stats
@@ -27,10 +56,29 @@ yourdomain.com {
         reverse_proxy anidb-mirror:8000
     }
 
-    # Optional: Handle root path for other services
-    # handle / {
-    #     respond "Welcome! Available services: /anidb-service"
-    # }
+    # Handle /plex-oauth path
+    # Flask app for Plex OAuth authentication
+    handle /plex-oauth* {
+        uri strip_prefix /plex-oauth
+        reverse_proxy plex-oauth:5000
+    }
+
+    # Handle /trakt-mal-oauth path
+    # Flask app for Trakt and MyAnimeList OAuth authentication
+    handle /trakt-mal-oauth* {
+        uri strip_prefix /trakt-mal-oauth
+        reverse_proxy trakt-mal-oauth:5000
+    }
+
+    # Handle root path - landing page and stats
+    handle / {
+        reverse_proxy anidb-mirror:8000
+    }
+
+    # Fallback for any other paths
+    handle {
+        reverse_proxy anidb-mirror:8000
+    }
 }
 
 # ============================================================================

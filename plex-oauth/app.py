@@ -43,7 +43,7 @@ def index():
             <h1>🚧 Coming Soon</h1>
             <p>Plex OAuth service is currently under development.</p>
             <p style="margin-top: 2rem;">
-                <a href="https://kometa-auth-2cb6c5672416.herokuapp.com/" 
+                <a href="https://plex-oauth-0b43dcf08594.herokuapp.com/" 
                    style="color: white; text-decoration: underline; font-size: 1.1rem;">
                     Use the existing deployment here →
                 </a>

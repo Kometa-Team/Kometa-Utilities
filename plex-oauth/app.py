@@ -1,53 +1,16 @@
 """
 Plex OAuth Flask Application
-A minimal Flask app for Plex OAuth authentication
+Coming Soon
 """
 
-import os
-import uuid
-
-import requests
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
-from werkzeug.middleware.proxy_fix import ProxyFix
+from flask import Flask
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
-
-# Configure Flask for reverse proxy with path prefix
-app.config['APPLICATION_ROOT'] = os.environ.get('ROOT_PATH', '/')
-
-# Trust proxy headers for correct URL generation
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-
-# Plex API endpoints
-PLEX_API_URL = "https://plex.tv/api/v2"
-PLEX_AUTH_URL = "https://app.plex.tv/auth"
-
-# App configuration
-APP_NAME = os.environ.get("APP_NAME", "Kometa Plex Auth")
-APP_VERSION = os.environ.get("APP_VERSION", "1.0")
-
-
-def get_client_identifier():
-    """Get or create a client identifier for this session."""
-    if "client_id" not in session:
-        session["client_id"] = str(uuid.uuid4())
-    return session["client_id"]
-
-
-def get_plex_headers():
-    """Get common headers for Plex API requests."""
-    return {
-        "X-Plex-Client-Identifier": get_client_identifier(),
-        "X-Plex-Product": APP_NAME,
-        "X-Plex-Version": APP_VERSION,
-        "Accept": "application/json",
-    }
 
 
 @app.route("/")
 def index():
-    """Home page with authentication button."""
+    """Coming soon page."""
     return render_template("index.html", app_name=APP_NAME)
 
 
@@ -84,84 +47,50 @@ def auth_start():
         # Redirect to Plex auth
         return redirect(auth_url)
 
-    except requests.RequestException as e:
-        return render_template(
-            "error.html", error=f"Failed to start authentication: {str(e)}"
-        )
-
-
-@app.route("/auth/callback")
-def auth_callback():
-    """Handle the callback from Plex after authentication."""
-    # This page just closes the popup and notifies the opener
     return """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Authentication Complete</title>
+        <title>Plex OAuth - Coming Soon</title>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            .container {
+                text-align: center;
+                padding: 2rem;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                backdrop-filter: blur(10px);
+            }
+            h1 { font-size: 3rem; margin: 0 0 1rem 0; }
+            p { font-size: 1.2rem; margin: 0; }
+        </style>
     </head>
     <body>
-        <script>
-            if (window.opener) {
-                window.opener.postMessage({type: 'plex-auth-complete'}, '*');
-                window.close();
-            } else {
-                document.body.innerHTML = '<p>Authentication complete. You can close this window.</p>';
-            }
-        </script>
+        <div class="container">
+            <h1>🚧 Coming Soon</h1>
+            <p>Plex OAuth service is currently under development.</p>
+            <p style="margin-top: 2rem;">
+                <a href="https://kometa-auth-2cb6c5672416.herokuapp.com/" 
+                   style="color: white; text-decoration: underline; font-size: 1.1rem;">
+                    Use the existing deployment here →
+                </a>
+            </p>
+        </div>
     </body>
     </html>
     """
 
 
-@app.route("/auth/check")
-def auth_check():
-    """Check the status of the PIN and return auth token if available."""
-    pin_id = session.get("pin_id")
-
-    if not pin_id:
-        return jsonify({"error": "No authentication session found"}), 400
-
-    try:
-        # Check the PIN to get the auth token
-        response = requests.get(
-            f"{PLEX_API_URL}/pins/{pin_id}", headers=get_plex_headers()
-        )
-        response.raise_for_status()
-        pin_data = response.json()
-
-        auth_token = pin_data.get("authToken")
-
-        if auth_token:
-            # Get user info
-            user_response = requests.get(
-                f"{PLEX_API_URL}/user",
-                headers={**get_plex_headers(), "X-Plex-Token": auth_token},
-            )
-            user_response.raise_for_status()
-            user_data = user_response.json()
-
-            return jsonify(
-                {
-                    "authenticated": True,
-                    "token": auth_token,
-                    "username": user_data.get("username", "Unknown"),
-                    "email": user_data.get("email", "Unknown"),
-                }
-            )
-        else:
-            return jsonify({"authenticated": False})
-
-    except requests.RequestException as e:
-        return jsonify({"error": f"Failed to verify authentication: {str(e)}"}), 500
-
-
-@app.route("/health")
-def health():
-    """Health check endpoint for monitoring."""
-    return jsonify({"status": "healthy"})
-
-
 if __name__ == "__main__":
+    import os
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=os.environ.get("DEBUG", "False") == "True")

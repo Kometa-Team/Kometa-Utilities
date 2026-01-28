@@ -11,42 +11,6 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     """Coming soon page."""
-    return render_template("index.html", app_name=APP_NAME)
-
-
-@app.route("/auth/start")
-def auth_start():
-    """Start the authentication flow by creating a PIN."""
-    try:
-        # Create a PIN
-        response = requests.post(
-            f"{PLEX_API_URL}/pins",
-            headers=get_plex_headers(),
-            params={"strong": "true"},
-        )
-        response.raise_for_status()
-        pin_data = response.json()
-
-        # Store PIN ID in session
-        session["pin_id"] = pin_data["id"]
-        session["pin_code"] = pin_data["code"]
-
-        # Construct auth URL
-        script_name = os.environ.get('ROOT_PATH', '')
-        base_url = request.url_root.rstrip("/")
-        forward_url = f"{base_url}{script_name}/auth/callback"
-
-        auth_url = (
-            f"{PLEX_AUTH_URL}#?"
-            f"clientID={get_client_identifier()}&"
-            f"code={pin_data['code']}&"
-            f"forwardUrl={forward_url}&"
-            f"context[device][product]={APP_NAME}"
-        )
-
-        # Redirect to Plex auth
-        return redirect(auth_url)
-
     return """
     <!DOCTYPE html>
     <html>

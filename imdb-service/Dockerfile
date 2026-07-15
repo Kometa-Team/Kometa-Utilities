@@ -3,6 +3,8 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
+ENV PYTHONUNBUFFERED=1
+
 COPY main.py importer.py charts.py ./
 
 RUN mkdir -p /app/data

@@ -136,7 +136,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    
+
   features-fider:
     restart: always
     container_name: features-fider
@@ -214,7 +214,7 @@ services:
     restart: always
     volumes:
 #      - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
-#      - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro      
+#      - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro
       - event-data:/var/lib/clickhouse
       - event-logs:/var/log/clickhouse-server
       - ./clickhouse/logs.xml:/etc/clickhouse-server/config.d/logs.xml:ro

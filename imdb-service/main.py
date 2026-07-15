@@ -444,13 +444,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️  Could not read last_refresh: {e}")
 
-        # Rebuild chart cache from existing DB
-        try:
-            await asyncio.to_thread(charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART)
-        except Exception as e:
-            print(f"⚠️  Chart rebuild failed: {e}")
-
-        refresh_worker_task = asyncio.create_task(_refresh_scheduler())
+        # Rebuild chart cache from existing DB in the background so startup
+        # completes immediately (a full rebuild scans millions of rows).
+        refresh_worker_task = asyncio.create_task(_rebuild_charts_then_schedule())
         print("✅ IMDB Service ready")
         yield
     else:
@@ -619,6 +615,15 @@ async def _initial_import_then_schedule() -> None:
         await _run_import_pipeline()
     except Exception as e:
         print(f"❌ Initial import failed: {e}")
+    await _refresh_scheduler()
+
+
+async def _rebuild_charts_then_schedule() -> None:
+    """Rebuild the chart cache from the existing DB, then start the scheduler."""
+    try:
+        await asyncio.to_thread(charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART)
+    except Exception as e:
+        print(f"⚠️  Chart rebuild failed: {e}")
     await _refresh_scheduler()
 
 
@@ -1676,9 +1681,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     """Return a visual stats dashboard with per-table refresh controls."""
     from importer import DATASET_FILES, DATASET_REFRESH_DAYS, MIN_ROWS, STEM_TO_TABLE
 
-    base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
-    if ROOT_PATH:
-        base += ROOT_PATH
+    # Use a relative base (ROOT_PATH only) so fetches inherit the page's
+    # scheme/host. Building an absolute URL from request.url.scheme yields
+    # "http" behind a TLS-terminating proxy and triggers mixed-content blocks.
+    base = ROOT_PATH
 
     table_meta = {
         STEM_TO_TABLE[stem]: {

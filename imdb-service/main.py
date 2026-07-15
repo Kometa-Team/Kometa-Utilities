@@ -1801,9 +1801,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     function fmt(n) {{ return n == null ? '–' : Number(n).toLocaleString(); }}
     function fmtTime(t) {{ return t ? new Date(t).toLocaleString() : '–'; }}
 
-    function renderTables(counts, progress) {{
+    function renderTables(counts, progress, updated) {{
         const grid = document.getElementById('tables');
         grid.innerHTML = '';
+        updated = updated || {{}};
         for (const [table, meta] of Object.entries(TABLE_META)) {{
             const rows = counts[table];
             const prog = (progress || {{}})[table];
@@ -1829,7 +1830,8 @@ async def dashboard(request: Request) -> HTMLResponse:
                     <div class="meta">
                         Source: ${{meta.file}}<br>
                         Refresh interval: ${{meta.refresh_days}} day(s)<br>
-                        Min rows: ${{fmt(meta.min_rows)}}
+                        Min rows: ${{fmt(meta.min_rows)}}<br>
+                        Updated: ${{fmtTime(updated[table])}}
                     </div>
                     <button onclick="refresh('${{table}}')" ${{busy ? 'disabled' : ''}}>↻ Refresh</button>
                     <div class="tbl-status">${{statusTxt}}</div>
@@ -1859,7 +1861,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         document.getElementById('svc-status').textContent = d.status || '–';
         document.getElementById('last-refresh').textContent = fmtTime(d.last_refresh);
         document.getElementById('last-activity').textContent = fmtTime(d.last_activity);
-        renderTables(d.table_counts || {{}}, d.import_progress);
+        renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated);
         renderCharts(d.charts_cached);
         renderParental(d.parental_cache);
 
@@ -1867,7 +1869,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             if (!polling) polling = setInterval(load, 2000);
         }} else if (polling) {{
             clearInterval(polling); polling = null;
-            renderTables(d.table_counts || {{}}, null);
+            renderTables(d.table_counts || {{}}, null, d.table_updated);
         }}
     }}
 
@@ -1906,12 +1908,17 @@ async def get_stats() -> Dict[str, Any]:
             row = await cursor.fetchone()
             counts: Dict[str, Any] = json.loads(row[0]) if row else {}
 
+            cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'table_updated'")
+            row = await cursor.fetchone()
+            table_updated: Dict[str, Any] = json.loads(row[0]) if row and row[0] else {}
+
         return {
             "status": "online",
             "phase": current_phase,
             "last_refresh": last_refresh,
             "last_activity": last_activity,
             "table_counts": counts,
+            "table_updated": table_updated,
             "parental_cache": parental_cache,
             "charts_cached": list(charts.chart_cache.keys()),
             "download_progress": download_progress,

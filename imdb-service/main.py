@@ -1681,9 +1681,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     """Return a visual stats dashboard with per-table refresh controls."""
     from importer import DATASET_FILES, DATASET_REFRESH_DAYS, MIN_ROWS, STEM_TO_TABLE
 
-    base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
-    if ROOT_PATH:
-        base += ROOT_PATH
+    # Use a relative base (ROOT_PATH only) so fetches inherit the page's
+    # scheme/host. Building an absolute URL from request.url.scheme yields
+    # "http" behind a TLS-terminating proxy and triggers mixed-content blocks.
+    base = ROOT_PATH
 
     table_meta = {
         STEM_TO_TABLE[stem]: {

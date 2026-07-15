@@ -574,6 +574,10 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     create_schema(conn)
     conn.execute("INSERT INTO import_meta VALUES ('last_refresh', '2026-03-24T03:00:00+00:00')")
     conn.execute("INSERT INTO import_meta VALUES ('row_counts', ?)", (json.dumps(row_counts),))
+    table_updated = {t: "2026-03-24T03:00:00+00:00" for t in row_counts}
+    conn.execute(
+        "INSERT INTO import_meta VALUES ('table_updated', ?)", (json.dumps(table_updated),)
+    )
     conn.commit()
     conn.close()
 
@@ -595,6 +599,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     for table in row_counts:
         assert table in data["table_counts"], f"Missing table count: {table}"
         assert data["table_counts"][table] == row_counts[table]
+        assert data["table_updated"][table] == "2026-03-24T03:00:00+00:00"
     assert data["parental_cache"]["items_cached"] == 0
     assert data["parental_cache"]["flag_counts"] == {
         "nudity": 0,

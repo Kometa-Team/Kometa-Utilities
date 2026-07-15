@@ -508,12 +508,22 @@ def run_full_import(
             except json.JSONDecodeError:
                 existing_counts = {}
 
+        existing_updated: dict[str, str] = {}
+        cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'table_updated'")
+        row = cursor.fetchone()
+        if row and row[0]:
+            try:
+                existing_updated = json.loads(row[0])
+            except json.JSONDecodeError:
+                existing_updated = {}
+
         if full_refresh:
             for table in TABLE_COLUMNS:
                 _delete_table(conn, table)
             conn.commit()
 
         row_counts: dict[str, int] = existing_counts.copy()
+        table_updated: dict[str, str] = existing_updated.copy()
         for stem in import_stems:
             gz_path = gz_paths[stem]
             table = STEM_TO_TABLE.get(stem)
@@ -534,6 +544,7 @@ def run_full_import(
             count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
             conn.execute("COMMIT")
             row_counts[table] = count
+            table_updated[table] = datetime.now(timezone.utc).isoformat()
             if on_table_done:
                 on_table_done(table, count)
             print(f"   {count:,} rows")
@@ -546,6 +557,10 @@ def run_full_import(
         conn.execute(
             "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
             ("row_counts", json.dumps(row_counts)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
+            ("table_updated", json.dumps(table_updated)),
         )
         conn.commit()
         conn.close()
@@ -613,7 +628,17 @@ def run_direct_import(
         except json.JSONDecodeError:
             existing_counts = {}
 
+    existing_updated: dict[str, str] = {}
+    cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'table_updated'")
+    row = cursor.fetchone()
+    if row and row[0]:
+        try:
+            existing_updated = json.loads(row[0])
+        except json.JSONDecodeError:
+            existing_updated = {}
+
     row_counts: dict[str, int] = existing_counts.copy()
+    table_updated: dict[str, str] = existing_updated.copy()
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -635,6 +660,7 @@ def run_direct_import(
             _progress_cb = (lambda t, cb: lambda n: cb(t, n))(_t, _cb) if _cb else None
             count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
             row_counts[table] = count
+            table_updated[table] = datetime.now(timezone.utc).isoformat()
             if on_table_done:
                 on_table_done(table, count)
             print(f"   {count:,} rows")
@@ -646,6 +672,10 @@ def run_direct_import(
         conn.execute(
             "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
             ("row_counts", json.dumps(row_counts)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
+            ("table_updated", json.dumps(table_updated)),
         )
         conn.execute("COMMIT")
         print("Direct import complete")

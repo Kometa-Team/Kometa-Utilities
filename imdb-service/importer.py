@@ -3,8 +3,6 @@
 import asyncio
 import gzip
 import json
-import os
-import shutil
 import sqlite3
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -64,6 +62,7 @@ CREATE TABLE IF NOT EXISTS title_episode (
     episodeNumber INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_ep_parent ON title_episode(parentTconst);
+CREATE INDEX IF NOT EXISTS idx_ep_parent_season_episode ON title_episode(parentTconst, seasonNumber, episodeNumber);
 
 CREATE TABLE IF NOT EXISTS title_principals (
     tconst TEXT NOT NULL,
@@ -463,136 +462,6 @@ def _delete_table(conn: sqlite3.Connection, table: str) -> None:
     if table not in ALLOWED_TABLES:
         raise ValueError(f"Unexpected table: {table}")
     conn.execute(f"DELETE FROM {table}")  # nosec B608 - table name validated against ALLOWED_TABLES
-
-
-def run_full_import(
-    gz_paths: dict[str, Path],
-    live_db: Path,
-    changed_stems: Optional[list[str]] = None,
-    min_rows_override: Optional[int] = None,
-    on_table_start: Optional[Callable[[str], None]] = None,
-    on_table_done: Optional[Callable[[str, int], None]] = None,
-    on_table_progress: Optional[Callable[[str, int], None]] = None,
-) -> None:
-    """
-    Import all dataset files into a shadow DB, then atomically replace live_db.
-
-    gz_paths: dict mapping dataset stem → local .tsv.gz path
-    live_db: path to the live SQLite DB to replace
-    min_rows_override: if set, use this as min_rows for all tables (0 = no check; for tests)
-    """
-    shadow_db = live_db.parent / "imdb_shadow.db"
-    import_stems = changed_stems if changed_stems is not None else list(gz_paths.keys())
-    full_refresh = not live_db.exists()
-
-    # Clean up any leftover shadow from a previous failed run
-    if shadow_db.exists():
-        shadow_db.unlink()
-
-    conn = None
-    try:
-        if live_db.exists():
-            shutil.copy2(live_db, shadow_db)
-        conn = sqlite3.connect(shadow_db)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        create_schema(conn)
-        conn.commit()
-
-        existing_counts: dict[str, int] = {}
-        cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'row_counts'")
-        row = cursor.fetchone()
-        if row and row[0]:
-            try:
-                existing_counts = json.loads(row[0])
-            except json.JSONDecodeError:
-                existing_counts = {}
-
-        existing_updated: dict[str, str] = {}
-        cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'table_updated'")
-        row = cursor.fetchone()
-        if row and row[0]:
-            try:
-                existing_updated = json.loads(row[0])
-            except json.JSONDecodeError:
-                existing_updated = {}
-
-        if full_refresh:
-            for table in TABLE_COLUMNS:
-                _delete_table(conn, table)
-            conn.commit()
-
-        row_counts: dict[str, int] = existing_counts.copy()
-        table_updated: dict[str, str] = existing_updated.copy()
-        for stem in import_stems:
-            gz_path = gz_paths[stem]
-            table = STEM_TO_TABLE.get(stem)
-            if table is None:
-                print(f"Unknown stem {stem!r}, skipping")
-                continue
-            columns = TABLE_COLUMNS[table]
-            min_rows = (
-                min_rows_override if min_rows_override is not None else MIN_ROWS.get(table, 0)
-            )
-            print(f"Importing {stem} -> {table}...")
-            if on_table_start:
-                on_table_start(table)
-            conn.execute("BEGIN")
-            _delete_table(conn, table)
-            _t, _cb = table, on_table_progress
-            _progress_cb = (lambda t, cb: lambda n: cb(t, n))(_t, _cb) if _cb else None
-            count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
-            conn.execute("COMMIT")
-            row_counts[table] = count
-            table_updated[table] = datetime.now(timezone.utc).isoformat()
-            if on_table_done:
-                on_table_done(table, count)
-            print(f"   {count:,} rows")
-
-        # Record import timestamp and row counts
-        conn.execute(
-            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
-            ("last_refresh", datetime.now(timezone.utc).isoformat()),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
-            ("row_counts", json.dumps(row_counts)),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
-            ("table_updated", json.dumps(table_updated)),
-        )
-        conn.commit()
-        conn.close()
-        conn = None
-
-        # Atomic swap — requires live_db and shadow_db on the same filesystem
-        try:
-            os.replace(shadow_db, live_db)
-        except OSError as e:
-            if e.errno == 18:  # EXDEV: cross-device link
-                raise RuntimeError(
-                    f"Cannot atomically swap {shadow_db} -> {live_db}: different filesystems. "
-                    "Ensure DATA_DIR and TMP_DIR are on the same volume."
-                ) from e
-            raise
-
-        print("Import complete, DB swapped")
-
-    except Exception:
-        if conn:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:  # nosec B110
-                pass
-            try:
-                conn.close()
-            except Exception:  # nosec B110
-                pass
-        if shadow_db.exists():
-            shadow_db.unlink(missing_ok=True)
-        traceback.print_exc()
-        raise
 
 
 def run_direct_import(

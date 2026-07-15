@@ -1,4 +1,35 @@
 services:
+
+  transfer:
+    image: dutchcoders/transfer.sh:latest
+    container_name: transfer
+    ports:
+      - "8080:8080"
+    volumes:
+      - transfer-data:/data
+      - transfer-tmp:/tmp/transfer
+    command:
+      - --listener
+      - ":8080"
+      - --provider
+      - local
+      - --basedir
+      - /data
+      - --temp-path
+      - /tmp/transfer
+      - --purge-days
+      - "14"
+      - --purge-interval
+      - "1"
+      - --rate-limit
+      - "60"
+#      - --web-path
+#      - /web/
+      # Uncomment to enable VirusTotal:
+      - --virustotal-key
+      - ${VIRUSTOTAL_KEY:-changeme-generate-random-key}
+    restart: unless-stopped
+
   anidb-mirror:
     image: ghcr.io/kometa-team/anidb-mirror:latest
     container_name: anidb-mirror
@@ -105,7 +136,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
+    
   features-fider:
     restart: always
     container_name: features-fider
@@ -115,26 +146,6 @@ services:
     depends_on:
       fider-db:
         condition: service_healthy
-
-  image-compare:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      # Mount reference images directory (adjust path as needed for your remote server)
-      - /path/to/Default-Images:/app/ref_images:ro
-      # Mount generated images directory
-      - ./create_defaults/defaults-en:/app/defaults-en:ro
-    environment:
-      # Optional: Set reference directory path
-      REF_DIR: /app/ref_images
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/tree"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
 
   imdb-service:
     image: ghcr.io/kometa-team/imdb-service:latest
@@ -182,11 +193,135 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  plausible_db:
+    # Plausible v2.1.1 was tested against PostgreSQL versions 15 and 16
+    # https://github.com/plausible/analytics/blob/v2.1.1/.github/workflows/elixir.yml#L21-L32
+    image: postgres:14-alpine
+    container_name: plausible_db
+    restart: always
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      start_period: 1m
+
+  plausible_events_db:
+#    image: clickhouse/clickhouse-server:24.3.3.102-alpine
+    image: clickhouse/clickhouse-server:24.12-alpine
+    container_name: plausible_events_db
+    restart: always
+    volumes:
+#      - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
+#      - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro      
+      - event-data:/var/lib/clickhouse
+      - event-logs:/var/log/clickhouse-server
+      - ./clickhouse/logs.xml:/etc/clickhouse-server/config.d/logs.xml:ro
+      # This makes ClickHouse bind to IPv4 only, since Docker doesn't enable IPv6 in bridge networks by default.
+      # Fixes "Listen [::]:9000 failed: Address family for hostname not supported" warnings.
+      - ../plausible/clickhouse/ipv4-only.xml:/etc/clickhouse-server/config.d/ipv4-only.xml:ro
+      # The following configuration files make ClickHouse consume less resources, which is useful for small setups.
+      # https://clickhouse.com/docs/en/operations/tips#using-less-than-16gb-of-ram
+      - ../plausible/clickhouse/low-resources.xml:/etc/clickhouse-server/config.d/low-resources.xml:ro
+      - ../plausible/clickhouse/default-profile-low-resources-overrides.xml:/etc/clickhouse-server/users.d/default-profile-low-resources-overrides.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1",
+        ]
+      start_period: 1m
+
+  plausible:
+    image: ghcr.io/plausible/community-edition:v3.2.0
+    container_name: plausible
+    restart: always
+    command: sh -c "/entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
+    depends_on:
+      plausible_db:
+        condition: service_healthy
+      plausible_events_db:
+        condition: service_healthy
+    volumes:
+      - plausible-data:/var/lib/plausible
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    ports:
+      - 8002:8000
+    env_file:
+      - ../plausible/plausible-conf.env
+
+  cache:
+    image: valkey/valkey:9.0.3
+    volumes:
+    - redis-data:/data
+    command: [valkey-server, --save, '60', '1', --loglevel, warning]
+    restart: always
+    read_only: true
+
+  database:
+    image: postgres:18-alpine
+    volumes:
+    - postgres-data:/var/lib/postgresql
+    env_file:
+    - ../weblate/environment
+    restart: always
+
+  weblate:
+    image: weblate/weblate
+    depends_on:
+    - cache
+    - database
+    ports:
+      - 8987:8080
+    volumes:
+      - weblate-data:/app/data
+      - weblate-cache:/app/cache
+    env_file:
+    - ../weblate/environment
+    restart: always
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+
 volumes:
   anidb-data:
   imdb-data:
   anidb-db:
   simkl-data:
   fider-db:
+    external: true
+    name: kometa-utilities_fider-db
   caddy_data:
   caddy_config:
+  transfer-data:
+  transfer-tmp:
+  clamav-socket:
+  clamav-db:
+  db-data:
+    driver: local
+  event-data:
+  event-logs:
+  plausible-data:
+  weblate-cache:
+    external: true
+    name: kometa-utilities_weblate-cache
+  weblate-data:
+    external: true
+    name: kometa-utilities_weblate-data
+  postgres-data:
+    external: true
+    name: kometa-utilities_postgres-data
+  redis-data:
+    external: true
+    name: kometa-utilities_redis-data

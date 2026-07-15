@@ -19,7 +19,7 @@ import charts
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from importer import SCHEMA_SQL
+from importer import ALLOWED_TABLES, SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
@@ -71,6 +71,7 @@ current_phase: str = "idle"  # idle | downloading | importing | building_charts
 download_progress: Dict[str, str] = {}  # dataset stem → pending|downloading|done
 import_progress: Dict[str, Any] = {}  # table → {status, rows}
 last_activity: Optional[str] = None  # ISO timestamp of last phase change
+_refresh_lock: asyncio.Lock = asyncio.Lock()  # guards manual single-table refreshes
 proxy_health: Dict[str, datetime] = {}  # proxy URL -> cooldown-until UTC
 parental_browser_contexts: Dict[str, Any] = {}
 parental_browser_manager: Any = None
@@ -540,6 +541,76 @@ async def _run_import_pipeline() -> None:
 
     _set_phase("idle")
     print("✅ Refresh complete")
+
+
+async def _refresh_single_table(stem: str) -> None:
+    """Download and re-import a single dataset, then rebuild charts."""
+    global last_refresh, download_progress, import_progress
+    from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
+
+    async with _refresh_lock:
+        table = STEM_TO_TABLE[stem]
+        print(f"🔄 Manual refresh for {stem}...")
+
+        _set_phase("downloading")
+        download_progress = {stem: "pending"}
+        import_progress = {}
+
+        def _on_file_start(filename: str) -> None:
+            for s, fname in DATASET_FILES.items():
+                if fname == filename:
+                    download_progress[s] = "downloading"
+                    break
+
+        def _on_file_done(filename: str) -> None:
+            for s, fname in DATASET_FILES.items():
+                if fname == filename:
+                    download_progress[s] = "done"
+                    break
+
+        gz_paths, _changed = await download_datasets(
+            DATA_DIR, _on_file_start, _on_file_done, stems=[stem]
+        )
+
+        _set_phase("importing")
+        import_progress = {table: {"status": "pending", "rows": 0}}
+
+        def _on_table_start(t: str) -> None:
+            import_progress[t] = {"status": "importing", "rows": 0}
+
+        def _on_table_progress(t: str, count: int) -> None:
+            import_progress[t] = {"status": "importing", "rows": count}
+
+        def _on_table_done(t: str, count: int) -> None:
+            import_progress[t] = {"status": "done", "rows": count}
+
+        await asyncio.to_thread(
+            run_direct_import,
+            gz_paths,
+            DB_PATH,
+            [stem],
+            None,
+            _on_table_start,
+            _on_table_done,
+            _on_table_progress,
+        )
+
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute(
+                    "SELECT value FROM import_meta WHERE key = 'last_refresh'"
+                )
+                row = await cursor.fetchone()
+                if row:
+                    last_refresh = row[0]
+        except Exception as e:
+            print(f"⚠️  Could not read last_refresh after import: {e}")
+
+        _set_phase("building_charts")
+        await asyncio.to_thread(charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART)
+
+        _set_phase("idle")
+        print(f"✅ Manual refresh for {stem} complete")
 
 
 async def _initial_import_then_schedule() -> None:
@@ -1479,8 +1550,8 @@ def _add_join_filters(
             params.append(s.strip())
 
 
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request) -> HTMLResponse:
+@app.get("/endpoints", response_class=HTMLResponse)
+async def endpoints(request: Request) -> HTMLResponse:
     """Return HTML landing page with links to available endpoints."""
     base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
     if ROOT_PATH:
@@ -1586,6 +1657,230 @@ async def root(request: Request) -> HTMLResponse:
     )
 
 
+@app.post("/refresh/{table}")
+async def refresh_table(table: str) -> Dict[str, str]:
+    """Trigger a manual re-download and re-import of a single table's dataset."""
+    if table not in ALLOWED_TABLES:
+        raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
+    if _refresh_lock.locked() or current_phase != "idle":
+        raise HTTPException(status_code=409, detail="A refresh is already in progress")
+
+    stem = TABLE_TO_STEM[table]
+    asyncio.create_task(_refresh_single_table(stem))
+    return {"status": "started", "table": table}
+
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request) -> HTMLResponse:
+    """Return a visual stats dashboard with per-table refresh controls."""
+    from importer import DATASET_FILES, DATASET_REFRESH_DAYS, MIN_ROWS, STEM_TO_TABLE
+
+    base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    if ROOT_PATH:
+        base += ROOT_PATH
+
+    table_meta = {
+        STEM_TO_TABLE[stem]: {
+            "stem": stem,
+            "file": DATASET_FILES[stem],
+            "refresh_days": DATASET_REFRESH_DAYS.get(stem, 0),
+            "min_rows": MIN_ROWS.get(STEM_TO_TABLE[stem], 0),
+        }
+        for stem in DATASET_FILES
+    }
+
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>IMDB Service Dashboard</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0; padding: 24px; background: #0f1419; color: #e6e6e6;
+        }}
+        .wrap {{ max-width: 1100px; margin: 0 auto; }}
+        header {{
+            display: flex; align-items: baseline; justify-content: space-between;
+            flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
+        }}
+        h1 {{ margin: 0; font-size: 24px; color: #f5c518; }}
+        a {{ color: #5ab0ff; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .statusbar {{
+            display: flex; gap: 24px; flex-wrap: wrap; background: #1a2029;
+            padding: 16px; border-radius: 8px; margin-bottom: 24px;
+        }}
+        .status-item {{ font-size: 13px; }}
+        .status-item .label {{ color: #8a94a6; display: block; margin-bottom: 4px; }}
+        .badge {{
+            display: inline-block; padding: 3px 10px; border-radius: 12px;
+            font-size: 12px; font-weight: 600; text-transform: uppercase;
+        }}
+        .badge.idle {{ background: #2d4a2d; color: #7fd97f; }}
+        .badge.downloading {{ background: #3a3a1a; color: #e0d94f; }}
+        .badge.importing {{ background: #1a3a4a; color: #5ab0ff; }}
+        .badge.building_charts {{ background: #3a1a4a; color: #c07fff; }}
+        h2 {{ font-size: 16px; color: #b8c0cc; border-bottom: 1px solid #2a323d;
+             padding-bottom: 8px; margin-top: 32px; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+                gap: 16px; }}
+        .card {{ background: #1a2029; border-radius: 8px; padding: 16px; }}
+        .card h3 {{ margin: 0 0 4px; font-size: 15px; color: #fff; }}
+        .card .stem {{ font-size: 12px; color: #8a94a6; margin-bottom: 12px; }}
+        .rowcount {{ font-size: 22px; font-weight: 700; color: #f5c518; }}
+        .meta {{ font-size: 12px; color: #8a94a6; margin: 8px 0; line-height: 1.6; }}
+        .bar {{ height: 6px; background: #2a323d; border-radius: 3px; overflow: hidden;
+               margin: 8px 0; }}
+        .bar > span {{ display: block; height: 100%; background: #7fd97f; }}
+        .bar.low > span {{ background: #e05f5f; }}
+        .bar.warn > span {{ background: #e0d94f; }}
+        button {{
+            background: #f5c518; color: #0f1419; border: none; padding: 8px 14px;
+            border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px;
+            margin-top: 8px;
+        }}
+        button:hover {{ background: #ffd633; }}
+        button:disabled {{ background: #3a3f47; color: #6a707a; cursor: not-allowed; }}
+        .tbl-status {{ font-size: 12px; margin-top: 8px; height: 16px; }}
+        ul {{ list-style: none; padding: 0; margin: 0; columns: 2; }}
+        li {{ font-size: 13px; padding: 4px 0; }}
+        .count {{ color: #8a94a6; }}
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <header>
+            <h1>🎬 IMDB Service Dashboard</h1>
+            <a href="{base}/endpoints">View API Documentation →</a>
+        </header>
+
+        <div class="statusbar">
+            <div class="status-item">
+                <span class="label">Phase</span>
+                <span id="phase" class="badge idle">–</span>
+            </div>
+            <div class="status-item">
+                <span class="label">Status</span>
+                <span id="svc-status">–</span>
+            </div>
+            <div class="status-item">
+                <span class="label">Last Refresh</span>
+                <span id="last-refresh">–</span>
+            </div>
+            <div class="status-item">
+                <span class="label">Last Activity</span>
+                <span id="last-activity">–</span>
+            </div>
+        </div>
+
+        <h2>Tables</h2>
+        <div class="grid" id="tables"></div>
+
+        <h2>Charts</h2>
+        <ul id="charts"><li>Loading…</li></ul>
+
+        <h2>Parental Cache</h2>
+        <ul id="parental"><li>Loading…</li></ul>
+    </div>
+
+    <script>
+    const TABLE_META = {json.dumps(table_meta)};
+    const BASE = {json.dumps(base)};
+    let polling = null;
+
+    function fmt(n) {{ return n == null ? '–' : Number(n).toLocaleString(); }}
+    function fmtTime(t) {{ return t ? new Date(t).toLocaleString() : '–'; }}
+
+    function renderTables(counts, progress) {{
+        const grid = document.getElementById('tables');
+        grid.innerHTML = '';
+        for (const [table, meta] of Object.entries(TABLE_META)) {{
+            const rows = counts[table];
+            const prog = (progress || {{}})[table];
+            const pct = meta.min_rows ? Math.min(100, (rows / meta.min_rows) * 100) : 100;
+            let barCls = 'bar';
+            if (rows != null && meta.min_rows) {{
+                if (rows < meta.min_rows) barCls = 'bar low';
+                else if (rows < meta.min_rows * 1.1) barCls = 'bar warn';
+            }}
+            let statusTxt = '';
+            if (prog) {{
+                statusTxt = prog.status === 'done'
+                    ? '✅ ' + fmt(prog.rows) + ' rows'
+                    : '⏳ ' + prog.status + (prog.rows ? ' — ' + fmt(prog.rows) : '');
+            }}
+            const busy = !!polling;
+            grid.innerHTML += `
+                <div class="card">
+                    <h3>${{table}}</h3>
+                    <div class="stem">${{meta.stem}}</div>
+                    <div class="rowcount">${{fmt(rows)}}</div>
+                    <div class="${{barCls}}"><span style="width:${{pct}}%"></span></div>
+                    <div class="meta">
+                        Source: ${{meta.file}}<br>
+                        Refresh interval: ${{meta.refresh_days}} day(s)<br>
+                        Min rows: ${{fmt(meta.min_rows)}}
+                    </div>
+                    <button onclick="refresh('${{table}}')" ${{busy ? 'disabled' : ''}}>↻ Refresh</button>
+                    <div class="tbl-status">${{statusTxt}}</div>
+                </div>`;
+        }}
+    }}
+
+    function renderCharts(names) {{
+        const el = document.getElementById('charts');
+        if (!names || !names.length) {{ el.innerHTML = '<li>No charts cached</li>'; return; }}
+        el.innerHTML = names.map(n => `<li>${{n}}</li>`).join('');
+    }}
+
+    function renderParental(pc) {{
+        const el = document.getElementById('parental');
+        if (!pc) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        el.innerHTML = Object.entries(pc)
+            .map(([k, v]) => `<li>${{k}}: <span class="count">${{fmt(v)}}</span></li>`).join('');
+    }}
+
+    async function load() {{
+        const r = await fetch(BASE + '/stats');
+        const d = await r.json();
+        const phaseEl = document.getElementById('phase');
+        phaseEl.textContent = d.phase || '–';
+        phaseEl.className = 'badge ' + (d.phase || 'idle');
+        document.getElementById('svc-status').textContent = d.status || '–';
+        document.getElementById('last-refresh').textContent = fmtTime(d.last_refresh);
+        document.getElementById('last-activity').textContent = fmtTime(d.last_activity);
+        renderTables(d.table_counts || {{}}, d.import_progress);
+        renderCharts(d.charts_cached);
+        renderParental(d.parental_cache);
+
+        if (d.phase && d.phase !== 'idle') {{
+            if (!polling) polling = setInterval(load, 2000);
+        }} else if (polling) {{
+            clearInterval(polling); polling = null;
+            renderTables(d.table_counts || {{}}, null);
+        }}
+    }}
+
+    async function refresh(table) {{
+        const r = await fetch(BASE + '/refresh/' + table, {{ method: 'POST' }});
+        if (r.status === 409) {{ alert('A refresh is already in progress'); return; }}
+        if (!r.ok) {{ alert('Refresh failed: ' + r.status); return; }}
+        if (!polling) polling = setInterval(load, 2000);
+        load();
+    }}
+
+    load();
+    </script>
+</body>
+</html>
+"""
+    )
+
+
 @app.get("/stats")
 async def get_stats() -> Dict[str, Any]:
     """Return service health: status, phase, progress indicators, and per-table row counts."""
@@ -1613,6 +1908,8 @@ async def get_stats() -> Dict[str, Any]:
             "table_counts": counts,
             "parental_cache": parental_cache,
             "charts_cached": list(charts.chart_cache.keys()),
+            "download_progress": download_progress,
+            "import_progress": import_progress,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

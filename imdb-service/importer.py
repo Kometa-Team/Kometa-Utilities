@@ -366,16 +366,22 @@ async def download_datasets(
     data_dir: Path,
     on_file_start: Optional[Callable[[str], None]] = None,
     on_file_done: Optional[Callable[[str], None]] = None,
+    stems: Optional[list[str]] = None,
 ) -> tuple[dict[str, Path], list[str]]:
     """
-    Download all 7 IMDB dataset files concurrently to data_dir.
+    Download IMDB dataset files concurrently to data_dir.
+
+    If stems is provided, only download those datasets. Otherwise download all 7.
 
     Returns a tuple of:
       - dict mapping stem → local Path
       - list of stems whose local files changed this run
     """
     data_dir.mkdir(parents=True, exist_ok=True)
-    paths: dict[str, Path] = {stem: data_dir / filename for stem, filename in DATASET_FILES.items()}
+    targets = {
+        stem: filename for stem, filename in DATASET_FILES.items() if stems is None or stem in stems
+    }
+    paths: dict[str, Path] = {stem: data_dir / filename for stem, filename in targets.items()}
     manifest = _load_manifest(data_dir)
 
     async with httpx.AsyncClient(timeout=600.0) as client:
@@ -383,12 +389,12 @@ async def download_datasets(
             _download_one(
                 client, stem, filename, paths[stem], manifest, on_file_start, on_file_done
             )
-            for stem, filename in DATASET_FILES.items()
+            for stem, filename in targets.items()
         ]
         results = await asyncio.gather(*tasks)
 
     changed_stems: list[str] = []
-    for stem, (changed, updated_manifest) in zip(DATASET_FILES.keys(), results):
+    for stem, (changed, updated_manifest) in zip(targets.keys(), results):
         manifest[stem] = updated_manifest
         if changed:
             changed_stems.append(stem)
@@ -408,6 +414,9 @@ STEM_TO_TABLE: dict[str, str] = {
     "title.principals": "title_principals",
     "name.basics": "name_basics",
 }
+
+# Reverse mapping: table name → dataset stem
+TABLE_TO_STEM: dict[str, str] = {v: k for k, v in STEM_TO_TABLE.items()}
 
 # Column definitions per table (must match TSV file column order)
 TABLE_COLUMNS: dict[str, list[str]] = {

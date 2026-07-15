@@ -665,12 +665,23 @@ def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
     }
 
 
-def test_root_returns_html(tmp_path, monkeypatch):
+def test_root_returns_dashboard(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
     client = TestClient(main.app, raise_server_exceptions=False)
     response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "IMDB Service Dashboard" in response.text
+
+
+def test_endpoints_returns_html(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/endpoints")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "IMDB" in response.text
@@ -1883,3 +1894,103 @@ async def test_initial_import_then_schedule_runs_pipeline_on_failure():
 
     assert pipeline_called
     assert scheduler_called
+
+
+def test_dashboard_renders_html(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "ROOT_PATH", "")
+    client = TestClient(main.app)
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    body = response.text
+    assert "IMDB Service Dashboard" in body
+    assert "View API Documentation" in body
+    # Embedded table metadata for all 7 tables
+    assert "title_basics" in body
+    assert "name_basics" in body
+    assert "TABLE_META" in body
+
+
+def test_dashboard_respects_root_path(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "ROOT_PATH", "/imdb-service")
+    client = TestClient(main.app)
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "/imdb-service/" in response.text
+
+
+def test_refresh_unknown_table_returns_404(monkeypatch):
+    import main
+
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post("/refresh/not_a_table")
+    assert response.status_code == 404
+
+
+def test_refresh_conflict_when_not_idle(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "current_phase", "importing")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post("/refresh/title_basics")
+    assert response.status_code == 409
+
+
+def test_refresh_starts_background_task(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "current_phase", "idle")
+
+    called = {}
+
+    async def fake_refresh(stem):
+        called["stem"] = stem
+
+    monkeypatch.setattr(main, "_refresh_single_table", fake_refresh)
+    client = TestClient(main.app)
+    response = client.post("/refresh/title_ratings")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "started"
+    assert data["table"] == "title_ratings"
+
+
+async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
+    import main
+
+    db_path = tmp_path / "imdb.db"
+
+    downloaded = {}
+
+    async def fake_download(data_dir, on_start=None, on_done=None, stems=None):
+        downloaded["stems"] = stems
+        return {"title.ratings": tmp_path / "title.ratings.tsv.gz"}, ["title.ratings"]
+
+    imported = {}
+
+    def fake_run_direct_import(gz_paths, live_db, changed_stems, *args):
+        imported["changed_stems"] = changed_stems
+
+    rebuilt = {}
+
+    def fake_rebuild(db, votes):
+        rebuilt["done"] = True
+
+    import importer
+
+    monkeypatch.setattr(importer, "download_datasets", fake_download)
+    monkeypatch.setattr(importer, "run_direct_import", fake_run_direct_import)
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.charts, "rebuild_all_charts", fake_rebuild)
+    monkeypatch.setattr(main, "current_phase", "idle")
+
+    await main._refresh_single_table("title.ratings")
+
+    assert downloaded["stems"] == ["title.ratings"]
+    assert imported["changed_stems"] == ["title.ratings"]
+    assert rebuilt["done"] is True
+    assert main.current_phase == "idle"

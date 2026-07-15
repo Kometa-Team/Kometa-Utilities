@@ -28,3 +28,9 @@ services:
     build:
       context: ./simkl-oauth
       dockerfile: Dockerfile
+
+  imdb-service:
+    pull_policy: build
+    build:
+      context: ./imdb-service
+      dockerfile: Dockerfile

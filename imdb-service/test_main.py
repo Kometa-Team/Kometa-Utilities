@@ -295,13 +295,13 @@ def _make_all_gz_files(tmp_path):
     return gz_paths
 
 
-def test_run_full_import_produces_populated_db(tmp_path):
+def test_run_direct_import_produces_populated_db(tmp_path):
     gz_paths = _make_all_gz_files(tmp_path)
     live_db = tmp_path / "imdb.db"
 
-    from importer import run_full_import
+    from importer import run_direct_import
 
-    run_full_import(gz_paths, live_db, min_rows_override=0)
+    run_direct_import(gz_paths, live_db, min_rows_override=0)
 
     assert live_db.exists()
     conn = sqlite3.connect(live_db)
@@ -313,13 +313,13 @@ def test_run_full_import_produces_populated_db(tmp_path):
     conn.close()
 
 
-def test_run_full_import_updates_only_changed_tables(tmp_path):
+def test_run_direct_import_updates_only_changed_tables(tmp_path):
     gz_paths = _make_all_gz_files(tmp_path)
     live_db = tmp_path / "imdb.db"
 
-    from importer import run_full_import
+    from importer import run_direct_import
 
-    run_full_import(gz_paths, live_db, min_rows_override=0)
+    run_direct_import(gz_paths, live_db, min_rows_override=0)
 
     updated_ratings = _make_tsv_gz(
         "tconst\taverageRating\tnumVotes",
@@ -333,7 +333,7 @@ def test_run_full_import_updates_only_changed_tables(tmp_path):
     )
     ratings_path = tmp_path / "gz" / "title.ratings.tsv.gz"
     ratings_path.write_bytes(updated_ratings)
-    run_full_import(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
+    run_direct_import(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
 
     conn = sqlite3.connect(live_db)
     rating_row = conn.execute(
@@ -348,8 +348,8 @@ def test_run_full_import_updates_only_changed_tables(tmp_path):
     assert basics_row == ("Title 1", "Action")
 
 
-def test_run_full_import_leaves_live_db_on_failure(tmp_path):
-    """If import fails, the original live DB is untouched."""
+def test_run_direct_import_leaves_live_db_on_failure(tmp_path):
+    """If import fails, the original live DB is untouched (WAL rollback)."""
     live_db = tmp_path / "imdb.db"
     # Create a "live" DB with known content
     conn = sqlite3.connect(live_db)
@@ -365,10 +365,10 @@ def test_run_full_import_leaves_live_db_on_failure(tmp_path):
     bad_gz.write_bytes(b"not valid gzip content")
     gz_paths = {"title.basics": bad_gz}
 
-    from importer import run_full_import
+    from importer import run_direct_import
 
     with pytest.raises(Exception, match="."):  # noqa: B017
-        run_full_import(gz_paths, live_db, min_rows_override=0)
+        run_direct_import(gz_paths, live_db, min_rows_override=0)
 
     # Live DB must still be the original
     conn = sqlite3.connect(live_db)

@@ -412,6 +412,7 @@ async def _ensure_db_schema() -> None:
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA_SQL)
         await db.commit()
 
@@ -469,7 +470,7 @@ async def lifespan(app: FastAPI):
 async def _run_import_pipeline() -> None:
     """Download datasets and import into shadow DB, then rebuild charts."""
     global last_refresh, download_progress, import_progress
-    from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_full_import
+    from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
 
     print("🔄 Starting daily refresh...")
 
@@ -514,7 +515,7 @@ async def _run_import_pipeline() -> None:
         import_progress[table] = {"status": "done", "rows": count}
 
     await asyncio.to_thread(
-        run_full_import,
+        run_direct_import,
         gz_paths,
         DB_PATH,
         changed_stems,

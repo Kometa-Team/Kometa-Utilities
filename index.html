@@ -88,6 +88,23 @@
             font-size: 0.9rem;
             opacity: 0.9;
         }
+        .section-divider {
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #bdc3c7, transparent);
+            margin: 40px 0 30px;
+            border: none;
+        }
+        .section-title {
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 30px;
+        }
+        .services.external .service-card {
+            background: linear-gradient(135deg, #2980b9 0%, #16a085 100%);
+        }
         .footer {
             text-align: center;
             color: #95a5a6;
@@ -203,6 +220,63 @@
                 </div>
                 <div class="service-title">IMDB Service</div>
                 <div class="service-desc">Cached IMDB charts &amp; metadata</div>
+            </a>
+        </div>
+
+        <hr class="section-divider">
+        <p class="section-title">External Services</p>
+
+        <div class="services external">
+            <a href="https://features.kometa.wiki" class="service-card">
+                <div class="service-icon">
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Feature Requests">
+                        <rect width="48" height="48" rx="10" fill="rgba(255,255,255,0.15)"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="700" font-size="24"
+                              fill="#ffffff">💡</text>
+                    </svg>
+                </div>
+                <div class="service-title">Feature Requests</div>
+                <div class="service-desc">Suggest and vote on new features</div>
+            </a>
+
+            <a href="https://translations.kometa.wiki" class="service-card">
+                <div class="service-icon">
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Translations">
+                        <rect width="48" height="48" rx="10" fill="rgba(255,255,255,0.15)"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="700" font-size="24"
+                              fill="#ffffff">🌐</text>
+                    </svg>
+                </div>
+                <div class="service-title">Translations</div>
+                <div class="service-desc">Help translate Kometa into your language</div>
+            </a>
+
+            <a href="https://analytics.kometa.wiki" class="service-card">
+                <div class="service-icon">
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Analytics">
+                        <rect width="48" height="48" rx="10" fill="rgba(255,255,255,0.15)"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="700" font-size="24"
+                              fill="#ffffff">📊</text>
+                    </svg>
+                </div>
+                <div class="service-title">Analytics</div>
+                <div class="service-desc">Anonymous usage statistics dashboard</div>
+            </a>
+
+            <a href="https://transfer.kometa.wiki" class="service-card">
+                <div class="service-icon">
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="File Transfer">
+                        <rect width="48" height="48" rx="10" fill="rgba(255,255,255,0.15)"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="700" font-size="24"
+                              fill="#ffffff">📤</text>
+                    </svg>
+                </div>
+                <div class="service-title">File Transfer</div>
+                <div class="service-desc">Temporary file sharing service</div>
             </a>
         </div>
 

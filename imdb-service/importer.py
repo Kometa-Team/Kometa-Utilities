@@ -174,8 +174,8 @@ def import_table(
     """
     Parse a gzip TSV file and bulk-insert into the given table.
 
-    Runs inside a single transaction per file; rolls back on any error.
-    Validates that at least min_rows were inserted before committing.
+    Does NOT manage transactions — the caller is responsible for BEGIN/COMMIT/ROLLBACK.
+    Validates that at least min_rows were inserted.
 
     Returns the number of rows inserted.
     """
@@ -184,37 +184,28 @@ def import_table(
 
     count = 0
     batch: list = []
-    try:
-        conn.execute("BEGIN")
-        with gzip.open(gz_path, "rt", encoding="utf-8") as f:
-            f.readline()  # skip header row
-            for line in f:
-                parts = line.rstrip("\n").split("\t")
-                row = tuple(_coerce(col, val) for col, val in zip(columns, parts))
-                batch.append(row)
-                if len(batch) >= BATCH_SIZE:
-                    conn.executemany(sql, batch)
-                    count += len(batch)
-                    batch = []
-                    if on_progress:
-                        on_progress(count)
-            if batch:
+    with gzip.open(gz_path, "rt", encoding="utf-8") as f:
+        f.readline()  # skip header row
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            row = tuple(_coerce(col, val) for col, val in zip(columns, parts))
+            batch.append(row)
+            if len(batch) >= BATCH_SIZE:
                 conn.executemany(sql, batch)
                 count += len(batch)
+                batch = []
+                if on_progress:
+                    on_progress(count)
+        if batch:
+            conn.executemany(sql, batch)
+            count += len(batch)
 
-        if count < min_rows:
-            raise ValueError(
-                f"import_table({table}): too few rows — got {count}, expected ≥ {min_rows}"
-            )
+    if count < min_rows:
+        raise ValueError(
+            f"import_table({table}): too few rows — got {count}, expected ≥ {min_rows}"
+        )
 
-        conn.execute("COMMIT")
-        return count
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:  # nosec B110
-            pass
-        raise
+    return count
 
 
 IMDB_BASE_URL = "https://datasets.imdbws.com"
@@ -527,11 +518,12 @@ def run_full_import(
             print(f"Importing {stem} -> {table}...")
             if on_table_start:
                 on_table_start(table)
+            conn.execute("BEGIN")
             _delete_table(conn, table)
-            conn.commit()
             _t, _cb = table, on_table_progress
             _progress_cb = (lambda t, cb: lambda n: cb(t, n))(_t, _cb) if _cb else None
             count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
+            conn.execute("COMMIT")
             row_counts[table] = count
             if on_table_done:
                 on_table_done(table, count)
@@ -566,6 +558,10 @@ def run_full_import(
     except Exception:
         if conn:
             try:
+                conn.execute("ROLLBACK")
+            except Exception:  # nosec B110
+                pass
+            try:
                 conn.close()
             except Exception:  # nosec B110
                 pass
@@ -573,3 +569,84 @@ def run_full_import(
             shadow_db.unlink(missing_ok=True)
         traceback.print_exc()
         raise
+
+
+def run_direct_import(
+    gz_paths: dict[str, Path],
+    live_db: Path,
+    changed_stems: Optional[list[str]] = None,
+    min_rows_override: int = 0,
+    on_table_start: Optional[Callable[[str], None]] = None,
+    on_table_done: Optional[Callable[[str, int], None]] = None,
+    on_table_progress: Optional[Callable[[str, int], None]] = None,
+) -> None:
+    """
+    Import dataset files directly into the live DB using WAL mode.
+
+    Uses BEGIN IMMEDIATE so readers see the pre-import state until COMMIT.
+    On failure the transaction is rolled back and the live DB is untouched.
+
+    gz_paths: dict mapping dataset stem → local .tsv.gz path
+    live_db: path to the live SQLite DB
+    """
+    import_stems = changed_stems if changed_stems is not None else list(gz_paths.keys())
+    conn = sqlite3.connect(live_db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    create_schema(conn)
+
+    existing_counts: dict[str, int] = {}
+    cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'row_counts'")
+    row = cursor.fetchone()
+    if row and row[0]:
+        try:
+            existing_counts = json.loads(row[0])
+        except json.JSONDecodeError:
+            existing_counts = {}
+
+    row_counts: dict[str, int] = existing_counts.copy()
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for stem in import_stems:
+            gz_path = gz_paths[stem]
+            table = STEM_TO_TABLE.get(stem)
+            if table is None:
+                print(f"Unknown stem {stem!r}, skipping")
+                continue
+            columns = TABLE_COLUMNS[table]
+            min_rows = (
+                min_rows_override if min_rows_override is not None else MIN_ROWS.get(table, 0)
+            )
+            print(f"Direct-importing {stem} -> {table}...")
+            if on_table_start:
+                on_table_start(table)
+            _delete_table(conn, table)
+            _t, _cb = table, on_table_progress
+            _progress_cb = (lambda t, cb: lambda n: cb(t, n))(_t, _cb) if _cb else None
+            count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
+            row_counts[table] = count
+            if on_table_done:
+                on_table_done(table, count)
+            print(f"   {count:,} rows")
+
+        conn.execute(
+            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
+            ("last_refresh", datetime.now(timezone.utc).isoformat()),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
+            ("row_counts", json.dumps(row_counts)),
+        )
+        conn.execute("COMMIT")
+        print("Direct import complete")
+
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:  # nosec B110
+            pass
+        traceback.print_exc()
+        raise
+    finally:
+        conn.close()

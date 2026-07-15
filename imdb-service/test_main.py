@@ -67,6 +67,7 @@ def test_create_schema_creates_indexes():
         assert "idx_aka_tconst" in indexes
         assert "idx_pr_nconst" in indexes
         assert "idx_ep_parent" in indexes
+        assert "idx_ep_parent_season_episode" in indexes
         conn.close()
     finally:
         db_path.unlink(missing_ok=True)
@@ -963,7 +964,7 @@ def test_parental_endpoint_uses_cached_value_when_fresh(tmp_path, monkeypatch):
             "None",
             "Mild",
             "Severe",
-            "2026-04-04T00:00:00+00:00",
+            "2026-07-10T00:00:00+00:00",
         ),
     )
     conn.commit()
@@ -1999,3 +2000,194 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
     assert imported["changed_stems"] == ["title.ratings"]
     assert rebuilt["done"] is True
     assert main.current_phase == "idle"
+
+
+def _seed_episode_test_db(db_path):
+    """Seed DB with episode data for episode-rating endpoint tests."""
+    conn = sqlite3.connect(db_path)
+    from importer import create_schema
+
+    create_schema(conn)
+    conn.execute(
+        "INSERT INTO title_basics VALUES ('tt0096697','tvSeries','The Simpsons','The Simpsons',0,1989,NULL,22,'Animation,Comedy,Family')"
+    )
+    conn.execute(
+        "INSERT INTO title_basics VALUES ('tt0701173','tvEpisode','Episode S5E12','Episode S5E12',0,1993,NULL,22,'Animation,Comedy,Family')"
+    )
+    conn.execute(
+        "INSERT INTO title_basics VALUES ('tt0701174','tvEpisode','Episode S5E13','Episode S5E13',0,1993,NULL,22,'Animation,Comedy,Family')"
+    )
+    conn.execute(
+        "INSERT INTO title_basics VALUES ('tt0701175','tvEpisode','Episode S6E1','Episode S6E1',0,1994,NULL,22,'Animation,Comedy,Family')"
+    )
+    conn.execute(
+        "INSERT INTO title_basics VALUES ('tt0701176','tvEpisode','Episode S6E2 No Ratings','Episode S6E2 No Ratings',0,1994,NULL,22,'Animation,Comedy,Family')"
+    )
+    conn.execute("INSERT INTO title_ratings VALUES ('tt0701173', 8.3, 12345)")
+    conn.execute("INSERT INTO title_ratings VALUES ('tt0701174', 8.1, 11200)")
+    conn.execute("INSERT INTO title_ratings VALUES ('tt0701175', 7.9, 10500)")
+    # tt0701176 intentionally has no rating
+    conn.execute("INSERT INTO title_episode VALUES ('tt0701173','tt0096697',5,12)")
+    conn.execute("INSERT INTO title_episode VALUES ('tt0701174','tt0096697',5,13)")
+    conn.execute("INSERT INTO title_episode VALUES ('tt0701175','tt0096697',6,1)")
+    conn.execute("INSERT INTO title_episode VALUES ('tt0701176','tt0096697',6,2)")
+    conn.commit()
+    conn.close()
+
+
+def test_get_episode_rating_returns_single_episode(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.get("/episode-rating/tt0096697?season=5&episode=12")
+    assert response.status_code == 200
+    data = response.json()
+    assert data == {
+        "tconst": "tt0701173",
+        "parentTconst": "tt0096697",
+        "seasonNumber": 5,
+        "episodeNumber": 12,
+        "averageRating": 8.3,
+        "numVotes": 12345,
+    }
+
+
+def test_get_episode_rating_returns_episode_without_rating(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.get("/episode-rating/tt0096697?season=6&episode=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tconst"] == "tt0701176"
+    assert data["averageRating"] is None
+    assert data["numVotes"] is None
+
+
+def test_get_episode_rating_returns_404_for_unknown_episode(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/episode-rating/tt0096697?season=99&episode=99")
+    assert response.status_code == 404
+
+
+def test_get_episode_rating_returns_503_when_no_db(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/episode-rating/tt0096697?season=1&episode=1")
+    assert response.status_code == 503
+
+
+def test_get_episode_ratings_returns_all_episodes(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.get("/episode-ratings/tt0096697")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["parentTconst"] == "tt0096697"
+    assert data["total_episodes"] == 4
+    assert "5" in data["seasons"]
+    assert "6" in data["seasons"]
+    assert data["seasons"]["5"]["12"]["tconst"] == "tt0701173"
+    assert data["seasons"]["5"]["12"]["averageRating"] == 8.3
+    assert data["seasons"]["6"]["2"]["averageRating"] is None
+
+
+def test_get_episode_ratings_filters_by_season(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.get("/episode-ratings/tt0096697?season=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["parentTconst"] == "tt0096697"
+    assert data["season"] == 5
+    assert data["total_episodes"] == 2
+    assert "12" in data["episodes"]
+    assert "13" in data["episodes"]
+    assert "seasons" not in data
+
+
+def test_get_episode_ratings_returns_empty_for_unknown_parent(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.get("/episode-ratings/tt9999999")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["parentTconst"] == "tt9999999"
+    assert data["total_episodes"] == 0
+    assert data["seasons"] == {}
+
+
+def test_get_episode_ratings_returns_503_when_no_db(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/episode-ratings/tt0096697")
+    assert response.status_code == 503
+
+
+def test_get_episode_rating_returns_500_on_db_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+
+    class BrokenConnection:
+        async def __aenter__(self):
+            raise RuntimeError("db error")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(main.aiosqlite, "connect", lambda *_args, **_kwargs: BrokenConnection())
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/episode-rating/tt0096697?season=5&episode=12")
+    assert response.status_code == 500
+    assert "Episode rating error" in response.json()["detail"]
+
+
+def test_get_episode_ratings_returns_500_on_db_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_episode_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+
+    class BrokenConnection:
+        async def __aenter__(self):
+            raise RuntimeError("db error")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(main.aiosqlite, "connect", lambda *_args, **_kwargs: BrokenConnection())
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/episode-ratings/tt0096697")
+    assert response.status_code == 500
+    assert "Episode ratings error" in response.json()["detail"]

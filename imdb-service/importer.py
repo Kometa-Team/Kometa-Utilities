@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS title_episode (
     episodeNumber INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_ep_parent ON title_episode(parentTconst);
+CREATE INDEX IF NOT EXISTS idx_ep_parent_season_episode ON title_episode(parentTconst, seasonNumber, episodeNumber);
 
 CREATE TABLE IF NOT EXISTS title_principals (
     tconst TEXT NOT NULL,

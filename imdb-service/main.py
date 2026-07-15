@@ -1636,6 +1636,16 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 
     <div class="endpoint">
+        <strong>GET /episode-rating/{{parent_imdb_id}}?season={{int}}&amp;episode={{int}}</strong> - Rating for one episode<br>
+        <code>curl "{base}/episode-rating/tt0096697?season=5&amp;episode=12"</code>
+    </div>
+
+    <div class="endpoint">
+        <strong>GET /episode-ratings/{{parent_imdb_id}}?season={{int}}</strong> - All episode ratings for a show<br>
+        <code>curl "{base}/episode-ratings/tt0096697"</code>
+    </div>
+
+    <div class="endpoint">
         <strong>GET /parental/{{imdb_id}}</strong> - Cached IMDb parental guide severities<br>
         <code>curl "{base}/parental/tt0111161"</code>
     </div>
@@ -1991,6 +2001,112 @@ async def get_genres(imdb_id: str) -> Dict[str, Any]:
         "field": field,
         "imdb_id": imdb_id,
         "result": result,
+    }
+
+
+@app.get("/episode-rating/{parent_imdb_id}")
+async def get_episode_rating(
+    parent_imdb_id: str,
+    season: int,
+    episode: int,
+) -> Dict[str, Any]:
+    """Return rating metadata for a single episode of a series."""
+    if not _db_is_ready():
+        raise HTTPException(status_code=503, detail="Service initializing")
+
+    sql = """
+        SELECT te.tconst, te.parentTconst, te.seasonNumber, te.episodeNumber,
+               tr.averageRating, tr.numVotes
+        FROM title_episode te
+        LEFT JOIN title_ratings tr ON te.tconst = tr.tconst
+        WHERE te.parentTconst = ? AND te.seasonNumber = ? AND te.episodeNumber = ?
+    """
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(sql, (parent_imdb_id, season, episode))
+            row = await cursor.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Episode rating error: {e}")
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Episode not found for {parent_imdb_id} S{season:02d}E{episode:02d}",
+        )
+
+    return {
+        "tconst": row["tconst"],
+        "parentTconst": row["parentTconst"],
+        "seasonNumber": row["seasonNumber"],
+        "episodeNumber": row["episodeNumber"],
+        "averageRating": row["averageRating"],
+        "numVotes": row["numVotes"],
+    }
+
+
+@app.get("/episode-ratings/{parent_imdb_id}")
+async def get_episode_ratings(
+    parent_imdb_id: str,
+    season: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Return all episode ratings for a series, optionally filtered to one season."""
+    if not _db_is_ready():
+        raise HTTPException(status_code=503, detail="Service initializing")
+
+    params: list = [parent_imdb_id]
+    sql = """
+        SELECT te.tconst, te.seasonNumber, te.episodeNumber,
+               tr.averageRating, tr.numVotes
+        FROM title_episode te
+        LEFT JOIN title_ratings tr ON te.tconst = tr.tconst
+        WHERE te.parentTconst = ?
+    """
+    if season is not None:
+        sql += " AND te.seasonNumber = ?"
+        params.append(season)
+
+    sql += " ORDER BY te.seasonNumber, te.episodeNumber"
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Episode ratings error: {e}")
+
+    if season is not None:
+        episodes: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            ep_num = str(row["episodeNumber"])
+            episodes[ep_num] = {
+                "tconst": row["tconst"],
+                "averageRating": row["averageRating"],
+                "numVotes": row["numVotes"],
+            }
+        return {
+            "parentTconst": parent_imdb_id,
+            "season": season,
+            "total_episodes": len(episodes),
+            "episodes": episodes,
+        }
+
+    seasons: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in rows:
+        season_num = str(row["seasonNumber"])
+        ep_num = str(row["episodeNumber"])
+        seasons.setdefault(season_num, {})[ep_num] = {
+            "tconst": row["tconst"],
+            "averageRating": row["averageRating"],
+            "numVotes": row["numVotes"],
+        }
+
+    return {
+        "parentTconst": parent_imdb_id,
+        "total_episodes": sum(len(eps) for eps in seasons.values()),
+        "seasons": seasons,
     }
 
 

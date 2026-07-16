@@ -826,10 +826,8 @@ def _extract_parental_guide_regex(html_text: str) -> Dict[str, str]:
 
 def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
     """Parse IMDb parental-guide HTML into Kometa-compatible category labels."""
-    if _html_has_no_parental_guide_notice(html_text):
-        raise HTTPException(status_code=404, detail="No parental guide found")
-
     # If the browser path extracted ratings via JS, it injected a JSON comment.
+    # Check this first because it is the most reliable source.
     js_match = re.search(r"<!-- kometa-parental-js:({.*?}) -->", html_text)
     if js_match:
         try:
@@ -839,6 +837,9 @@ def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
                 return _normalize_parental_payload(js_results)
         except json.JSONDecodeError:
             pass
+
+    if _html_has_no_parental_guide_notice(html_text):
+        raise HTTPException(status_code=404, detail="No parental guide found")
 
     parser = _ParentalGuideParser()
     parser.feed(html_text)

@@ -51,7 +51,7 @@ ${DOMAIN} {
     handle_errors {
         @maintenance expression {err.status_code} in [502, 503, 504]
         handle @maintenance {
-            rewrite * /maintenance.html
+            rewrite * /maintenance.html?path={path}&host={host}
             file_server {
                 root /var/www/html
             }
@@ -102,7 +102,7 @@ ${SUBDOMAIN} {
     handle_errors {
         @maintenance expression {err.status_code} in [502, 503, 504]
         handle @maintenance {
-            rewrite * /maintenance.html
+            rewrite * /maintenance.html?path={path}&host={host}
             file_server {
                 root /var/www/html
             }

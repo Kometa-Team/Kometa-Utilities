@@ -110,6 +110,40 @@ def _proxy_log_label(proxy_url: Optional[str]) -> str:
         return "invalid-proxy"
 
 
+async def _safe_page_content(page: Any, max_retries: int = 3) -> str:
+    """Call page.content() safely, retrying if the page is still navigating.
+
+    Playwright raises an error when page.content() is called while the page is
+    actively navigating. This helper waits for networkidle between retries.
+    """
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    except ImportError:
+        PlaywrightTimeoutError = Exception  # type: ignore[misc,assignment]
+
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            return cast(str, await page.content())
+        except Exception as e:
+            last_error = e
+            err_msg = str(e).lower()
+            if "navigating" in err_msg or "changing the content" in err_msg:
+                _parental_log(
+                    "browser_content_navigating",
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    error=str(e),
+                )
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except PlaywrightTimeoutError:
+                    await page.wait_for_timeout(500)
+                continue
+            raise
+    raise last_error  # type: ignore[misc]
+
+
 def _parental_log(event: str, imdb_id: Optional[str] = None, **fields: Any) -> None:
     """Emit structured logs for the parental-guide fetch flow."""
     if not PARENTAL_GUIDE_LOGGING_ENABLED:
@@ -157,7 +191,7 @@ async def _save_parental_failure_artifacts(
         html_path = PARENTAL_BROWSER_SCREENSHOT_DIR / f"{stem}.html"
         meta_path = PARENTAL_BROWSER_SCREENSHOT_DIR / f"{stem}.json"
 
-        html_text = cast(str, await page.content())
+        html_text = await _safe_page_content(page)
         html_path.write_text(html_text, encoding="utf-8")
 
         metadata = {
@@ -942,7 +976,7 @@ async def _wait_for_parental_page_ready(page: Any) -> None:
     not_ready_count = 0
 
     while asyncio.get_running_loop().time() < deadline:
-        html_text = cast(str, await page.content())
+        html_text = await _safe_page_content(page)
         if _html_has_parental_markers(html_text):
             _parental_log("browser_selector_ready", selector=advisory_selector)
             return
@@ -998,7 +1032,7 @@ async def _wait_for_parental_page_ready(page: Any) -> None:
                 )
         await page.wait_for_timeout(250)
 
-    html_text = cast(str, await page.content())
+    html_text = await _safe_page_content(page)
     if _html_has_parental_markers(html_text):
         _parental_log("browser_selector_ready", selector=advisory_selector)
         return
@@ -1125,7 +1159,7 @@ async def _fetch_parental_guide_html_via_browser(
                         )
 
                     # Early check for a block page before the full ready-wait loop.
-                    early_html = cast(str, await page.content())
+                    early_html = await _safe_page_content(page)
                     if _html_looks_blocked(early_html):
                         raise HTTPException(
                             status_code=403,
@@ -1163,7 +1197,7 @@ async def _fetch_parental_guide_html_via_browser(
                             return results;
                         }
                         """)
-                    html_text = cast(str, await page.content())
+                    html_text = await _safe_page_content(page)
                     if js_results:
                         _parental_log(
                             "browser_js_extraction",

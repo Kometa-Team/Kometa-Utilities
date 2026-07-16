@@ -2147,8 +2147,13 @@ async def dashboard(request: Request) -> HTMLResponse:
     function renderParental(pc) {{
         const el = document.getElementById('parental');
         if (!pc) {{ el.innerHTML = '<li>No data</li>'; return; }}
-        el.innerHTML = Object.entries(pc)
-            .map(([k, v]) => `<li>${{k}}: <span class="count">${{fmt(v)}}</span></li>`).join('');
+        const items = [`<li>items_cached: <span class="count">${{fmt(pc.items_cached)}}</span></li>`];
+        if (pc.flag_counts && typeof pc.flag_counts === 'object') {{
+            Object.entries(pc.flag_counts).forEach(([k, v]) => {{
+                items.push(`<li>${{k}}: <span class="count">${{fmt(v)}}</span></li>`);
+            }});
+        }}
+        el.innerHTML = items.join('');
     }}
 
     async function load() {{

@@ -25,6 +25,7 @@ from importer import ALLOWED_TABLES, SCHEMA_SQL, TABLE_TO_STEM
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "imdb.db"
+CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 REFRESH_HOUR = int(os.getenv("REFRESH_HOUR", "3"))
 MIN_VOTES_CHART = int(os.getenv("MIN_VOTES_CHART", "25000"))
@@ -543,7 +544,11 @@ async def _run_import_pipeline() -> None:
             chart_progress = {"current": name, "completed": completed, "total": total}
 
         await asyncio.to_thread(
-            charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART, _on_chart_progress
+            charts.rebuild_all_charts,
+            DB_PATH,
+            MIN_VOTES_CHART,
+            _on_chart_progress,
+            CHART_CACHE_PATH,
         )
     finally:
         chart_progress = None
@@ -624,7 +629,11 @@ async def _refresh_single_table(stem: str) -> None:
                 chart_progress = {"current": name, "completed": completed, "total": total}
 
             await asyncio.to_thread(
-                charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART, _on_chart_progress
+                charts.rebuild_all_charts,
+                DB_PATH,
+                MIN_VOTES_CHART,
+                _on_chart_progress,
+                CHART_CACHE_PATH,
             )
         finally:
             chart_progress = None
@@ -643,8 +652,18 @@ async def _initial_import_then_schedule() -> None:
 
 
 async def _rebuild_charts_then_schedule() -> None:
-    """Rebuild the chart cache from the existing DB, then start the scheduler."""
+    """Load or rebuild the chart cache from the existing DB, then start the scheduler."""
     global chart_progress
+
+    # If a saved cache exists and is newer than the DB file, load it and skip the
+    # expensive full scan. Charts are rebuilt after imports when the DB changes.
+    if charts._cache_is_fresh(CHART_CACHE_PATH, DB_PATH) and charts.load_chart_cache(
+        CHART_CACHE_PATH
+    ):
+        print("✅ Chart cache loaded from disk (fresh)")
+        await _refresh_scheduler()
+        return
+
     _set_phase("building_charts")
     try:
 
@@ -653,7 +672,11 @@ async def _rebuild_charts_then_schedule() -> None:
             chart_progress = {"current": name, "completed": completed, "total": total}
 
         await asyncio.to_thread(
-            charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART, _on_chart_progress
+            charts.rebuild_all_charts,
+            DB_PATH,
+            MIN_VOTES_CHART,
+            _on_chart_progress,
+            CHART_CACHE_PATH,
         )
     except Exception as e:
         print(f"⚠️  Chart rebuild failed: {e}")

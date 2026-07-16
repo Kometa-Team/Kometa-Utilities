@@ -53,3 +53,14 @@ caddy_config/
 # --- OS Specifics ---
 .DS_Store
 Thumbs.db
+
+# --- Local tooling & IDE state ---
+.claude/
+.opencode/
+.coverage
+.vscode/mcp.json
+.github/copilot-instructions.md
+simkl-service.txt
+
+# Agent/project docs can be committed intentionally; ignore by default
+AGENTS.md

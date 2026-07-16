@@ -1089,6 +1089,9 @@ def test_parental_endpoint_uses_cached_value_when_fresh(tmp_path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["cached"] is True
+    assert data["cached_at"] == "2026-07-10T00:00:00+00:00"
+    assert data["cache_age_days"] >= 0
+    assert data["ttl_days"] == 30
     assert data["parental_guide"]["Nudity"] == "Mild"
     assert data["parental_guide"]["Frightening"] == "Severe"
 
@@ -1232,6 +1235,9 @@ def test_parental_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch
     assert response.status_code == 200
     data = response.json()
     assert data["cached"] is False
+    assert data["cached_at"] is not None
+    assert data["cache_age_days"] == 0
+    assert data["ttl_days"] == main.PARENTAL_GUIDE_TTL_DAYS
     assert data["parental_guide"] == {
         "Nudity": "Mild",
         "Violence": "Moderate",

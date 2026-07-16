@@ -1415,8 +1415,10 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
     )
 
 
-async def _query_parental_cache(imdb_id: str) -> tuple[Optional[Dict[str, str]], Optional[bool]]:
-    """Read cached parental-guide data and indicate whether it is expired."""
+async def _query_parental_cache(
+    imdb_id: str,
+) -> tuple[Optional[Dict[str, str]], Optional[bool], Optional[str]]:
+    """Read cached parental-guide data, expiry flag, and last-updated timestamp."""
     await _ensure_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1424,7 +1426,7 @@ async def _query_parental_cache(imdb_id: str) -> tuple[Optional[Dict[str, str]],
         cursor = await db.execute("SELECT * FROM imdb_parental WHERE imdb_id = ?", (imdb_id,))
         row = await cursor.fetchone()
         if not row:
-            return None, None
+            return None, None, None
         updated_at = row["updated_at"]
         expired = True
         if updated_at:
@@ -1445,13 +1447,28 @@ async def _query_parental_cache(imdb_id: str) -> tuple[Optional[Dict[str, str]],
                 }
             ),
             expired,
+            updated_at,
         )
 
 
-async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> None:
-    """Upsert cached parental-guide data for a title."""
+def _parental_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
+    """Return the number of whole days since the cache was last updated."""
+    if not cached_at:
+        return None
+    try:
+        updated_dt = datetime.fromisoformat(cached_at)
+        if updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - updated_dt).days
+    except (ValueError, TypeError):
+        return None
+
+
+async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
+    """Upsert cached parental-guide data for a title and return the updated_at timestamp."""
     await _ensure_db_schema()
 
+    updated_at = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
@@ -1472,10 +1489,11 @@ async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> None
                 parental["Profanity"],
                 parental["Alcohol"],
                 parental["Frightening"],
-                datetime.now(timezone.utc).isoformat(),
+                updated_at,
             ),
         )
         await db.commit()
+    return updated_at
 
 
 async def _get_parental_cache_stats() -> Dict[str, Any]:
@@ -2392,20 +2410,40 @@ async def get_parental_guide(
         raise HTTPException(status_code=503, detail="Service initializing")
 
     _parental_log("endpoint_start", imdb_id, ignore_cache=ignore_cache)
-    cached, expired = (None, None) if ignore_cache else await _query_parental_cache(imdb_id)
+    cached, expired, cached_at = (
+        (None, None, None)
+        if ignore_cache
+        else await _query_parental_cache(imdb_id)
+    )
     if cached and expired is False:
-        _parental_log("endpoint_cache_hit", imdb_id)
-        return {"imdb_id": imdb_id, "cached": True, "parental_guide": cached}
+        _parental_log("endpoint_cache_hit", imdb_id, cached_at=cached_at)
+        return {
+            "imdb_id": imdb_id,
+            "cached": True,
+            "cached_at": cached_at,
+            "cache_age_days": _parental_cache_age_days(cached_at),
+            "ttl_days": PARENTAL_GUIDE_TTL_DAYS,
+            "parental_guide": cached,
+        }
     if cached:
-        _parental_log("endpoint_cache_stale", imdb_id, expired=expired)
+        _parental_log("endpoint_cache_stale", imdb_id, expired=expired, cached_at=cached_at)
     else:
         _parental_log("endpoint_cache_miss", imdb_id)
 
     html_text = await _fetch_parental_guide_html(imdb_id)
     parental = _parse_parental_guide_html(html_text)
-    await _update_parental_cache(imdb_id, parental)
-    _parental_log("endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys())))
-    return {"imdb_id": imdb_id, "cached": False, "parental_guide": parental}
+    cached_at = await _update_parental_cache(imdb_id, parental)
+    _parental_log(
+        "endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys()))
+    )
+    return {
+        "imdb_id": imdb_id,
+        "cached": False,
+        "cached_at": cached_at,
+        "cache_age_days": 0,
+        "ttl_days": PARENTAL_GUIDE_TTL_DAYS,
+        "parental_guide": parental,
+    }
 
 
 @app.get("/title/{imdb_id}")

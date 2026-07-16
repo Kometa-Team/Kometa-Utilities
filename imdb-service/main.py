@@ -1667,7 +1667,7 @@ def _build_keywords_query(imdb_id: str, after: Optional[str] = None) -> str:
         + imdb_id
         + '") { keywords(first: 250'
         + pagination
-        + ") { pageInfo { hasNextPage endCursor } edges { node { interestScore { usersInterested usersVoted } keyword { id text { text } } } } } } } }"
+        + ") { pageInfo { hasNextPage endCursor } edges { node { interestScore { usersInterested usersVoted } keyword { id text { text } } } } } } }"
     )
 
 
@@ -2374,7 +2374,9 @@ async def endpoints(request: Request) -> HTMLResponse:
     <div class="endpoint">
         <strong>GET /chart/{{chart_name}}</strong> - Pre-computed ranked chart<br>
         <code>curl "{base}/chart/top_movies?limit=10"</code><br>
-        Available charts: top_movies, top_shows, lowest_rated, top_english, top_indian, top_tamil, top_telugu, top_malayalam
+        Available charts: top_movies, top_shows, lowest_rated, top_english, top_indian, top_tamil,
+        top_telugu, top_malayalam, popular_movies, popular_shows, box_office, trending_india,
+        trending_tamil, trending_telugu
     </div>
 
     <div class="endpoint">
@@ -2405,6 +2407,11 @@ async def endpoints(request: Request) -> HTMLResponse:
     <div class="endpoint">
         <strong>GET /parental/{{imdb_id}}</strong> - Cached IMDb parental guide severities<br>
         <code>curl "{base}/parental/tt0111161"</code>
+    </div>
+
+    <div class="endpoint">
+        <strong>GET /keywords/{{imdb_id}}</strong> - Cached IMDb keywords with interest/vote scores<br>
+        <code>curl "{base}/keywords/tt0111161"</code>
     </div>
 
     <h2>API Documentation</h2>

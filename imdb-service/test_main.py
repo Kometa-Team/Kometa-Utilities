@@ -1141,6 +1141,9 @@ def test_endpoints_returns_html(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "IMDB" in response.text
+    assert "/keywords/" in response.text
+    assert "popular_movies" in response.text
+    assert "box_office" in response.text
 
 
 def _seed_full_test_db(db_path):
@@ -1911,6 +1914,31 @@ def test_keywords_endpoint_returns_502_on_graphql_error(tmp_path, monkeypatch):
         response = client.get("/keywords/tt0111161")
 
     assert response.status_code == 502
+
+
+def test_build_keywords_query_is_valid():
+    """The GraphQL query must be well-formed and brace-balanced."""
+    import main
+
+    q = main._build_keywords_query("tt0111161")
+    expected = (
+        '{ title(id: "tt0111161") { keywords(first: 250) '
+        "{ pageInfo { hasNextPage endCursor } edges { node { interestScore { usersInterested usersVoted } "
+        "keyword { id text { text } } } } } } }"
+    )
+    assert q == expected
+
+    paginated = main._build_keywords_query("tt0111161", after="cursor1")
+    assert ', after: "cursor1"' in paginated
+
+    depth = 0
+    for ch in q:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            assert depth >= 0, "unbalanced closing brace in keywords query"
+    assert depth == 0, "unbalanced braces in keywords query"
 
 
 @pytest.mark.parametrize(

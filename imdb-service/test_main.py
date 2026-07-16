@@ -435,11 +435,31 @@ def test_rebuild_all_charts_populates_cache(tmp_path):
     import charts
 
     charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
     charts.rebuild_all_charts(db_path, min_votes=25000)
     assert "top_movies" in charts.chart_cache
     assert "top_shows" in charts.chart_cache
     assert len(charts.chart_cache["top_movies"]) <= 3  # 3 movies with votes >= 25000
     assert len(charts.chart_cache["top_shows"]) <= 2  # 2 tvSeries with votes >= 25000
+
+
+def test_rebuild_all_charts_records_refreshed_at(tmp_path):
+    db_path = tmp_path / "imdb.db"
+    _seed_db_for_charts(db_path)
+    from datetime import datetime
+
+    import charts
+
+    charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000)
+
+    for name in charts.ALL_CHART_NAMES:
+        assert name in charts.chart_refreshed_at
+        ts = charts.chart_refreshed_at[name]
+        # Should be a parseable ISO 8601 timestamp produced just now.
+        parsed = datetime.fromisoformat(ts)
+        assert parsed.tzinfo is not None
 
 
 def test_top_movies_chart_sorted_by_weighted_rating(tmp_path):
@@ -576,14 +596,19 @@ def test_load_chart_cache_restores_saved_cache(tmp_path):
     import charts
 
     charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
     charts.rebuild_all_charts(db_path, min_votes=25000, cache_path=cache_path)
     saved = charts.chart_cache.copy()
+    saved_refreshed = charts.chart_refreshed_at.copy()
+    assert saved_refreshed
 
     charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
     loaded = charts.load_chart_cache(cache_path)
 
     assert loaded is True
     assert charts.chart_cache == saved
+    assert charts.chart_refreshed_at == saved_refreshed
 
 
 def test_load_chart_cache_returns_false_for_missing_file(tmp_path):
@@ -950,12 +975,15 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
+    import charts
+
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "idle")
     monkeypatch.setattr(main, "last_activity", None)
+    charts.chart_refreshed_at = {"top_movies": "2026-07-16T12:00:00+00:00"}
     client = TestClient(main.app)
     response = client.get("/stats")
     assert response.status_code == 200
@@ -969,6 +997,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
         assert table in data["table_counts"], f"Missing table count: {table}"
         assert data["table_counts"][table] == row_counts[table]
         assert data["table_updated"][table] == "2026-03-24T03:00:00+00:00"
+    assert data["charts_refreshed"] == {"top_movies": "2026-07-16T12:00:00+00:00"}
     assert data["parental_cache"]["items_cached"] == 0
     assert data["parental_cache"]["flag_counts"] == {
         "nudity": 0,
@@ -2493,12 +2522,14 @@ def test_get_chart_top_movies_returns_list(tmp_path, monkeypatch):
             },
         ]
     }
+    charts.chart_refreshed_at = {"top_movies": "2026-07-16T12:00:00+00:00"}
     client = TestClient(main.app)
     response = client.get("/chart/top_movies")
     assert response.status_code == 200
     data = response.json()
     assert data["chart"] == "top_movies"
     assert data["total"] == 1
+    assert data["refreshed_at"] == "2026-07-16T12:00:00+00:00"
     assert len(data["results"]) == 1
     assert data["results"][0]["tconst"] == "tt0111161"
 

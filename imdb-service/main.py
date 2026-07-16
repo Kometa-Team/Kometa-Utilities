@@ -2641,7 +2641,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}
     }}
 
-    function renderCharts(names, progress) {{
+    function renderCharts(names, progress, refreshed) {{
         const el = document.getElementById('charts');
         if (progress && progress.total > 0) {{
             const pct = Math.min(100, Math.round((progress.completed / progress.total) * 100));
@@ -2652,7 +2652,11 @@ async def dashboard(request: Request) -> HTMLResponse:
             return;
         }}
         if (!names || !names.length) {{ el.innerHTML = '<li>No charts cached</li>'; return; }}
-        el.innerHTML = names.map(n => `<li>${{n}}</li>`).join('');
+        refreshed = refreshed || {{}};
+        el.innerHTML = names.map(n => {{
+            const when = refreshed[n] ? fmtTime(refreshed[n]) : '–';
+            return `<li>${{n}} <span class="count">(${{when}})</span></li>`;
+        }}).join('');
     }}
 
     function renderParental(pc) {{
@@ -2727,7 +2731,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         document.getElementById('last-refresh').textContent = fmtTime(d.last_refresh);
         document.getElementById('last-activity').textContent = fmtTime(d.last_activity);
         renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated);
-        renderCharts(d.charts_cached, d.chart_progress);
+        renderCharts(d.charts_cached, d.chart_progress, d.charts_refreshed);
         renderParental(d.parental_cache);
         renderPrefetch(d.parental_prefetch);
         renderFetchMethods(d.parental_fetch_success_counts);
@@ -2798,6 +2802,7 @@ async def get_stats() -> Dict[str, Any]:
             },
             "parental_fetch_success_counts": parental_fetch_success_counts,
             "charts_cached": list(charts.chart_cache.keys()),
+            "charts_refreshed": charts.chart_refreshed_at.copy(),
             "download_progress": download_progress,
             "import_progress": import_progress,
             "chart_progress": chart_progress,
@@ -3117,7 +3122,12 @@ async def get_chart(chart_name: str, limit: Optional[int] = None) -> Dict[str, A
     else:
         results = results[: charts.DEFAULT_CHART_SIZE]
 
-    return {"chart": chart_name, "total": len(results), "results": results}
+    return {
+        "chart": chart_name,
+        "total": len(results),
+        "refreshed_at": charts.chart_refreshed_at.get(chart_name),
+        "results": results,
+    }
 
 
 @app.get("/person/{imdb_id}")

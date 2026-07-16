@@ -1378,6 +1378,108 @@ def test_parental_endpoint_returns_503_when_no_db(tmp_path, monkeypatch):
     assert response.status_code == 503
 
 
+def _seed_prefetch_test_db(db_path):
+    """Seed DB with title_basics + title_ratings rows for prefetch tests."""
+    conn = sqlite3.connect(db_path)
+    from importer import create_schema
+
+    create_schema(conn)
+    conn.executemany(
+        "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("tt0000001", "movie", "Alpha", "Alpha", 0, 2020, None, 100, "Drama"),
+            ("tt0000002", "movie", "Beta", "Beta", 0, 2021, None, 110, "Action"),
+            ("tt0000003", "movie", "Gamma", "Gamma", 0, 2022, None, 120, "Comedy"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO title_ratings VALUES (?, ?, ?)",
+        [
+            ("tt0000001", 7.0, 50000),
+            ("tt0000002", 8.0, 30000),
+            ("tt0000003", 6.5, 10000),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_candidate_returns_highest_voted_uncached_title(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_prefetch_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "votes_desc")
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
+    candidate = await main._get_parental_prefetch_candidate()
+    assert candidate == "tt0000001"
+
+
+@pytest.mark.asyncio
+async def test_prefetch_candidate_returns_none_when_all_cached(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_prefetch_test_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO imdb_parental(imdb_id, nudity, violence, profanity, alcohol, frightening, updated_at) "
+        "VALUES ('tt0000001','None','None','None','None','None','2026-07-01T00:00:00+00:00')"
+    )
+    conn.execute(
+        "INSERT INTO imdb_parental(imdb_id, nudity, violence, profanity, alcohol, frightening, updated_at) "
+        "VALUES ('tt0000002','None','None','None','None','None','2026-07-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "votes_desc")
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
+    candidate = await main._get_parental_prefetch_candidate()
+    assert candidate is None
+
+
+@pytest.mark.asyncio
+async def test_prefetch_parental_guide_caches_result(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_prefetch_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+
+    async def fake_fetch(_imdb_id):
+        return """
+        <li class="ipc-metadata-list-item--link">
+          <a>Sex &amp; Nudity:</a><div><div><div>Mild</div></div></div>
+        </li>
+        """
+
+    monkeypatch.setattr(main, "_fetch_parental_guide_html", fake_fetch)
+    success = await main._prefetch_parental_guide("tt0000001")
+    assert success is True
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT nudity FROM imdb_parental WHERE imdb_id = ?", ("tt0000001",)
+    ).fetchone()
+    conn.close()
+    assert row == ("Mild",)
+
+
+@pytest.mark.asyncio
+async def test_prefetch_parental_guide_returns_false_on_fetch_failure(tmp_path, monkeypatch):
+    import main
+
+    async def fail_fetch(_imdb_id):
+        raise main.HTTPException(status_code=403, detail="blocked")
+
+    monkeypatch.setattr(main, "_fetch_parental_guide_html", fail_fetch)
+    success = await main._prefetch_parental_guide("tt0000001")
+    assert success is False
+
+
 @pytest.mark.asyncio
 async def test_fetch_parental_html_falls_back_to_browser_on_empty_http(monkeypatch):
     import main

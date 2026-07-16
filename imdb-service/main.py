@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import time
@@ -66,6 +67,28 @@ PARENTAL_BROWSER_SCREENSHOT_DIR = Path(
     os.getenv("PARENTAL_BROWSER_SCREENSHOT_DIR", str(DATA_DIR / "parental-failures"))
 )
 
+# --- Parental prefetch config ---
+PARENTAL_PREFETCH_ENABLED = (
+    os.getenv("PARENTAL_PREFETCH_ENABLED", "true").lower() == "true"
+)
+PARENTAL_PREFETCH_MIN_VOTES = int(os.getenv("PARENTAL_PREFETCH_MIN_VOTES", "25000"))
+PARENTAL_PREFETCH_CANDIDATE_POOL = int(
+    os.getenv("PARENTAL_PREFETCH_CANDIDATE_POOL", "1000")
+)
+PARENTAL_PREFETCH_MIN_DELAY_SECONDS = int(
+    os.getenv("PARENTAL_PREFETCH_MIN_DELAY_SECONDS", "45")
+)
+PARENTAL_PREFETCH_MAX_DELAY_SECONDS = int(
+    os.getenv("PARENTAL_PREFETCH_MAX_DELAY_SECONDS", "180")
+)
+PARENTAL_PREFETCH_IDLE_SECONDS = int(
+    os.getenv("PARENTAL_PREFETCH_IDLE_SECONDS", "60")
+)
+PARENTAL_PREFETCH_DAILY_BUDGET = int(
+    os.getenv("PARENTAL_PREFETCH_DAILY_BUDGET", "100")
+)
+PARENTAL_PREFETCH_ORDER = os.getenv("PARENTAL_PREFETCH_ORDER", "weighted_random")
+
 # --- Global state ---
 last_refresh: Optional[str] = None  # ISO 8601 UTC string
 refresh_worker_task: Optional[asyncio.Task] = None
@@ -81,6 +104,9 @@ parental_browser_manager: Any = None
 parental_browser_lock: Optional[asyncio.Lock] = None
 parental_browser_semaphore: Optional[asyncio.Semaphore] = None
 parental_decodo_browser_session_id: Optional[str] = None
+parental_prefetch_task: Optional[asyncio.Task] = None
+parental_prefetch_count_today: int = 0
+parental_prefetch_date: Optional[date] = None
 PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid="advisory-nudity"]',
     'section[data-testid^="advisory-"]',
@@ -458,7 +484,7 @@ async def _ensure_db_schema() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown: load DB state, rebuild charts, start scheduler."""
-    global last_refresh, refresh_worker_task
+    global last_refresh, refresh_worker_task, parental_prefetch_task
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("🔧 Initializing IMDB Service...")
@@ -484,6 +510,7 @@ async def lifespan(app: FastAPI):
         # Rebuild chart cache from existing DB in the background so startup
         # completes immediately (a full rebuild scans millions of rows).
         refresh_worker_task = asyncio.create_task(_rebuild_charts_then_schedule())
+        parental_prefetch_task = asyncio.create_task(_parental_prefetch_worker())
         print("✅ IMDB Service ready")
         yield
     else:
@@ -496,6 +523,12 @@ async def lifespan(app: FastAPI):
         refresh_worker_task.cancel()
         try:
             await refresh_worker_task
+        except asyncio.CancelledError:
+            pass
+    if parental_prefetch_task:
+        parental_prefetch_task.cancel()
+        try:
+            await parental_prefetch_task
         except asyncio.CancelledError:
             pass
     await _close_parental_browser_contexts()
@@ -1529,6 +1562,130 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
             "frightening": row[5] or 0,
         },
     }
+
+
+async def _get_parental_prefetch_candidate() -> Optional[str]:
+    """Pick an uncached, highly-voted title to prefetch parental data for.
+
+    Ordering strategies:
+      - "votes_desc": raw popularity (most votes first).
+      - "weighted_random": draw from the top N uncached titles weighted by
+        log(numVotes). Favors popular titles while spreading load across the
+        candidate pool.
+    """
+    if not _db_is_ready():
+        return None
+    await _ensure_db_schema()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        order_sql = "tr.numVotes DESC"
+        if PARENTAL_PREFETCH_ORDER == "weighted_random":
+            # Randomize within the top pool; log(votes) keeps megahits from
+            # completely dominating the draw.
+            order_sql = "(log(tr.numVotes) * abs(random())) DESC"
+        cursor = await db.execute(
+            f"""
+            SELECT tb.tconst, tr.numVotes
+            FROM title_basics tb
+            JOIN title_ratings tr ON tb.tconst = tr.tconst
+            LEFT JOIN imdb_parental ip ON tb.tconst = ip.imdb_id
+            WHERE tr.numVotes >= ? AND ip.imdb_id IS NULL
+            ORDER BY {order_sql}
+            LIMIT ?
+            """,  # nosec B608 - order_sql is an internal constant, not user input
+            (PARENTAL_PREFETCH_MIN_VOTES, PARENTAL_PREFETCH_CANDIDATE_POOL),
+        )
+        rows = await cursor.fetchall()
+
+    if not rows:
+        return None
+
+    if PARENTAL_PREFETCH_ORDER == "votes_desc":
+        return rows[0]["tconst"]
+
+    # Weighted random by log(votes) for the candidate pool.
+    weights = [max(1, int(row["numVotes"])) for row in rows]
+    weights = [w ** 0.5 for w in weights]  # square root flattens the curve
+    total = sum(weights)
+    if total <= 0:
+        return rows[0]["tconst"]
+    pick = random.uniform(0, total)
+    cumulative = 0.0
+    for row, weight in zip(rows, weights):
+        cumulative += weight
+        if cumulative >= pick:
+            return row["tconst"]
+    return rows[-1]["tconst"]
+
+
+async def _prefetch_parental_guide(imdb_id: str) -> bool:
+    """Fetch and cache parental guide for a single title during idle prefetch.
+
+    Returns True if successfully cached, False otherwise.
+    """
+    try:
+        html_text = await _fetch_parental_guide_html(imdb_id)
+        parental = _parse_parental_guide_html(html_text)
+        await _update_parental_cache(imdb_id, parental)
+        _parental_log(
+            "prefetch_success",
+            imdb_id,
+            categories=",".join(sorted(parental.keys())),
+        )
+        return True
+    except HTTPException as e:
+        _parental_log(
+            "prefetch_failed",
+            imdb_id,
+            status_code=e.status_code,
+            detail=str(e.detail),
+        )
+    except Exception as e:
+        _parental_log("prefetch_error", imdb_id, error=type(e).__name__)
+    return False
+
+
+async def _parental_prefetch_worker() -> None:
+    """Background worker that prefetches parental guides during idle periods."""
+    global parental_prefetch_count_today, parental_prefetch_date
+
+    if not PARENTAL_PREFETCH_ENABLED:
+        return
+
+    print("🔄 Parental prefetch worker started")
+    while True:
+        await asyncio.sleep(PARENTAL_PREFETCH_IDLE_SECONDS)
+
+        if current_phase != "idle":
+            continue
+
+        today = date.today()
+        if parental_prefetch_date != today:
+            parental_prefetch_date = today
+            parental_prefetch_count_today = 0
+
+        if parental_prefetch_count_today >= PARENTAL_PREFETCH_DAILY_BUDGET:
+            continue
+
+        candidate = await _get_parental_prefetch_candidate()
+        if not candidate:
+            continue
+
+        if await _prefetch_parental_guide(candidate):
+            parental_prefetch_count_today += 1
+
+        delay = random.uniform(
+            PARENTAL_PREFETCH_MIN_DELAY_SECONDS,
+            PARENTAL_PREFETCH_MAX_DELAY_SECONDS,
+        )
+        # Sleep in small slices so we stop quickly when the phase changes or
+        # the service shuts down.
+        deadline = asyncio.get_running_loop().time() + delay
+        while asyncio.get_running_loop().time() < deadline:
+            if current_phase != "idle":
+                break
+            await asyncio.sleep(min(5, deadline - asyncio.get_running_loop().time()))
 
 
 @app.get("/search")

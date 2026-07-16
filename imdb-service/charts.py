@@ -11,6 +11,9 @@ import httpx
 # Module-level chart cache. Replaced atomically by rebuild_all_charts().
 chart_cache: dict[str, list[dict[str, Any]]] = {}
 
+# Per-chart last refresh timestamp (ISO 8601 UTC), also replaced atomically.
+chart_refreshed_at: dict[str, str] = {}
+
 
 class ChartConfig(TypedDict):
     """Configuration for a single locally-computed chart."""
@@ -76,6 +79,9 @@ ALL_CHART_NAMES = list(CHART_CONFIGS.keys()) + list(GRAPHQL_CHART_CONFIGS.keys()
 
 # GraphQL chart IDs are fetched at most once per day.
 GRAPHQL_CACHE_TTL_SECONDS = 86400
+
+# Sidecar filename used to persist chart refresh timestamps.
+CHART_CACHE_REFRESHED_FILE = "chart_cache_refreshed.json"
 
 DEFAULT_CHART_SIZE = 250
 MAX_CHART_SIZE = 500
@@ -325,9 +331,17 @@ def _compute_graphql_chart(
     return _enrich_chart_ids(conn, ids)
 
 
+def _chart_refreshed_path(cache_path: Path) -> Path:
+    """Return the sidecar path for chart refresh timestamps."""
+    return cache_path.with_name(CHART_CACHE_REFRESHED_FILE)
+
+
 def save_chart_cache(cache_path: Path) -> None:
     """Persist the current chart cache to disk."""
     cache_path.write_text(json.dumps(chart_cache, indent=2), encoding="utf-8")
+    _chart_refreshed_path(cache_path).write_text(
+        json.dumps(chart_refreshed_at, indent=2), encoding="utf-8"
+    )
 
 
 def load_chart_cache(cache_path: Path) -> bool:
@@ -335,7 +349,7 @@ def load_chart_cache(cache_path: Path) -> bool:
 
     Returns True if the cache was loaded successfully.
     """
-    global chart_cache
+    global chart_cache, chart_refreshed_at
 
     if not cache_path.exists():
         return False
@@ -347,6 +361,14 @@ def load_chart_cache(cache_path: Path) -> bool:
         if set(data.keys()) != set(ALL_CHART_NAMES):
             return False
         chart_cache = data
+
+        refreshed_path = _chart_refreshed_path(cache_path)
+        if refreshed_path.exists():
+            chart_refreshed_at = json.loads(refreshed_path.read_text(encoding="utf-8"))
+        else:
+            mtime = cache_path.stat().st_mtime
+            fallback = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            chart_refreshed_at = {name: fallback for name in ALL_CHART_NAMES}
         return True
     except (json.JSONDecodeError, OSError):
         return False
@@ -382,7 +404,7 @@ def rebuild_all_charts(
     and offline by default.  When fetch_graphql=True, graphql_cache_path may be
     provided to cache the raw IMDb IDs for 24 hours.
     """
-    global chart_cache
+    global chart_cache, chart_refreshed_at
 
     conn = sqlite3.connect(db_path)
     client: Optional[httpx.Client] = None
@@ -393,7 +415,9 @@ def rebuild_all_charts(
 
     try:
         new_cache: dict[str, list[dict[str, Any]]] = {}
+        new_refreshed: dict[str, str] = {}
         total = len(ALL_CHART_NAMES)
+        now = datetime.now(timezone.utc).isoformat()
 
         # Locally-computed charts.
         for index, (name, config) in enumerate(CHART_CONFIGS.items(), start=1):
@@ -401,6 +425,7 @@ def rebuild_all_charts(
                 on_progress(name, index - 1, total)
             print(f"Computing chart: {name}...")
             new_cache[name] = _compute_chart(conn, config, min_votes)
+            new_refreshed[name] = now
             print(f"   {len(new_cache[name])} entries")
 
         # GraphQL-backed charts.
@@ -412,9 +437,11 @@ def rebuild_all_charts(
                 new_cache[name] = _enrich_chart_ids(conn, graphql_ids.get(name, []))
             else:
                 new_cache[name] = []
+            new_refreshed[name] = now
             print(f"   {len(new_cache[name])} entries")
 
         chart_cache = new_cache
+        chart_refreshed_at = new_refreshed
         if cache_path:
             save_chart_cache(cache_path)
         print("Chart cache rebuilt")

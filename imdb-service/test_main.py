@@ -1141,6 +1141,9 @@ def test_endpoints_returns_html(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "IMDB" in response.text
+    assert "/keywords/" in response.text
+    assert "popular_movies" in response.text
+    assert "box_office" in response.text
 
 
 def _seed_full_test_db(db_path):

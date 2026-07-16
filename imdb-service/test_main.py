@@ -535,6 +535,24 @@ def test_chart_cache_replaced_atomically(tmp_path):
     assert "top_movies" in charts.chart_cache
 
 
+def test_rebuild_all_charts_calls_progress_callback(tmp_path):
+    db_path = tmp_path / "imdb.db"
+    _seed_db_for_charts(db_path)
+    import charts
+
+    progress_calls = []
+
+    def on_progress(name, completed, total):
+        progress_calls.append((name, completed, total))
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000, on_progress=on_progress)
+
+    assert len(progress_calls) == len(charts.CHART_CONFIGS)
+    assert progress_calls[0] == (list(charts.CHART_CONFIGS.keys())[0], 0, len(charts.CHART_CONFIGS))
+    assert progress_calls[-1][2] == len(charts.CHART_CONFIGS)
+
+
 def test_stats_returns_initializing_when_no_db(tmp_path, monkeypatch):
     import main
 
@@ -610,6 +628,25 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
         "frightening": 0,
     }
     assert "charts_cached" in data
+
+
+def test_stats_includes_chart_progress_during_rebuild(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
+    monkeypatch.setattr(main, "current_phase", "building_charts")
+    monkeypatch.setattr(main, "last_activity", None)
+    monkeypatch.setattr(
+        main, "chart_progress", {"current": "top_movies", "completed": 1, "total": 8}
+    )
+    client = TestClient(main.app)
+    response = client.get("/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["chart_progress"] == {"current": "top_movies", "completed": 1, "total": 8}
 
 
 def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
@@ -2095,7 +2132,7 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     rebuilt = {}
 
-    def fake_rebuild(db, votes):
+    def fake_rebuild(db, votes, on_progress=None):
         rebuilt["done"] = True
 
     import importer

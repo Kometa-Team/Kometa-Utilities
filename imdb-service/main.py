@@ -70,6 +70,7 @@ refresh_worker_task: Optional[asyncio.Task] = None
 current_phase: str = "idle"  # idle | downloading | importing | building_charts
 download_progress: Dict[str, str] = {}  # dataset stem → pending|downloading|done
 import_progress: Dict[str, Any] = {}  # table → {status, rows}
+chart_progress: Optional[Dict[str, Any]] = None  # {current, completed, total}
 last_activity: Optional[str] = None  # ISO timestamp of last phase change
 _refresh_lock: asyncio.Lock = asyncio.Lock()  # guards manual single-table refreshes
 proxy_health: Dict[str, datetime] = {}  # proxy URL -> cooldown-until UTC
@@ -466,7 +467,7 @@ async def lifespan(app: FastAPI):
 
 async def _run_import_pipeline() -> None:
     """Download datasets and import into shadow DB, then rebuild charts."""
-    global last_refresh, download_progress, import_progress
+    global last_refresh, download_progress, import_progress, chart_progress
     from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
 
     print("🔄 Starting daily refresh...")
@@ -475,6 +476,7 @@ async def _run_import_pipeline() -> None:
     _set_phase("downloading")
     download_progress = {stem: "pending" for stem in DATASET_FILES}
     import_progress = {}
+    chart_progress = None
 
     def _on_file_start(filename: str) -> None:
         for stem, fname in DATASET_FILES.items():
@@ -533,7 +535,17 @@ async def _run_import_pipeline() -> None:
 
     # --- Chart rebuild phase ---
     _set_phase("building_charts")
-    await asyncio.to_thread(charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART)
+    try:
+
+        def _on_chart_progress(name: str, completed: int, total: int) -> None:
+            global chart_progress
+            chart_progress = {"current": name, "completed": completed, "total": total}
+
+        await asyncio.to_thread(
+            charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART, _on_chart_progress
+        )
+    finally:
+        chart_progress = None
 
     _set_phase("idle")
     print("✅ Refresh complete")
@@ -541,7 +553,7 @@ async def _run_import_pipeline() -> None:
 
 async def _refresh_single_table(stem: str) -> None:
     """Download and re-import a single dataset, then rebuild charts."""
-    global last_refresh, download_progress, import_progress
+    global last_refresh, download_progress, import_progress, chart_progress
     from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
 
     async with _refresh_lock:
@@ -551,6 +563,7 @@ async def _refresh_single_table(stem: str) -> None:
         _set_phase("downloading")
         download_progress = {stem: "pending"}
         import_progress = {}
+        chart_progress = None
 
         def _on_file_start(filename: str) -> None:
             for s, fname in DATASET_FILES.items():
@@ -603,7 +616,17 @@ async def _refresh_single_table(stem: str) -> None:
             print(f"⚠️  Could not read last_refresh after import: {e}")
 
         _set_phase("building_charts")
-        await asyncio.to_thread(charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART)
+        try:
+
+            def _on_chart_progress(name: str, completed: int, total: int) -> None:
+                global chart_progress
+                chart_progress = {"current": name, "completed": completed, "total": total}
+
+            await asyncio.to_thread(
+                charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART, _on_chart_progress
+            )
+        finally:
+            chart_progress = None
 
         _set_phase("idle")
         print(f"✅ Manual refresh for {stem} complete")
@@ -620,10 +643,21 @@ async def _initial_import_then_schedule() -> None:
 
 async def _rebuild_charts_then_schedule() -> None:
     """Rebuild the chart cache from the existing DB, then start the scheduler."""
+    global chart_progress
+    _set_phase("building_charts")
     try:
-        await asyncio.to_thread(charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART)
+
+        def _on_chart_progress(name: str, completed: int, total: int) -> None:
+            global chart_progress
+            chart_progress = {"current": name, "completed": completed, "total": total}
+
+        await asyncio.to_thread(
+            charts.rebuild_all_charts, DB_PATH, MIN_VOTES_CHART, _on_chart_progress
+        )
     except Exception as e:
         print(f"⚠️  Chart rebuild failed: {e}")
+    finally:
+        chart_progress = None
     await _refresh_scheduler()
 
 
@@ -1930,8 +1964,16 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}
     }}
 
-    function renderCharts(names) {{
+    function renderCharts(names, progress) {{
         const el = document.getElementById('charts');
+        if (progress && progress.total > 0) {{
+            const pct = Math.min(100, Math.round((progress.completed / progress.total) * 100));
+            el.innerHTML = `
+                <li>⏳ Rebuilding charts: ${{progress.completed}} / ${{progress.total}} (${{pct}}%)</li>
+                <li>Current: <code>${{progress.current}}</code></li>
+            `;
+            return;
+        }}
         if (!names || !names.length) {{ el.innerHTML = '<li>No charts cached</li>'; return; }}
         el.innerHTML = names.map(n => `<li>${{n}}</li>`).join('');
     }}
@@ -1953,7 +1995,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         document.getElementById('last-refresh').textContent = fmtTime(d.last_refresh);
         document.getElementById('last-activity').textContent = fmtTime(d.last_activity);
         renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated);
-        renderCharts(d.charts_cached);
+        renderCharts(d.charts_cached, d.chart_progress);
         renderParental(d.parental_cache);
 
         if (d.phase && d.phase !== 'idle') {{
@@ -1989,6 +2031,7 @@ async def get_stats() -> Dict[str, Any]:
             "phase": current_phase,
             "download_progress": download_progress,
             "import_progress": import_progress,
+            "chart_progress": chart_progress,
             "last_activity": last_activity,
         }
 
@@ -2014,6 +2057,7 @@ async def get_stats() -> Dict[str, Any]:
             "charts_cached": list(charts.chart_cache.keys()),
             "download_progress": download_progress,
             "import_progress": import_progress,
+            "chart_progress": chart_progress,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

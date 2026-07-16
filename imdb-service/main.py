@@ -811,22 +811,16 @@ def _extract_parental_guide_regex(html_text: str) -> Dict[str, str]:
     """Fallback regex extractor for IMDb parental-guide severity labels."""
     decoded = unescape(html_text)
     results: Dict[str, str] = {}
-    severity_pattern = "None|Mild|Moderate|Severe"
     for category, key in PARENTAL_TYPE_MAP.items():
-        # Find the category, then capture the nearest severity label within
-        # a short window (avoids matching unrelated text further down the page).
+        # IMDb renders each rating item as <li data-testid="rating-item"> with the
+        # category in an <a> and the severity in a nested <div class="ipc-html-content-inner-div">.
         regex = re.compile(
-            re.escape(category)
-            + r"(?:(?!"
-            + severity_pattern
-            + r").){0,200}("
-            + severity_pattern
-            + r")",
+            re.escape(category) + r".*?<div[^>]*ipc-html-content-inner-div[^>]*>([^<]+)</div>",
             re.IGNORECASE | re.DOTALL,
         )
         match = regex.search(decoded)
         if match:
-            results[key] = match.group(1).capitalize()
+            results[key] = match.group(1).strip()
     return results
 
 
@@ -844,15 +838,6 @@ def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
     regex_results = _extract_parental_guide_regex(html_text)
     parsed = _normalize_parental_payload(regex_results)
     if all(value == "None" for value in parsed.values()):
-        # DEBUG: save the HTML so we can inspect why parsing failed
-        debug_path = Path(
-            f"/tmp/parental-debug-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.html"
-        )
-        try:
-            debug_path.write_text(html_text, encoding="utf-8")
-            _parental_log("parse_debug_html_saved", path=str(debug_path))
-        except Exception:  # nosec B110 - temporary debug save, safe to ignore
-            pass
         raise HTTPException(status_code=404, detail="No parental guide found")
     return parsed
 

@@ -1031,24 +1031,54 @@ def test_parental_endpoint_uses_regex_fallback_when_structured_parser_misses(tmp
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
-    # IMDb-like HTML where the category and severity are in sibling divs
-    # rather than the structured <li><a> shape the HTML parser expects.
+    # Real IMDb parental-guide markup (as of mid-2026) where the severity is in
+    # a nested <div class="ipc-html-content-inner-div"> rather than the older
+    # flat <li> structure the DOM parser targets.
     sample_html = """
     <html><body>
-      <section>
-        <div>Sex &amp; Nudity</div><div>Mild</div>
-      </section>
-      <section>
-        <div>Violence &amp; Gore</div><div>Moderate</div>
-      </section>
-      <section>
-        <div>Profanity</div><div>Severe</div>
-      </section>
-      <section>
-        <div>Alcohol, Drugs &amp; Smoking</div><div>None</div>
-      </section>
-      <section>
-        <div>Frightening &amp; Intense Scenes</div><div>Mild</div>
+      <section data-testid="content-rating">
+        <ul>
+          <li class="ipc-metadata-list__item ipc-metadata-list-item--link sc-13453a6a-2 kvBevb" data-testid="rating-item">
+            <a class="ipc-metadata-list-item__label ipc-metadata-list-item__label--link" href="#nudity">Sex &amp; Nudity:</a>
+            <div class="ipc-metadata-list-item__content-container">
+              <div class="ipc-html-content ipc-html-content--base ipc-metadata-list-item__html-content">
+                <div class="ipc-html-content-inner-div">Mild</div>
+              </div>
+            </div>
+          </li>
+          <li class="ipc-metadata-list__item ipc-metadata-list-item--link sc-13453a6a-2 kvBevb" data-testid="rating-item">
+            <a class="ipc-metadata-list-item__label ipc-metadata-list-item__label--link" href="#violence">Violence &amp; Gore:</a>
+            <div class="ipc-metadata-list-item__content-container">
+              <div class="ipc-html-content ipc-html-content--base ipc-metadata-list-item__html-content">
+                <div class="ipc-html-content-inner-div">Moderate</div>
+              </div>
+            </div>
+          </li>
+          <li class="ipc-metadata-list__item ipc-metadata-list-item--link sc-13453a6a-2 kvBevb" data-testid="rating-item">
+            <a class="ipc-metadata-list-item__label ipc-metadata-list-item__label--link" href="#profanity">Profanity:</a>
+            <div class="ipc-metadata-list-item__content-container">
+              <div class="ipc-html-content ipc-html-content--base ipc-metadata-list-item__html-content">
+                <div class="ipc-html-content-inner-div">Severe</div>
+              </div>
+            </div>
+          </li>
+          <li class="ipc-metadata-list__item ipc-metadata-list-item--link sc-13453a6a-2 kvBevb" data-testid="rating-item">
+            <a class="ipc-metadata-list-item__label ipc-metadata-list-item__label--link" href="#alcohol">Alcohol, Drugs &amp; Smoking:</a>
+            <div class="ipc-metadata-list-item__content-container">
+              <div class="ipc-html-content ipc-html-content--base ipc-metadata-list-item__html-content">
+                <div class="ipc-html-content-inner-div">None</div>
+              </div>
+            </div>
+          </li>
+          <li class="ipc-metadata-list__item ipc-metadata-list-item--link sc-13453a6a-2 kvBevb" data-testid="rating-item">
+            <a class="ipc-metadata-list-item__label ipc-metadata-list-item__label--link" href="#frightening">Frightening &amp; Intense Scenes:</a>
+            <div class="ipc-metadata-list-item__content-container">
+              <div class="ipc-html-content ipc-html-content--base ipc-metadata-list-item__html-content">
+                <div class="ipc-html-content-inner-div">Moderate</div>
+              </div>
+            </div>
+          </li>
+        </ul>
       </section>
     </body></html>
     """
@@ -1067,7 +1097,7 @@ def test_parental_endpoint_uses_regex_fallback_when_structured_parser_misses(tmp
         "Violence": "Moderate",
         "Profanity": "Severe",
         "Alcohol": "None",
-        "Frightening": "Mild",
+        "Frightening": "Moderate",
     }
 
 

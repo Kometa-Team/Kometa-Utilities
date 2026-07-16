@@ -27,6 +27,7 @@ from importer import ALLOWED_TABLES, SCHEMA_SQL, TABLE_TO_STEM
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "imdb.db"
 CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"
+GRAPHQL_CHART_CACHE_PATH = DATA_DIR / "graphql_chart_cache.json"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 REFRESH_HOUR = int(os.getenv("REFRESH_HOUR", "3"))
 MIN_VOTES_CHART = int(os.getenv("MIN_VOTES_CHART", "25000"))
@@ -617,6 +618,8 @@ async def _run_import_pipeline() -> None:
             MIN_VOTES_CHART,
             _on_chart_progress,
             CHART_CACHE_PATH,
+            fetch_graphql=True,
+            graphql_cache_path=GRAPHQL_CHART_CACHE_PATH,
         )
     finally:
         chart_progress = None
@@ -702,6 +705,8 @@ async def _refresh_single_table(stem: str) -> None:
                 MIN_VOTES_CHART,
                 _on_chart_progress,
                 CHART_CACHE_PATH,
+                fetch_graphql=True,
+                graphql_cache_path=GRAPHQL_CHART_CACHE_PATH,
             )
         finally:
             chart_progress = None
@@ -745,6 +750,8 @@ async def _rebuild_charts_then_schedule() -> None:
             MIN_VOTES_CHART,
             _on_chart_progress,
             CHART_CACHE_PATH,
+            fetch_graphql=True,
+            graphql_cache_path=GRAPHQL_CHART_CACHE_PATH,
         )
     except Exception as e:
         print(f"⚠️  Chart rebuild failed: {e}")
@@ -2926,10 +2933,10 @@ async def get_title(imdb_id: str) -> Dict[str, Any]:
 @app.get("/chart/{chart_name}")
 async def get_chart(chart_name: str, limit: Optional[int] = None) -> Dict[str, Any]:
     """Return a pre-computed ranked chart of IMDb titles."""
-    if chart_name not in charts.CHART_CONFIGS:
+    if chart_name not in charts.ALL_CHART_NAMES:
         raise HTTPException(
             status_code=404,
-            detail=f"Unknown chart: {chart_name!r}. Valid: {list(charts.CHART_CONFIGS.keys())}",
+            detail=f"Unknown chart: {chart_name!r}. Valid: {charts.ALL_CHART_NAMES}",
         )
 
     if not _db_is_ready() and not charts.chart_cache:

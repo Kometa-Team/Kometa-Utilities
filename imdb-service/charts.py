@@ -1,5 +1,6 @@
 """Pre-computed IMDB chart cache."""
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict
@@ -101,15 +102,55 @@ def _compute_chart(
     ]
 
 
+def save_chart_cache(cache_path: Path) -> None:
+    """Persist the current chart cache to disk."""
+    cache_path.write_text(json.dumps(chart_cache, indent=2), encoding="utf-8")
+
+
+def load_chart_cache(cache_path: Path) -> bool:
+    """Load chart cache from disk if it exists and is valid.
+
+    Returns True if the cache was loaded successfully.
+    """
+    global chart_cache
+
+    if not cache_path.exists():
+        return False
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        # Validate that all expected chart keys are present.
+        if set(data.keys()) != set(CHART_CONFIGS.keys()):
+            return False
+        chart_cache = data
+        return True
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _cache_is_fresh(cache_path: Path, db_path: Path) -> bool:
+    """Return True if the cache file exists and is newer than the DB file."""
+    if not cache_path.exists():
+        return False
+    try:
+        return cache_path.stat().st_mtime >= db_path.stat().st_mtime
+    except OSError:
+        return False
+
+
 def rebuild_all_charts(
     db_path: Path,
     min_votes: int,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
+    cache_path: Optional[Path] = None,
 ) -> None:
     """Recompute all charts and atomically replace chart_cache.
 
     If on_progress is provided, it is called before each chart computation with
     (chart_name, completed_count, total_count).
+
+    If cache_path is provided, the computed cache is persisted to that file.
     """
     global chart_cache
 
@@ -124,6 +165,8 @@ def rebuild_all_charts(
             new_cache[name] = _compute_chart(conn, config, min_votes)
             print(f"   {len(new_cache[name])} entries")
         chart_cache = new_cache
+        if cache_path:
+            save_chart_cache(cache_path)
         print("Chart cache rebuilt")
     finally:
         conn.close()

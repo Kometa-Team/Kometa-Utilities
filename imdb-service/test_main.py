@@ -553,6 +553,76 @@ def test_rebuild_all_charts_calls_progress_callback(tmp_path):
     assert progress_calls[-1][2] == len(charts.CHART_CONFIGS)
 
 
+def test_rebuild_all_charts_saves_cache_file(tmp_path):
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+    import charts
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000, cache_path=cache_path)
+
+    assert cache_path.exists()
+    data = json.loads(cache_path.read_text())
+    assert set(data.keys()) == set(charts.CHART_CONFIGS.keys())
+    assert len(data["top_movies"]) > 0
+
+
+def test_load_chart_cache_restores_saved_cache(tmp_path):
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+    import charts
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000, cache_path=cache_path)
+    saved = charts.chart_cache.copy()
+
+    charts.chart_cache = {}
+    loaded = charts.load_chart_cache(cache_path)
+
+    assert loaded is True
+    assert charts.chart_cache == saved
+
+
+def test_load_chart_cache_returns_false_for_missing_file(tmp_path):
+    import charts
+
+    charts.chart_cache = {}
+    loaded = charts.load_chart_cache(tmp_path / "missing.json")
+    assert loaded is False
+
+
+def test_cache_is_fresh_when_cache_newer_than_db(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    db_path.write_text("db")
+    cache_path.write_text("cache")
+    # Ensure cache mtime is strictly after DB mtime.
+    import time
+
+    time.sleep(0.01)
+    cache_path.touch()
+
+    assert charts._cache_is_fresh(cache_path, db_path) is True
+
+
+def test_cache_is_stale_when_db_newer_than_cache(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    cache_path.write_text("cache")
+    import time
+
+    time.sleep(0.01)
+    db_path.write_text("db")
+
+    assert charts._cache_is_fresh(cache_path, db_path) is False
+
+
 def test_stats_returns_initializing_when_no_db(tmp_path, monkeypatch):
     import main
 
@@ -2234,7 +2304,7 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     rebuilt = {}
 
-    def fake_rebuild(db, votes, on_progress=None):
+    def fake_rebuild(db, votes, on_progress=None, cache_path=None):
         rebuilt["done"] = True
 
     import importer

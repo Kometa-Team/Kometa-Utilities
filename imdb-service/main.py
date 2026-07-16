@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -806,6 +807,29 @@ def _normalize_parental_payload(values: Dict[str, Optional[str]]) -> Dict[str, s
     return {category: values.get(category) or "None" for category in PARENTAL_TYPE_MAP.values()}
 
 
+def _extract_parental_guide_regex(html_text: str) -> Dict[str, str]:
+    """Fallback regex extractor for IMDb parental-guide severity labels."""
+    decoded = unescape(html_text)
+    results: Dict[str, str] = {}
+    severity_pattern = "None|Mild|Moderate|Severe"
+    for category, key in PARENTAL_TYPE_MAP.items():
+        # Find the category, then capture the nearest severity label within
+        # a short window (avoids matching unrelated text further down the page).
+        regex = re.compile(
+            re.escape(category)
+            + r"(?:(?!"
+            + severity_pattern
+            + r").){0,200}("
+            + severity_pattern
+            + r")",
+            re.IGNORECASE | re.DOTALL,
+        )
+        match = regex.search(decoded)
+        if match:
+            results[key] = match.group(1).capitalize()
+    return results
+
+
 def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
     """Parse IMDb parental-guide HTML into Kometa-compatible category labels."""
     parser = _ParentalGuideParser()
@@ -813,6 +837,12 @@ def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
     parsed = _normalize_parental_payload(parser.results)
     if _html_has_no_parental_guide_notice(html_text):
         raise HTTPException(status_code=404, detail="No parental guide found")
+    if not all(value == "None" for value in parsed.values()):
+        return parsed
+
+    # The structured parser missed the labels; try a regex fallback.
+    regex_results = _extract_parental_guide_regex(html_text)
+    parsed = _normalize_parental_payload(regex_results)
     if all(value == "None" for value in parsed.values()):
         raise HTTPException(status_code=404, detail="No parental guide found")
     return parsed

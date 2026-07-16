@@ -1271,6 +1271,118 @@ def test_html_has_no_parental_guide_notice_detects_empty_notice():
     assert main._html_has_no_parental_guide_notice(html) is True
 
 
+def test_html_looks_blocked_detects_common_block_pages():
+    import main
+
+    assert main._html_looks_blocked("<h1>403 Forbidden</h1>") is True
+    assert main._html_looks_blocked("<p>Access Denied</p>") is True
+    assert main._html_looks_blocked("<div>Please verify you are a human</div>") is True
+    assert main._html_looks_blocked("<li>Sex &amp; Nudity: Mild</li>") is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_parental_html_short_circuits_browser_on_direct_403(monkeypatch):
+    from fastapi import HTTPException
+
+    import main
+
+    async def http_403(_imdb_id, proxy_url=None):
+        raise HTTPException(status_code=403, detail="blocked")
+
+    browser_called = {"count": 0}
+
+    async def fail_browser(_imdb_id, proxy_url=None):
+        browser_called["count"] += 1
+        raise HTTPException(status_code=502, detail="should not run")
+
+    monkeypatch.setattr(main, "PARENTAL_PROXY_ENABLED", False)
+    monkeypatch.setattr(main, "PARENTAL_DECODO_BROWSER_ENABLED", False)
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", http_403)
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_browser", fail_browser)
+
+    with pytest.raises(HTTPException, match="no proxy or Decodo"):
+        await main._fetch_parental_guide_html("tt0111161")
+
+    assert browser_called["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_fetch_fails_fast_on_403_response(monkeypatch):
+    from fastapi import HTTPException
+
+    import main
+
+    class MockResponse:
+        status = 403
+
+    class MockPage:
+        async def goto(self, *args, **kwargs):
+            return MockResponse()
+
+        async def wait_for_timeout(self, *args, **kwargs):
+            pass
+
+        async def close(self):
+            pass
+
+    class MockContext:
+        async def new_page(self):
+            return MockPage()
+
+    async def mock_get_context(_proxy_url=None):
+        return MockContext()
+
+    monkeypatch.setattr(main, "_get_parental_browser_context", mock_get_context)
+    monkeypatch.setattr(main, "_get_parental_browser_semaphore", lambda: main.asyncio.Semaphore(1))
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_ENABLED", True)
+
+    with pytest.raises(HTTPException, match="HTTP 403"):
+        await main._fetch_parental_guide_html_via_browser("tt0111161")
+
+
+@pytest.mark.asyncio
+async def test_browser_fetch_fails_fast_on_blocked_page(monkeypatch):
+    from fastapi import HTTPException
+
+    import main
+
+    class MockResponse:
+        status = 200
+
+    class MockPage:
+        def __init__(self, html):
+            self._html = html
+
+        async def goto(self, *args, **kwargs):
+            return MockResponse()
+
+        async def content(self):
+            return self._html
+
+        async def wait_for_timeout(self, *args, **kwargs):
+            pass
+
+        async def close(self):
+            pass
+
+    class MockContext:
+        def __init__(self, html):
+            self._html = html
+
+        async def new_page(self):
+            return MockPage(self._html)
+
+    async def mock_get_context(_proxy_url=None):
+        return MockContext("<html><body>403 Forbidden</body></html>")
+
+    monkeypatch.setattr(main, "_get_parental_browser_context", mock_get_context)
+    monkeypatch.setattr(main, "_get_parental_browser_semaphore", lambda: main.asyncio.Semaphore(1))
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_ENABLED", True)
+
+    with pytest.raises(HTTPException, match="blocked"):
+        await main._fetch_parental_guide_html_via_browser("tt0111161")
+
+
 def test_choose_parental_proxy_skips_cooled_down_entries(monkeypatch):
     import main
 

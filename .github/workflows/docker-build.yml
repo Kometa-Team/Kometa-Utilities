@@ -192,9 +192,16 @@ jobs:
 
       - name: Make package public
         run: |
-          curl -X PATCH \
+          response=$(curl -w "\n%{http_code}" -X PATCH \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             -d '{"visibility":"public"}' \
-            https://api.github.com/user/packages/container/imdb-service/settings
+            https://api.github.com/user/packages/container/imdb-service-base/settings)
+          http_code=$(echo "$response" | tail -n 1)
+          body=$(echo "$response" | head -n -1)
+          echo "HTTP Status: $http_code"
+          echo "Response: $body"
+          if [ "$http_code" -ge 400 ]; then
+            echo "Warning: Failed to make package public (HTTP $http_code), but continuing..."
+          fi
         continue-on-error: true

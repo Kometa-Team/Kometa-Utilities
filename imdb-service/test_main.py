@@ -1025,6 +1025,52 @@ def test_parental_endpoint_uses_cached_value_when_fresh(tmp_path, monkeypatch):
     assert data["parental_guide"]["Frightening"] == "Severe"
 
 
+def test_parental_endpoint_uses_regex_fallback_when_structured_parser_misses(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    # IMDb-like HTML where the category and severity are in sibling divs
+    # rather than the structured <li><a> shape the HTML parser expects.
+    sample_html = """
+    <html><body>
+      <section>
+        <div>Sex &amp; Nudity</div><div>Mild</div>
+      </section>
+      <section>
+        <div>Violence &amp; Gore</div><div>Moderate</div>
+      </section>
+      <section>
+        <div>Profanity</div><div>Severe</div>
+      </section>
+      <section>
+        <div>Alcohol, Drugs &amp; Smoking</div><div>None</div>
+      </section>
+      <section>
+        <div>Frightening &amp; Intense Scenes</div><div>Mild</div>
+      </section>
+    </body></html>
+    """
+
+    async def fake_fetch(_imdb_id):
+        return sample_html
+
+    monkeypatch.setattr(main, "_fetch_parental_guide_html", fake_fetch)
+    client = TestClient(main.app)
+    response = client.get("/parental/tt0111161")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["cached"] is False
+    assert data["parental_guide"] == {
+        "Nudity": "Mild",
+        "Violence": "Moderate",
+        "Profanity": "Severe",
+        "Alcohol": "None",
+        "Frightening": "Mild",
+    }
+
+
 def test_parental_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch):
     db_path = tmp_path / "imdb.db"
     _seed_full_test_db(db_path)

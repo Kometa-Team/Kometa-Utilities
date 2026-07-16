@@ -770,8 +770,7 @@ def _seed_full_test_db(db_path):
 def _seed_legacy_test_db_without_parental(db_path):
     """Seed an older DB shape that predates the imdb_parental table."""
     conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
+    conn.executescript("""
         CREATE TABLE import_meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -788,8 +787,7 @@ def _seed_legacy_test_db_without_parental(db_path):
             runtimeMinutes INTEGER,
             genres TEXT
         );
-        """
-    )
+        """)
     conn.execute(
         "INSERT INTO title_basics VALUES ('tt0111161','movie','The Shawshank Redemption','The Shawshank Redemption',0,1994,NULL,142,'Drama,Crime,Thriller')"
     )
@@ -1099,6 +1097,34 @@ def test_parental_endpoint_uses_regex_fallback_when_structured_parser_misses(tmp
         "Alcohol": "None",
         "Frightening": "Moderate",
     }
+
+
+def test_parental_endpoint_uses_js_injection_when_present(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    # HTML with the browser JS-extraction marker. The parser/regex would fail,
+    # but the injected JSON should be used.
+    sample_html = """
+    <html><body>
+      <li data-testid="rating-item">Sex &amp; Nudity: <span>WRONG</span></li>
+      <!-- kometa-parental-js:{"Nudity": "Severe", "Violence": "Moderate"} -->
+    </body></html>
+    """
+
+    async def fake_fetch(_imdb_id):
+        return sample_html
+
+    monkeypatch.setattr(main, "_fetch_parental_guide_html", fake_fetch)
+    client = TestClient(main.app)
+    response = client.get("/parental/tt0111161")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["cached"] is False
+    assert data["parental_guide"]["Nudity"] == "Severe"
+    assert data["parental_guide"]["Violence"] == "Moderate"
 
 
 def test_parental_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch):

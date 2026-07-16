@@ -778,6 +778,20 @@ def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
     }
 
 
+def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "parental_fetch_success_counts", {"http": 5, "graphql": 3, "browser": 2})
+    client = TestClient(main.app)
+    response = client.get("/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["parental_fetch_success_counts"] == {"http": 5, "graphql": 3, "browser": 2}
+
+
 def test_root_returns_dashboard(tmp_path, monkeypatch):
     import main
 

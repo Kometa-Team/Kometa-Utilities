@@ -114,6 +114,7 @@ parental_prefetch_date: Optional[date] = None
 parental_prefetch_last_id: Optional[str] = None
 parental_prefetch_last_status: Optional[str] = None
 parental_prefetch_last_at: Optional[str] = None
+parental_fetch_success_counts: Dict[str, int] = {"http": 0, "graphql": 0, "browser": 0}
 PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid="advisory-nudity"]',
     'section[data-testid^="advisory-"]',
@@ -1397,6 +1398,8 @@ async def _fetch_parental_guide_html_via_browser(
 
 async def _fetch_parental_guide_html(imdb_id: str) -> str:
     """Fetch the IMDb parental guide page for a title, falling back through HTTP, GraphQL, and browser."""
+    global parental_fetch_success_counts
+
     attempted_proxies: set[str] = set()
     attempts = max(1, PARENTAL_PROXY_RETRY_COUNT if PARENTAL_PROXY_ENABLED else 1)
     last_error: Optional[HTTPException] = None
@@ -1441,6 +1444,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         try:
             html_text = await _fetch_parental_guide_html_via_http(imdb_id, proxy_url)
             if _html_has_parental_markers(html_text):
+                parental_fetch_success_counts["http"] += 1
                 _parental_log(
                     "fetch_http_success",
                     imdb_id,
@@ -1494,6 +1498,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
     if PARENTAL_GRAPHQL_ENABLED:
         try:
             html_text = await _fetch_parental_guide_via_graphql(imdb_id)
+            parental_fetch_success_counts["graphql"] += 1
             _parental_log("fetch_graphql_success", imdb_id)
             return html_text
         except HTTPException as e:
@@ -1513,6 +1518,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
             attempted_proxies.add(proxy_url)
         try:
             html_text = await _fetch_parental_guide_html_via_browser(imdb_id, proxy_url)
+            parental_fetch_success_counts["browser"] += 1
             _parental_log(
                 "fetch_browser_success",
                 imdb_id,
@@ -2385,6 +2391,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 
         <h2>Parental Prefetch</h2>
         <ul id="prefetch"><li>Loading…</li></ul>
+
+        <h2>Parental Fetch Methods</h2>
+        <ul id="fetch-methods"><li>Loading…</li></ul>
     </div>
 
     <script>
@@ -2498,6 +2507,17 @@ async def dashboard(request: Request) -> HTMLResponse:
         el.innerHTML = items.join('');
     }}
 
+    function renderFetchMethods(counts) {{
+        const el = document.getElementById('fetch-methods');
+        if (!counts) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        const items = Object.entries(counts).map(([k, v]) => {{
+            const pct = total ? Math.round((v / total) * 100) : 0;
+            return `<li>${{k}}: <span class="count">${{fmt(v)}} (${{pct}}%)</span></li>`;
+        }});
+        el.innerHTML = items.join('');
+    }}
+
     async function load() {{
         const r = await fetch(BASE + '/stats');
         const d = await r.json();
@@ -2511,6 +2531,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         renderCharts(d.charts_cached, d.chart_progress);
         renderParental(d.parental_cache);
         renderPrefetch(d.parental_prefetch);
+        renderFetchMethods(d.parental_fetch_success_counts);
 
         if (d.phase && d.phase !== 'idle') {{
             if (!polling) polling = setInterval(load, 2000);
@@ -2575,6 +2596,7 @@ async def get_stats() -> Dict[str, Any]:
                 "last_status": parental_prefetch_last_status,
                 "last_at": parental_prefetch_last_at,
             },
+            "parental_fetch_success_counts": parental_fetch_success_counts,
             "charts_cached": list(charts.chart_cache.keys()),
             "download_progress": download_progress,
             "import_progress": import_progress,

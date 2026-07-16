@@ -107,6 +107,9 @@ parental_decodo_browser_session_id: Optional[str] = None
 parental_prefetch_task: Optional[asyncio.Task] = None
 parental_prefetch_count_today: int = 0
 parental_prefetch_date: Optional[date] = None
+parental_prefetch_last_id: Optional[str] = None
+parental_prefetch_last_status: Optional[str] = None
+parental_prefetch_last_at: Optional[str] = None
 PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid="advisory-nudity"]',
     'section[data-testid^="advisory-"]',
@@ -1624,10 +1627,15 @@ async def _prefetch_parental_guide(imdb_id: str) -> bool:
 
     Returns True if successfully cached, False otherwise.
     """
+    global parental_prefetch_last_id, parental_prefetch_last_status, parental_prefetch_last_at
+
+    parental_prefetch_last_id = imdb_id
+    parental_prefetch_last_at = datetime.now(timezone.utc).isoformat()
     try:
         html_text = await _fetch_parental_guide_html(imdb_id)
         parental = _parse_parental_guide_html(html_text)
         await _update_parental_cache(imdb_id, parental)
+        parental_prefetch_last_status = "success"
         _parental_log(
             "prefetch_success",
             imdb_id,
@@ -1635,6 +1643,7 @@ async def _prefetch_parental_guide(imdb_id: str) -> bool:
         )
         return True
     except HTTPException as e:
+        parental_prefetch_last_status = f"failed:{e.status_code}"
         _parental_log(
             "prefetch_failed",
             imdb_id,
@@ -1642,6 +1651,7 @@ async def _prefetch_parental_guide(imdb_id: str) -> bool:
             detail=str(e.detail),
         )
     except Exception as e:
+        parental_prefetch_last_status = f"error:{type(e).__name__}"
         _parental_log("prefetch_error", imdb_id, error=type(e).__name__)
     return False
 
@@ -2261,6 +2271,9 @@ async def dashboard(request: Request) -> HTMLResponse:
             </div>
             <div id="parental-result" class="lookup-result"></div>
         </div>
+
+        <h2>Parental Prefetch</h2>
+        <ul id="prefetch"><li>Loading…</li></ul>
     </div>
 
     <script>
@@ -2363,6 +2376,17 @@ async def dashboard(request: Request) -> HTMLResponse:
         if (e.key === 'Enter') lookupParental();
     }});
 
+    function renderPrefetch(pf) {{
+        const el = document.getElementById('prefetch');
+        if (!pf || !pf.enabled) {{ el.innerHTML = '<li>Prefetch disabled</li>'; return; }}
+        const items = [
+            `<li>today: <span class="count">${{fmt(pf.count_today)}} / ${{fmt(pf.daily_budget)}}</span></li>`,
+            `<li>last: <span class="count">${{pf.last_id || '–'}}</span> <span class="count">(${{pf.last_status || '–'}})</span></li>`,
+            `<li>last_at: <span class="count">${{fmtTime(pf.last_at)}}</span></li>`,
+        ];
+        el.innerHTML = items.join('');
+    }}
+
     async function load() {{
         const r = await fetch(BASE + '/stats');
         const d = await r.json();
@@ -2375,6 +2399,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated);
         renderCharts(d.charts_cached, d.chart_progress);
         renderParental(d.parental_cache);
+        renderPrefetch(d.parental_prefetch);
 
         if (d.phase && d.phase !== 'idle') {{
             if (!polling) polling = setInterval(load, 2000);
@@ -2431,6 +2456,14 @@ async def get_stats() -> Dict[str, Any]:
             "table_counts": counts,
             "table_updated": table_updated,
             "parental_cache": parental_cache,
+            "parental_prefetch": {
+                "enabled": PARENTAL_PREFETCH_ENABLED,
+                "count_today": parental_prefetch_count_today,
+                "daily_budget": PARENTAL_PREFETCH_DAILY_BUDGET,
+                "last_id": parental_prefetch_last_id,
+                "last_status": parental_prefetch_last_status,
+                "last_at": parental_prefetch_last_at,
+            },
             "charts_cached": list(charts.chart_cache.keys()),
             "download_progress": download_progress,
             "import_progress": import_progress,

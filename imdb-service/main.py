@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Mapping, Optional, cast
 from urllib.parse import unquote, urlsplit
 
 import aiosqlite
@@ -60,6 +60,8 @@ PARENTAL_PROXY_URLS = [
 PARENTAL_PROXY_RETRY_COUNT = int(os.getenv("PARENTAL_PROXY_RETRY_COUNT", "2"))
 PARENTAL_PROXY_BAN_TTL_MINUTES = int(os.getenv("PARENTAL_PROXY_BAN_TTL_MINUTES", "30"))
 IMDB_WEB_BASE_URL = "https://www.imdb.com"
+IMDB_GRAPHQL_URL = os.getenv("IMDB_GRAPHQL_URL", "https://api.graphql.imdb.com/")
+PARENTAL_GRAPHQL_ENABLED = os.getenv("PARENTAL_GRAPHQL_ENABLED", "true").lower() == "true"
 PARENTAL_GUIDE_LOGGING_ENABLED = (
     os.getenv("PARENTAL_GUIDE_LOGGING_ENABLED", "true").lower() == "true"
 )
@@ -68,25 +70,13 @@ PARENTAL_BROWSER_SCREENSHOT_DIR = Path(
 )
 
 # --- Parental prefetch config ---
-PARENTAL_PREFETCH_ENABLED = (
-    os.getenv("PARENTAL_PREFETCH_ENABLED", "true").lower() == "true"
-)
+PARENTAL_PREFETCH_ENABLED = os.getenv("PARENTAL_PREFETCH_ENABLED", "true").lower() == "true"
 PARENTAL_PREFETCH_MIN_VOTES = int(os.getenv("PARENTAL_PREFETCH_MIN_VOTES", "25000"))
-PARENTAL_PREFETCH_CANDIDATE_POOL = int(
-    os.getenv("PARENTAL_PREFETCH_CANDIDATE_POOL", "1000")
-)
-PARENTAL_PREFETCH_MIN_DELAY_SECONDS = int(
-    os.getenv("PARENTAL_PREFETCH_MIN_DELAY_SECONDS", "45")
-)
-PARENTAL_PREFETCH_MAX_DELAY_SECONDS = int(
-    os.getenv("PARENTAL_PREFETCH_MAX_DELAY_SECONDS", "180")
-)
-PARENTAL_PREFETCH_IDLE_SECONDS = int(
-    os.getenv("PARENTAL_PREFETCH_IDLE_SECONDS", "60")
-)
-PARENTAL_PREFETCH_DAILY_BUDGET = int(
-    os.getenv("PARENTAL_PREFETCH_DAILY_BUDGET", "100")
-)
+PARENTAL_PREFETCH_CANDIDATE_POOL = int(os.getenv("PARENTAL_PREFETCH_CANDIDATE_POOL", "1000"))
+PARENTAL_PREFETCH_MIN_DELAY_SECONDS = int(os.getenv("PARENTAL_PREFETCH_MIN_DELAY_SECONDS", "45"))
+PARENTAL_PREFETCH_MAX_DELAY_SECONDS = int(os.getenv("PARENTAL_PREFETCH_MAX_DELAY_SECONDS", "180"))
+PARENTAL_PREFETCH_IDLE_SECONDS = int(os.getenv("PARENTAL_PREFETCH_IDLE_SECONDS", "60"))
+PARENTAL_PREFETCH_DAILY_BUDGET = int(os.getenv("PARENTAL_PREFETCH_DAILY_BUDGET", "100"))
 PARENTAL_PREFETCH_ORDER = os.getenv("PARENTAL_PREFETCH_ORDER", "weighted_random")
 
 # --- Global state ---
@@ -110,6 +100,8 @@ parental_prefetch_date: Optional[date] = None
 parental_prefetch_last_id: Optional[str] = None
 parental_prefetch_last_status: Optional[str] = None
 parental_prefetch_last_at: Optional[str] = None
+parental_fetch_success_counts: Dict[str, int] = {"http": 0, "graphql": 0, "browser": 0}
+PARENTAL_FETCH_COUNTS_KEY = "parental_fetch_success_counts"
 PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid="advisory-nudity"]',
     'section[data-testid^="advisory-"]',
@@ -498,6 +490,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️  Could not apply schema updates: {e}")
 
+        # Load persisted parental fetch success counts
+        try:
+            await _load_parental_fetch_success_counts()
+        except Exception as e:
+            print(f"⚠️  Could not load parental fetch success counts: {e}")
+
         # Load last refresh time from DB
         try:
             async with aiosqlite.connect(DB_PATH) as db:
@@ -590,7 +588,7 @@ async def _run_import_pipeline() -> None:
         gz_paths,
         DB_PATH,
         changed_stems,
-        None,
+        0,
         _on_table_start,
         _on_table_done,
         _on_table_progress,
@@ -674,7 +672,7 @@ async def _refresh_single_table(stem: str) -> None:
             gz_paths,
             DB_PATH,
             [stem],
-            None,
+            0,
             _on_table_start,
             _on_table_done,
             _on_table_progress,
@@ -801,6 +799,7 @@ PARENTAL_TYPE_MAP: Dict[str, str] = {
     "Alcohol, Drugs & Smoking": "Alcohol",
     "Frightening & Intense Scenes": "Frightening",
 }
+PARENTAL_GRAPHQL_TYPE_MAP = {v: k for k, v in PARENTAL_TYPE_MAP.items()}
 
 PARENTAL_DB_COLUMNS: Dict[str, str] = {
     "Nudity": "nudity",
@@ -895,7 +894,7 @@ class _ParentalGuideParser(HTMLParser):
             self._other_text.append(text)
 
 
-def _normalize_parental_payload(values: Dict[str, Optional[str]]) -> Dict[str, str]:
+def _normalize_parental_payload(values: Mapping[str, Optional[str]]) -> Dict[str, str]:
     """Fill missing parental categories with 'None' to match Kometa cache reads."""
     return {category: values.get(category) or "None" for category in PARENTAL_TYPE_MAP.values()}
 
@@ -1151,6 +1150,77 @@ async def _fetch_parental_guide_html_via_http(imdb_id: str, proxy_url: Optional[
         raise HTTPException(status_code=502, detail=f"IMDb parental guide request failed: {e}")
 
 
+async def _fetch_parental_guide_via_graphql(imdb_id: str) -> str:
+    """Fetch parental-guide data from IMDb's GraphQL API.
+
+    Returns a synthetic HTML string containing the JS-injected rating comment so
+    the existing parser can consume it unchanged.
+    """
+    query = (
+        '{ title(id: "'
+        + imdb_id
+        + '") { parentsGuide { categories { category { text } severity { text } } } } } }'
+    )
+    started = time.monotonic()
+    _parental_log("graphql_fetch_start", imdb_id, url=IMDB_GRAPHQL_URL)
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
+                "content-type": "application/json",
+            },
+        ) as client:
+            response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as e:
+        _parental_log(
+            "graphql_fetch_error_status",
+            imdb_id,
+            status_code=e.response.status_code,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"IMDb GraphQL parental guide request failed with status {e.response.status_code}",
+        )
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        _parental_log(
+            "graphql_fetch_error",
+            imdb_id,
+            error=type(e).__name__,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise HTTPException(
+            status_code=502, detail=f"IMDb GraphQL parental guide request failed: {e}"
+        )
+
+    title = (data.get("data") or {}).get("title") or {}
+    parents_guide = title.get("parentsGuide") or {}
+    categories = parents_guide.get("categories") or []
+
+    results: Dict[str, str] = {}
+    for cat in categories:
+        cat_text = ((cat or {}).get("category") or {}).get("text", "")
+        sev_text = ((cat or {}).get("severity") or {}).get("text", "")
+        if cat_text in PARENTAL_TYPE_MAP and sev_text:
+            results[PARENTAL_TYPE_MAP[cat_text]] = sev_text
+
+    if not results:
+        _parental_log("graphql_fetch_no_results", imdb_id)
+        raise HTTPException(status_code=404, detail="No parental guide found")
+
+    _parental_log(
+        "graphql_fetch_success",
+        imdb_id,
+        categories=",".join(results.keys()),
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+    return f"<!-- kometa-parental-js:{json.dumps(results)} -->"
+
+
 async def _fetch_parental_guide_html_via_browser(
     imdb_id: str, proxy_url: Optional[str] = None
 ) -> str:
@@ -1209,7 +1279,8 @@ async def _fetch_parental_guide_html_via_browser(
 
                     # Extract ratings directly from the live DOM. This is more
                     # reliable than parsing the serialized HTML after JS rendering.
-                    js_results = await page.evaluate("""
+                    js_results = await page.evaluate(
+                        """
                         () => {
                             const labels = [
                                 ["Sex & Nudity", "Nudity"],
@@ -1232,7 +1303,8 @@ async def _fetch_parental_guide_html_via_browser(
                             }
                             return results;
                         }
-                        """)
+                        """
+                    )
                     html_text = await _safe_page_content(page)
                     if js_results:
                         _parental_log(
@@ -1322,7 +1394,7 @@ async def _fetch_parental_guide_html_via_browser(
 
 
 async def _fetch_parental_guide_html(imdb_id: str) -> str:
-    """Fetch the IMDb parental guide page for a title, falling back to a browser if needed."""
+    """Fetch the IMDb parental guide page for a title, falling back through HTTP, GraphQL, and browser."""
     attempted_proxies: set[str] = set()
     attempts = max(1, PARENTAL_PROXY_RETRY_COUNT if PARENTAL_PROXY_ENABLED else 1)
     last_error: Optional[HTTPException] = None
@@ -1335,6 +1407,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         proxy_count_total=len(PARENTAL_PROXY_URLS),
         proxy_count_healthy=len(healthy_proxies),
         attempts=attempts,
+        graphql_enabled=PARENTAL_GRAPHQL_ENABLED,
         decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
     )
 
@@ -1366,6 +1439,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         try:
             html_text = await _fetch_parental_guide_html_via_http(imdb_id, proxy_url)
             if _html_has_parental_markers(html_text):
+                await _increment_parental_fetch_success("http")
                 _parental_log(
                     "fetch_http_success",
                     imdb_id,
@@ -1413,8 +1487,33 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
                     detail="IMDb blocked the direct parental guide request and no proxy or Decodo browser is configured",
                 )
 
+    # HTTP scraping failed or was blocked. Try IMDb's GraphQL API before the
+    # heavier browser fallback. GraphQL is structured, not WAF-gated, and
+    # cheaper than browser automation.
+    if PARENTAL_GRAPHQL_ENABLED:
+        try:
+            html_text = await _fetch_parental_guide_via_graphql(imdb_id)
+            await _increment_parental_fetch_success("graphql")
+            _parental_log("fetch_graphql_success", imdb_id)
+            return html_text
+        except HTTPException as e:
+            if e.status_code == 404:
+                raise
+            last_error = e
+            _parental_log(
+                "fetch_graphql_failed",
+                imdb_id,
+                status_code=e.status_code,
+                detail=e.detail,
+            )
+
+    for attempt_index in range(attempts):
+        proxy_url = _choose_parental_proxy(attempted_proxies)
+        if proxy_url:
+            attempted_proxies.add(proxy_url)
         try:
             html_text = await _fetch_parental_guide_html_via_browser(imdb_id, proxy_url)
+            await _increment_parental_fetch_success("browser")
             _parental_log(
                 "fetch_browser_success",
                 imdb_id,
@@ -1487,6 +1586,17 @@ async def _query_parental_cache(
         )
 
 
+def _validate_imdb_id(imdb_id: str, prefix: str = "tt") -> str:
+    """Validate and normalize an IMDb-style identifier.
+
+    Raises HTTPException 400 if the ID does not match the expected prefix
+    followed by digits (e.g. tt0111161 or nm0000093).
+    """
+    if not re.fullmatch(rf"{prefix}\d+", imdb_id, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail=f"Invalid IMDb ID: {imdb_id!r}")
+    return imdb_id.lower()
+
+
 def _parental_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
     """Return the number of whole days since the cache was last updated."""
     if not cached_at:
@@ -1537,7 +1647,8 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
     await _ensure_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
+        cursor = await db.execute(
+            """
             SELECT
                 COUNT(*) AS items_cached,
                 SUM(CASE WHEN nudity IS NOT NULL AND nudity != '' THEN 1 ELSE 0 END) AS nudity,
@@ -1546,7 +1657,8 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
                 SUM(CASE WHEN alcohol IS NOT NULL AND alcohol != '' THEN 1 ELSE 0 END) AS alcohol,
                 SUM(CASE WHEN frightening IS NOT NULL AND frightening != '' THEN 1 ELSE 0 END) AS frightening
             FROM imdb_parental
-            """)
+            """
+        )
         row = await cursor.fetchone()
 
     if row is None:
@@ -1565,6 +1677,53 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
             "frightening": row[5] or 0,
         },
     }
+
+
+async def _load_parental_fetch_success_counts() -> None:
+    """Load persisted parental fetch success counts from import_meta."""
+    if not _db_is_ready():
+        return
+    await _ensure_db_schema()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT value FROM import_meta WHERE key = ?", (PARENTAL_FETCH_COUNTS_KEY,)
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            try:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, dict):
+                    for key in parental_fetch_success_counts:
+                        parental_fetch_success_counts[key] = int(loaded.get(key, 0))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+
+async def _save_parental_fetch_success_counts() -> None:
+    """Persist parental fetch success counts to import_meta."""
+    if not _db_is_ready():
+        return
+    await _ensure_db_schema()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO import_meta(key, value)
+            VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (PARENTAL_FETCH_COUNTS_KEY, json.dumps(parental_fetch_success_counts)),
+        )
+        await db.commit()
+
+
+async def _increment_parental_fetch_success(method: str) -> None:
+    """Increment the success counter for a fetch method and persist it."""
+    if method not in parental_fetch_success_counts:
+        return
+    parental_fetch_success_counts[method] += 1
+    await _save_parental_fetch_success_counts()
 
 
 async def _get_parental_prefetch_candidate() -> Optional[str]:
@@ -1599,27 +1758,27 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
             """,  # nosec B608 - order_sql is an internal constant, not user input
             (PARENTAL_PREFETCH_MIN_VOTES, PARENTAL_PREFETCH_CANDIDATE_POOL),
         )
-        rows = await cursor.fetchall()
+        rows: list[Any] = list(await cursor.fetchall())
 
     if not rows:
         return None
 
     if PARENTAL_PREFETCH_ORDER == "votes_desc":
-        return rows[0]["tconst"]
+        return cast(str, rows[0]["tconst"])
 
     # Weighted random by log(votes) for the candidate pool.
     weights = [max(1, int(row["numVotes"])) for row in rows]
-    weights = [w ** 0.5 for w in weights]  # square root flattens the curve
+    weights = [w**0.5 for w in weights]  # square root flattens the curve
     total = sum(weights)
     if total <= 0:
-        return rows[0]["tconst"]
-    pick = random.uniform(0, total)
+        return cast(str, rows[0]["tconst"])
+    pick = random.uniform(0, total)  # nosec B311 - non-cryptographic candidate selection
     cumulative = 0.0
     for row, weight in zip(rows, weights):
         cumulative += weight
         if cumulative >= pick:
-            return row["tconst"]
-    return rows[-1]["tconst"]
+            return cast(str, row["tconst"])
+    return cast(str, rows[-1]["tconst"])
 
 
 async def _prefetch_parental_guide(imdb_id: str) -> bool:
@@ -1685,7 +1844,7 @@ async def _parental_prefetch_worker() -> None:
         if await _prefetch_parental_guide(candidate):
             parental_prefetch_count_today += 1
 
-        delay = random.uniform(
+        delay = random.uniform(  # nosec B311 - non-cryptographic jitter for idle prefetch
             PARENTAL_PREFETCH_MIN_DELAY_SECONDS,
             PARENTAL_PREFETCH_MAX_DELAY_SECONDS,
         )
@@ -2012,7 +2171,8 @@ async def endpoints(request: Request) -> HTMLResponse:
     base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
     if ROOT_PATH:
         base += ROOT_PATH
-    return HTMLResponse(content=f"""<!DOCTYPE html>
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
 <html>
 <head>
     <title>IMDB Service</title>
@@ -2118,7 +2278,8 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 </body>
 </html>
-""")
+"""
+    )
 
 
 @app.post("/refresh/{table}")
@@ -2155,7 +2316,8 @@ async def dashboard(request: Request) -> HTMLResponse:
         for stem in DATASET_FILES
     }
 
-    return HTMLResponse(content=f"""<!DOCTYPE html>
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -2274,6 +2436,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 
         <h2>Parental Prefetch</h2>
         <ul id="prefetch"><li>Loading…</li></ul>
+
+        <h2>Parental Fetch Methods</h2>
+        <ul id="fetch-methods"><li>Loading…</li></ul>
     </div>
 
     <script>
@@ -2387,6 +2552,17 @@ async def dashboard(request: Request) -> HTMLResponse:
         el.innerHTML = items.join('');
     }}
 
+    function renderFetchMethods(counts) {{
+        const el = document.getElementById('fetch-methods');
+        if (!counts) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        const items = Object.entries(counts).map(([k, v]) => {{
+            const pct = total ? Math.round((v / total) * 100) : 0;
+            return `<li>${{k}}: <span class="count">${{fmt(v)}} (${{pct}}%)</span></li>`;
+        }});
+        el.innerHTML = items.join('');
+    }}
+
     async function load() {{
         const r = await fetch(BASE + '/stats');
         const d = await r.json();
@@ -2400,6 +2576,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         renderCharts(d.charts_cached, d.chart_progress);
         renderParental(d.parental_cache);
         renderPrefetch(d.parental_prefetch);
+        renderFetchMethods(d.parental_fetch_success_counts);
 
         if (d.phase && d.phase !== 'idle') {{
             if (!polling) polling = setInterval(load, 2000);
@@ -2421,7 +2598,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     </script>
 </body>
 </html>
-""")
+"""
+    )
 
 
 @app.get("/stats")
@@ -2464,6 +2642,7 @@ async def get_stats() -> Dict[str, Any]:
                 "last_status": parental_prefetch_last_status,
                 "last_at": parental_prefetch_last_at,
             },
+            "parental_fetch_success_counts": parental_fetch_success_counts,
             "charts_cached": list(charts.chart_cache.keys()),
             "download_progress": download_progress,
             "import_progress": import_progress,
@@ -2478,6 +2657,7 @@ async def get_ratings(imdb_id: str) -> Dict[str, Any]:
     """Return the IMDb rating metadata for a single title."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     field = "ratings"
     sql = """
@@ -2511,6 +2691,7 @@ async def get_genres(imdb_id: str) -> Dict[str, Any]:
     """Return the IMDb genres for a single title."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     field = "genres"
     sql = """
@@ -2548,6 +2729,7 @@ async def get_episode_rating(
     """Return rating metadata for a single episode of a series."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    parent_imdb_id = _validate_imdb_id(parent_imdb_id)
 
     sql = """
         SELECT te.tconst, te.parentTconst, te.seasonNumber, te.episodeNumber,
@@ -2589,6 +2771,7 @@ async def get_episode_ratings(
     """Return all episode ratings for a series, optionally filtered to one season."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    parent_imdb_id = _validate_imdb_id(parent_imdb_id)
 
     params: list = [parent_imdb_id]
     sql = """
@@ -2653,12 +2836,11 @@ async def get_parental_guide(
     """Return cached IMDb parental-guide labels for a title, refreshing when stale."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     _parental_log("endpoint_start", imdb_id, ignore_cache=ignore_cache)
     cached, expired, cached_at = (
-        (None, None, None)
-        if ignore_cache
-        else await _query_parental_cache(imdb_id)
+        (None, None, None) if ignore_cache else await _query_parental_cache(imdb_id)
     )
     if cached and expired is False:
         _parental_log("endpoint_cache_hit", imdb_id, cached_at=cached_at)
@@ -2678,9 +2860,7 @@ async def get_parental_guide(
     html_text = await _fetch_parental_guide_html(imdb_id)
     parental = _parse_parental_guide_html(html_text)
     cached_at = await _update_parental_cache(imdb_id, parental)
-    _parental_log(
-        "endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys()))
-    )
+    _parental_log("endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys())))
     return {
         "imdb_id": imdb_id,
         "cached": False,
@@ -2696,6 +2876,7 @@ async def get_title(imdb_id: str) -> Dict[str, Any]:
     """Return full title record by IMDb ID (e.g. tt0111161)."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2771,6 +2952,7 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
     """Return person record by IMDb person ID (e.g. nm0000093)."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id, prefix="nm")
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

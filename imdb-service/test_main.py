@@ -778,6 +778,69 @@ def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
     }
 
 
+def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main, "parental_fetch_success_counts", {"http": 5, "graphql": 3, "browser": 2}
+    )
+    client = TestClient(main.app)
+    response = client.get("/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["parental_fetch_success_counts"] == {"http": 5, "graphql": 3, "browser": 2}
+
+
+@pytest.mark.asyncio
+async def test_parental_fetch_success_counts_persist_to_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0}
+    )
+
+    await main._increment_parental_fetch_success("graphql")
+    await main._increment_parental_fetch_success("graphql")
+    await main._increment_parental_fetch_success("browser")
+
+    assert main.parental_fetch_success_counts == {"http": 0, "graphql": 2, "browser": 1}
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT value FROM import_meta WHERE key = ?", (main.PARENTAL_FETCH_COUNTS_KEY,)
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert json.loads(row[0]) == {"http": 0, "graphql": 2, "browser": 1}
+
+
+@pytest.mark.asyncio
+async def test_parental_fetch_success_counts_load_from_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO import_meta(key, value) VALUES (?, ?)",
+        ("parental_fetch_success_counts", json.dumps({"http": 7, "graphql": 3, "browser": 1})),
+    )
+    conn.commit()
+    conn.close()
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0}
+    )
+    await main._load_parental_fetch_success_counts()
+    assert main.parental_fetch_success_counts == {"http": 7, "graphql": 3, "browser": 1}
+
+
 def test_root_returns_dashboard(tmp_path, monkeypatch):
     import main
 
@@ -840,7 +903,8 @@ def _seed_full_test_db(db_path):
 def _seed_legacy_test_db_without_parental(db_path):
     """Seed an older DB shape that predates the imdb_parental table."""
     conn = sqlite3.connect(db_path)
-    conn.executescript("""
+    conn.executescript(
+        """
         CREATE TABLE import_meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -857,7 +921,8 @@ def _seed_legacy_test_db_without_parental(db_path):
             runtimeMinutes INTEGER,
             genres TEXT
         );
-        """)
+        """
+    )
     conn.execute(
         "INSERT INTO title_basics VALUES ('tt0111161','movie','The Shawshank Redemption','The Shawshank Redemption',0,1994,NULL,142,'Drama,Crime,Thriller')"
     )
@@ -1378,6 +1443,32 @@ def test_parental_endpoint_returns_503_when_no_db(tmp_path, monkeypatch):
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "path,bad_id,query",
+    [
+        ("/title/{id}", "notanid", ""),
+        ("/title/{id}", "nm0000093", ""),
+        ("/ratings/{id}", "bad", ""),
+        ("/genre/{id}", "tt", ""),
+        ("/parental/{id}", "ttabc", ""),
+        ("/episode-rating/{id}", "tt", "?season=1&episode=1"),
+        ("/episode-ratings/{id}", "12345", ""),
+        ("/person/{id}", "tt0111161", ""),
+        ("/person/{id}", "bad", ""),
+    ],
+)
+def test_endpoints_reject_malformed_imdb_ids(tmp_path, monkeypatch, path, bad_id, query):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get(path.format(id=bad_id) + query)
+    assert response.status_code == 400
+    assert "Invalid IMDb ID" in response.json()["detail"]
+
+
 def _seed_prefetch_test_db(db_path):
     """Seed DB with title_basics + title_ratings rows for prefetch tests."""
     conn = sqlite3.connect(db_path)
@@ -1543,6 +1634,117 @@ async def test_fetch_parental_html_does_not_fallback_on_404(monkeypatch):
 
     with pytest.raises(HTTPException, match="not found"):
         await main._fetch_parental_guide_html("tt9999999")
+
+
+@pytest.mark.asyncio
+async def test_fetch_parental_graphql_parses_categories(monkeypatch):
+    import main
+
+    gql_response = {
+        "data": {
+            "title": {
+                "parentsGuide": {
+                    "categories": [
+                        {"category": {"text": "Sex & Nudity"}, "severity": {"text": "Mild"}},
+                        {"category": {"text": "Violence & Gore"}, "severity": {"text": "Moderate"}},
+                        {"category": {"text": "Profanity"}, "severity": {"text": "Severe"}},
+                        {
+                            "category": {"text": "Alcohol, Drugs & Smoking"},
+                            "severity": {"text": "None"},
+                        },
+                        {
+                            "category": {"text": "Frightening & Intense Scenes"},
+                            "severity": {"text": "Mild"},
+                        },
+                    ]
+                }
+            }
+        }
+    }
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return gql_response
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def post(self, url, json):
+            return FakeResponse()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    html = await main._fetch_parental_guide_via_graphql("tt0111161")
+    assert "<!-- kometa-parental-js:" in html
+    parsed = main._parse_parental_guide_html(html)
+    assert parsed["Nudity"] == "Mild"
+    assert parsed["Violence"] == "Moderate"
+    assert parsed["Profanity"] == "Severe"
+    assert parsed["Alcohol"] == "None"
+    assert parsed["Frightening"] == "Mild"
+
+
+@pytest.mark.asyncio
+async def test_fetch_parental_graphql_raises_404_when_empty(monkeypatch):
+    from fastapi import HTTPException
+
+    import main
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": {"title": {"parentsGuide": {"categories": []}}}}
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def post(self, url, json):
+            return FakeResponse()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    with pytest.raises(HTTPException, match="No parental guide found"):
+        await main._fetch_parental_guide_via_graphql("tt9999999")
+
+
+@pytest.mark.asyncio
+async def test_fetch_parental_html_falls_back_to_graphql(monkeypatch):
+    import main
+
+    async def fail_http(_imdb_id, proxy_url=None):
+        raise main.HTTPException(status_code=403, detail="blocked")
+
+    async def fail_browser(_imdb_id, proxy_url=None):
+        raise AssertionError("browser fallback should not run when GraphQL succeeds")
+
+    async def fake_graphql(_imdb_id):
+        return '<!-- kometa-parental-js:{"Nudity":"Mild"} -->'
+
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", fail_http)
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_browser", fail_browser)
+    monkeypatch.setattr(main, "_fetch_parental_guide_via_graphql", fake_graphql)
+    # Enable a bypass so the 403 fail-fast does not kick in before GraphQL.
+    monkeypatch.setattr(main, "PARENTAL_DECODO_BROWSER_ENABLED", True)
+
+    html = await main._fetch_parental_guide_html("tt0111161")
+    assert "kometa-parental-js" in html
 
 
 def test_html_has_waf_challenge_detects_imdb_interstitial():

@@ -792,6 +792,49 @@ def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
     assert data["parental_fetch_success_counts"] == {"http": 5, "graphql": 3, "browser": 2}
 
 
+@pytest.mark.asyncio
+async def test_parental_fetch_success_counts_persist_to_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0})
+
+    await main._increment_parental_fetch_success("graphql")
+    await main._increment_parental_fetch_success("graphql")
+    await main._increment_parental_fetch_success("browser")
+
+    assert main.parental_fetch_success_counts == {"http": 0, "graphql": 2, "browser": 1}
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT value FROM import_meta WHERE key = ?", (main.PARENTAL_FETCH_COUNTS_KEY,)
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert json.loads(row[0]) == {"http": 0, "graphql": 2, "browser": 1}
+
+
+@pytest.mark.asyncio
+async def test_parental_fetch_success_counts_load_from_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO import_meta(key, value) VALUES (?, ?)",
+        ("parental_fetch_success_counts", json.dumps({"http": 7, "graphql": 3, "browser": 1})),
+    )
+    conn.commit()
+    conn.close()
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0})
+    await main._load_parental_fetch_success_counts()
+    assert main.parental_fetch_success_counts == {"http": 7, "graphql": 3, "browser": 1}
+
+
 def test_root_returns_dashboard(tmp_path, monkeypatch):
     import main
 

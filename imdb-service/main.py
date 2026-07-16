@@ -115,6 +115,7 @@ parental_prefetch_last_id: Optional[str] = None
 parental_prefetch_last_status: Optional[str] = None
 parental_prefetch_last_at: Optional[str] = None
 parental_fetch_success_counts: Dict[str, int] = {"http": 0, "graphql": 0, "browser": 0}
+PARENTAL_FETCH_COUNTS_KEY = "parental_fetch_success_counts"
 PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid="advisory-nudity"]',
     'section[data-testid^="advisory-"]',
@@ -502,6 +503,12 @@ async def lifespan(app: FastAPI):
             await _ensure_db_schema()
         except Exception as e:
             print(f"⚠️  Could not apply schema updates: {e}")
+
+        # Load persisted parental fetch success counts
+        try:
+            await _load_parental_fetch_success_counts()
+        except Exception as e:
+            print(f"⚠️  Could not load parental fetch success counts: {e}")
 
         # Load last refresh time from DB
         try:
@@ -1398,8 +1405,6 @@ async def _fetch_parental_guide_html_via_browser(
 
 async def _fetch_parental_guide_html(imdb_id: str) -> str:
     """Fetch the IMDb parental guide page for a title, falling back through HTTP, GraphQL, and browser."""
-    global parental_fetch_success_counts
-
     attempted_proxies: set[str] = set()
     attempts = max(1, PARENTAL_PROXY_RETRY_COUNT if PARENTAL_PROXY_ENABLED else 1)
     last_error: Optional[HTTPException] = None
@@ -1444,7 +1449,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         try:
             html_text = await _fetch_parental_guide_html_via_http(imdb_id, proxy_url)
             if _html_has_parental_markers(html_text):
-                parental_fetch_success_counts["http"] += 1
+                await _increment_parental_fetch_success("http")
                 _parental_log(
                     "fetch_http_success",
                     imdb_id,
@@ -1498,7 +1503,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
     if PARENTAL_GRAPHQL_ENABLED:
         try:
             html_text = await _fetch_parental_guide_via_graphql(imdb_id)
-            parental_fetch_success_counts["graphql"] += 1
+            await _increment_parental_fetch_success("graphql")
             _parental_log("fetch_graphql_success", imdb_id)
             return html_text
         except HTTPException as e:
@@ -1518,7 +1523,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
             attempted_proxies.add(proxy_url)
         try:
             html_text = await _fetch_parental_guide_html_via_browser(imdb_id, proxy_url)
-            parental_fetch_success_counts["browser"] += 1
+            await _increment_parental_fetch_success("browser")
             _parental_log(
                 "fetch_browser_success",
                 imdb_id,
@@ -1682,6 +1687,57 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
             "frightening": row[5] or 0,
         },
     }
+
+
+async def _load_parental_fetch_success_counts() -> None:
+    """Load persisted parental fetch success counts from import_meta."""
+    global parental_fetch_success_counts
+
+    if not _db_is_ready():
+        return
+    await _ensure_db_schema()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT value FROM import_meta WHERE key = ?", (PARENTAL_FETCH_COUNTS_KEY,)
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            try:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, dict):
+                    for key in parental_fetch_success_counts:
+                        parental_fetch_success_counts[key] = int(loaded.get(key, 0))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+
+async def _save_parental_fetch_success_counts() -> None:
+    """Persist parental fetch success counts to import_meta."""
+    if not _db_is_ready():
+        return
+    await _ensure_db_schema()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO import_meta(key, value)
+            VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (PARENTAL_FETCH_COUNTS_KEY, json.dumps(parental_fetch_success_counts)),
+        )
+        await db.commit()
+
+
+async def _increment_parental_fetch_success(method: str) -> None:
+    """Increment the success counter for a fetch method and persist it."""
+    global parental_fetch_success_counts
+
+    if method not in parental_fetch_success_counts:
+        return
+    parental_fetch_success_counts[method] += 1
+    await _save_parental_fetch_success_counts()
 
 
 async def _get_parental_prefetch_candidate() -> Optional[str]:

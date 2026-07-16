@@ -826,11 +826,23 @@ def _extract_parental_guide_regex(html_text: str) -> Dict[str, str]:
 
 def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
     """Parse IMDb parental-guide HTML into Kometa-compatible category labels."""
+    if _html_has_no_parental_guide_notice(html_text):
+        raise HTTPException(status_code=404, detail="No parental guide found")
+
+    # If the browser path extracted ratings via JS, it injected a JSON comment.
+    js_match = re.search(r"<!-- kometa-parental-js:({.*?}) -->", html_text)
+    if js_match:
+        try:
+            js_results = json.loads(js_match.group(1))
+            if js_results and isinstance(js_results, dict):
+                _parental_log("parse_js_injection_used", categories=",".join(js_results.keys()))
+                return _normalize_parental_payload(js_results)
+        except json.JSONDecodeError:
+            pass
+
     parser = _ParentalGuideParser()
     parser.feed(html_text)
     parsed = _normalize_parental_payload(parser.results)
-    if _html_has_no_parental_guide_notice(html_text):
-        raise HTTPException(status_code=404, detail="No parental guide found")
     if not all(value == "None" for value in parsed.values()):
         return parsed
 
@@ -1100,7 +1112,43 @@ async def _fetch_parental_guide_html_via_browser(
                     # Give the page a moment to settle before reading content();
                     # otherwise Page.content can race with ongoing navigation.
                     await page.wait_for_timeout(1000)
+
+                    # Extract ratings directly from the live DOM. This is more
+                    # reliable than parsing the serialized HTML after JS rendering.
+                    js_results = await page.evaluate("""
+                        () => {
+                            const labels = [
+                                ["Sex & Nudity", "Nudity"],
+                                ["Violence & Gore", "Violence"],
+                                ["Profanity", "Profanity"],
+                                ["Alcohol, Drugs & Smoking", "Alcohol"],
+                                ["Frightening & Intense Scenes", "Frightening"]
+                            ];
+                            const results = {};
+                            for (const [text, key] of labels) {
+                                const items = Array.from(document.querySelectorAll('li[data-testid="rating-item"]'));
+                                for (const item of items) {
+                                    if (item.innerText.includes(text)) {
+                                        const m = item.innerText.match(/(None|Mild|Moderate|Severe)/i);
+                                        if (m) {
+                                            results[key] = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+                                        }
+                                    }
+                                }
+                            }
+                            return results;
+                        }
+                        """)
                     html_text = cast(str, await page.content())
+                    if js_results:
+                        _parental_log(
+                            "browser_js_extraction",
+                            imdb_id,
+                            results_count=len(js_results),
+                            categories=",".join(js_results.keys()),
+                        )
+                        html_text += f"\n<!-- kometa-parental-js:{json.dumps(js_results)} -->\n"
+
                     if _html_has_parental_markers(html_text):
                         _parental_log(
                             "browser_fetch_success",
@@ -1359,8 +1407,7 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
     await _ensure_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            """
+        cursor = await db.execute("""
             SELECT
                 COUNT(*) AS items_cached,
                 SUM(CASE WHEN nudity IS NOT NULL AND nudity != '' THEN 1 ELSE 0 END) AS nudity,
@@ -1369,8 +1416,7 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
                 SUM(CASE WHEN alcohol IS NOT NULL AND alcohol != '' THEN 1 ELSE 0 END) AS alcohol,
                 SUM(CASE WHEN frightening IS NOT NULL AND frightening != '' THEN 1 ELSE 0 END) AS frightening
             FROM imdb_parental
-            """
-        )
+            """)
         row = await cursor.fetchone()
 
     if row is None:
@@ -1705,8 +1751,7 @@ async def endpoints(request: Request) -> HTMLResponse:
     base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
     if ROOT_PATH:
         base += ROOT_PATH
-    return HTMLResponse(
-        content=f"""<!DOCTYPE html>
+    return HTMLResponse(content=f"""<!DOCTYPE html>
 <html>
 <head>
     <title>IMDB Service</title>
@@ -1812,8 +1857,7 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 </body>
 </html>
-"""
-    )
+""")
 
 
 @app.post("/refresh/{table}")
@@ -1850,8 +1894,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         for stem in DATASET_FILES
     }
 
-    return HTMLResponse(
-        content=f"""<!DOCTYPE html>
+    return HTMLResponse(content=f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -2047,8 +2090,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     </script>
 </body>
 </html>
-"""
-    )
+""")
 
 
 @app.get("/stats")

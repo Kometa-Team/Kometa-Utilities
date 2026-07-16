@@ -744,6 +744,7 @@ async def _rebuild_charts_then_schedule() -> None:
         CHART_CACHE_PATH
     ):
         print("✅ Chart cache loaded from disk (fresh)")
+        _set_phase("idle")
         await _refresh_scheduler()
         return
 
@@ -767,6 +768,7 @@ async def _rebuild_charts_then_schedule() -> None:
         print(f"⚠️  Chart rebuild failed: {e}")
     finally:
         chart_progress = None
+        _set_phase("idle")
     await _refresh_scheduler()
 
 

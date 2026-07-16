@@ -3031,6 +3031,45 @@ async def test_initial_import_then_schedule_starts_prefetch_worker():
         main.parental_prefetch_task = original_task
 
 
+async def test_rebuild_charts_then_schedule_sets_idle_phase(tmp_path, monkeypatch):
+    """_rebuild_charts_then_schedule must leave current_phase as idle."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    sqlite3.connect(db_path).close()
+
+    async def fake_scheduler():
+        pass
+
+    with patch.object(main.charts, "_cache_is_fresh", return_value=False):
+        with patch.object(main.charts, "rebuild_all_charts"):
+            with patch.object(main, "_refresh_scheduler", fake_scheduler):
+                await main._rebuild_charts_then_schedule()
+
+    assert main.current_phase == "idle"
+
+
+async def test_rebuild_charts_then_schedule_idle_when_cache_fresh(tmp_path, monkeypatch):
+    """_rebuild_charts_then_schedule resets phase to idle even when cache is fresh."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    sqlite3.connect(db_path).close()
+    monkeypatch.setattr(main, "current_phase", "building_charts")
+
+    async def fake_scheduler():
+        pass
+
+    with patch.object(main.charts, "_cache_is_fresh", return_value=True):
+        with patch.object(main.charts, "load_chart_cache", return_value=True):
+            with patch.object(main, "_refresh_scheduler", fake_scheduler):
+                await main._rebuild_charts_then_schedule()
+
+    assert main.current_phase == "idle"
+
+
 def test_dashboard_renders_html(tmp_path, monkeypatch):
     import main
 

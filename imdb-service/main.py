@@ -2046,6 +2046,19 @@ async def dashboard(request: Request) -> HTMLResponse:
         ul {{ list-style: none; padding: 0; margin: 0; columns: 2; }}
         li {{ font-size: 13px; padding: 4px 0; }}
         .count {{ color: #8a94a6; }}
+        .lookup {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }}
+        .lookup input {{
+            background: #0f1419; color: #e6e6e6; border: 1px solid #2a323d;
+            padding: 8px 12px; border-radius: 6px; font-size: 13px; min-width: 180px;
+        }}
+        .lookup-result {{ margin-top: 16px; font-size: 13px; }}
+        .lookup-result .guide-row {{ display: flex; justify-content: space-between;
+                                     padding: 4px 0; border-bottom: 1px solid #2a323d; }}
+        .lookup-result .guide-row:last-child {{ border-bottom: none; }}
+        .lookup-result .guide-label {{ color: #8a94a6; }}
+        .lookup-result .guide-value {{ font-weight: 600; }}
+        .lookup-error {{ color: #e05f5f; margin-top: 8px; }}
+        .lookup-meta {{ color: #8a94a6; font-size: 12px; margin-top: 8px; }}
     </style>
 </head>
 <body>
@@ -2082,6 +2095,15 @@ async def dashboard(request: Request) -> HTMLResponse:
 
         <h2>Parental Cache</h2>
         <ul id="parental"><li>Loading…</li></ul>
+
+        <h2>Parental Guide Lookup</h2>
+        <div class="card">
+            <div class="lookup">
+                <input type="text" id="parental-id" placeholder="tt0111161" maxlength="12">
+                <button onclick="lookupParental()">Lookup</button>
+            </div>
+            <div id="parental-result" class="lookup-result"></div>
+        </div>
     </div>
 
     <script>
@@ -2155,6 +2177,34 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}
         el.innerHTML = items.join('');
     }}
+
+    async function lookupParental() {{
+        const input = document.getElementById('parental-id');
+        const resultEl = document.getElementById('parental-result');
+        let imdbId = input.value.trim();
+        if (!imdbId) {{ resultEl.innerHTML = '<div class="lookup-error">Enter an IMDb ID</div>'; return; }}
+        if (!/^tt\\d+$/i.test(imdbId)) {{ resultEl.innerHTML = '<div class="lookup-error">ID must look like tt0111161</div>'; return; }}
+        imdbId = imdbId.toLowerCase();
+        resultEl.innerHTML = '<div class="lookup-meta">Loading…</div>';
+        try {{
+            const r = await fetch(BASE + '/parental/' + imdbId);
+            if (r.status === 404) {{ resultEl.innerHTML = '<div class="lookup-error">No parental guide found</div>'; return; }}
+            if (!r.ok) {{ resultEl.innerHTML = '<div class="lookup-error">Error: ' + r.status + ' ' + r.statusText + '</div>'; return; }}
+            const data = await r.json();
+            const guide = data.parental_guide || {{}};
+            const rows = Object.keys(guide).length
+                ? Object.entries(guide).map(([k, v]) => `<div class="guide-row"><span class="guide-label">${{k}}</span><span class="guide-value">${{v || '–'}}</span></div>`).join('')
+                : '<div class="guide-row"><span class="guide-label">No advisory data</span></div>';
+            const meta = `<div class="lookup-meta">${{data.cached ? 'Cached' : 'Fetched'}} ${{fmtTime(data.cached_at)}} · age ${{data.cache_age_days != null ? data.cache_age_days : '–'}} day(s) · TTL ${{data.ttl_days || '–'}} day(s)</div>`;
+            resultEl.innerHTML = rows + meta;
+        }} catch (e) {{
+            resultEl.innerHTML = '<div class="lookup-error">Request failed: ' + e.message + '</div>';
+        }}
+    }}
+
+    document.getElementById('parental-id').addEventListener('keypress', function(e) {{
+        if (e.key === 'Enter') lookupParental();
+    }});
 
     async function load() {{
         const r = await fetch(BASE + '/stats');

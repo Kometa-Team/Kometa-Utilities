@@ -844,6 +844,15 @@ def _parse_parental_guide_html(html_text: str) -> Dict[str, str]:
     regex_results = _extract_parental_guide_regex(html_text)
     parsed = _normalize_parental_payload(regex_results)
     if all(value == "None" for value in parsed.values()):
+        # DEBUG: save the HTML so we can inspect why parsing failed
+        debug_path = Path(
+            f"/tmp/parental-debug-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.html"
+        )
+        try:
+            debug_path.write_text(html_text, encoding="utf-8")
+            _parental_log("parse_debug_html_saved", path=str(debug_path))
+        except Exception:  # nosec B110 - temporary debug save, safe to ignore
+            pass
         raise HTTPException(status_code=404, detail="No parental guide found")
     return parsed
 

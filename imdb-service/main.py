@@ -1487,6 +1487,19 @@ async def _query_parental_cache(
         )
 
 
+def _validate_imdb_id(imdb_id: str, prefix: str = "tt") -> str:
+    """Validate and normalize an IMDb-style identifier.
+
+    Raises HTTPException 400 if the ID does not match the expected prefix
+    followed by digits (e.g. tt0111161 or nm0000093).
+    """
+    if not re.fullmatch(rf"{prefix}\d+", imdb_id, re.IGNORECASE):
+        raise HTTPException(
+            status_code=400, detail=f"Invalid IMDb ID: {imdb_id!r}"
+        )
+    return imdb_id.lower()
+
+
 def _parental_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
     """Return the number of whole days since the cache was last updated."""
     if not cached_at:
@@ -2478,6 +2491,7 @@ async def get_ratings(imdb_id: str) -> Dict[str, Any]:
     """Return the IMDb rating metadata for a single title."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     field = "ratings"
     sql = """
@@ -2511,6 +2525,7 @@ async def get_genres(imdb_id: str) -> Dict[str, Any]:
     """Return the IMDb genres for a single title."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     field = "genres"
     sql = """
@@ -2548,6 +2563,7 @@ async def get_episode_rating(
     """Return rating metadata for a single episode of a series."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    parent_imdb_id = _validate_imdb_id(parent_imdb_id)
 
     sql = """
         SELECT te.tconst, te.parentTconst, te.seasonNumber, te.episodeNumber,
@@ -2589,6 +2605,7 @@ async def get_episode_ratings(
     """Return all episode ratings for a series, optionally filtered to one season."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    parent_imdb_id = _validate_imdb_id(parent_imdb_id)
 
     params: list = [parent_imdb_id]
     sql = """
@@ -2653,6 +2670,7 @@ async def get_parental_guide(
     """Return cached IMDb parental-guide labels for a title, refreshing when stale."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     _parental_log("endpoint_start", imdb_id, ignore_cache=ignore_cache)
     cached, expired, cached_at = (
@@ -2696,6 +2714,7 @@ async def get_title(imdb_id: str) -> Dict[str, Any]:
     """Return full title record by IMDb ID (e.g. tt0111161)."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2771,6 +2790,7 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
     """Return person record by IMDb person ID (e.g. nm0000093)."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id, prefix="nm")
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

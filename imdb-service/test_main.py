@@ -1378,6 +1378,32 @@ def test_parental_endpoint_returns_503_when_no_db(tmp_path, monkeypatch):
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "path,bad_id,query",
+    [
+        ("/title/{id}", "notanid", ""),
+        ("/title/{id}", "nm0000093", ""),
+        ("/ratings/{id}", "bad", ""),
+        ("/genre/{id}", "tt", ""),
+        ("/parental/{id}", "ttabc", ""),
+        ("/episode-rating/{id}", "tt", "?season=1&episode=1"),
+        ("/episode-ratings/{id}", "12345", ""),
+        ("/person/{id}", "tt0111161", ""),
+        ("/person/{id}", "bad", ""),
+    ],
+)
+def test_endpoints_reject_malformed_imdb_ids(tmp_path, monkeypatch, path, bad_id, query):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get(path.format(id=bad_id) + query)
+    assert response.status_code == 400
+    assert "Invalid IMDb ID" in response.json()["detail"]
+
+
 def _seed_prefetch_test_db(db_path):
     """Seed DB with title_basics + title_ratings rows for prefetch tests."""
     conn = sqlite3.connect(db_path)

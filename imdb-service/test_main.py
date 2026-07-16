@@ -35,6 +35,7 @@ def test_create_schema_creates_all_tables():
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cursor.fetchall()}
         assert tables == {
+            "imdb_keywords",
             "imdb_parental",
             "title_basics",
             "title_ratings",
@@ -1722,6 +1723,196 @@ def test_parental_endpoint_returns_503_when_no_db(tmp_path, monkeypatch):
     assert response.status_code == 503
 
 
+def _keywords_graphql_response(keywords, has_next_page=False, end_cursor=None):
+    """Build a GraphQL keywords response for mocking."""
+    edges = []
+    for name, interested, voted in keywords:
+        edges.append(
+            {
+                "node": {
+                    "interestScore": {"usersInterested": interested, "usersVoted": voted},
+                    "keyword": {"id": "kw0000001", "text": {"text": name}},
+                }
+            }
+        )
+    return {
+        "data": {
+            "title": {
+                "keywords": {
+                    "pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor},
+                    "edges": edges,
+                }
+            }
+        }
+    }
+
+
+def _mock_async_httpx_client(responses):
+    """Return an AsyncMock that mimics httpx.AsyncClient for a list of responses."""
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=responses)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return mock_client
+
+
+def test_keywords_endpoint_returns_cached_value_when_fresh(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    keywords = {"prison": [31, 32], "escape": [22, 23]}
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date) VALUES (?, ?, ?)",
+        (
+            "tt0111161",
+            json.dumps(keywords),
+            (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    client = TestClient(main.app)
+    response = client.get("/keywords/tt0111161")
+    assert response.status_code == 200
+    data = response.json()
+    assert data == {"imdb_id": "tt0111161", "keywords": keywords}
+
+
+def test_keywords_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    response_data = _keywords_graphql_response([("prison", 31, 32), ("escape", 22, 23)])
+    mock_client = _mock_async_httpx_client(
+        [MagicMock(json=lambda: response_data, raise_for_status=MagicMock())]
+    )
+
+    with patch("main.httpx.AsyncClient", return_value=mock_client):
+        client = TestClient(main.app)
+        response = client.get("/keywords/tt0111161")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "imdb_id": "tt0111161",
+        "keywords": {"prison": [31, 32], "escape": [22, 23]},
+    }
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT keywords FROM imdb_keywords WHERE imdb_id = ?", ("tt0111161",)
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert json.loads(row[0]) == {"prison": [31, 32], "escape": [22, 23]}
+
+
+def test_keywords_endpoint_paginates(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    page1 = _keywords_graphql_response(
+        [("prison", 31, 32)], has_next_page=True, end_cursor="cursor1"
+    )
+    page2 = _keywords_graphql_response([("escape", 22, 23)], has_next_page=False)
+    responses = [
+        MagicMock(json=lambda d=data: d, raise_for_status=MagicMock()) for data in [page1, page2]
+    ]
+    mock_client = _mock_async_httpx_client(responses)
+
+    with patch("main.httpx.AsyncClient", return_value=mock_client):
+        client = TestClient(main.app)
+        response = client.get("/keywords/tt0111161")
+
+    assert response.status_code == 200
+    assert response.json()["keywords"] == {"prison": [31, 32], "escape": [22, 23]}
+    assert mock_client.post.call_count == 2
+
+
+def test_keywords_endpoint_ignore_cache_forces_refresh(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    keywords = {"prison": [31, 32]}
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date) VALUES (?, ?, ?)",
+        (
+            "tt0111161",
+            json.dumps(keywords),
+            (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    response_data = _keywords_graphql_response([("escape", 22, 23)])
+    mock_client = _mock_async_httpx_client(
+        [MagicMock(json=lambda: response_data, raise_for_status=MagicMock())]
+    )
+
+    with patch("main.httpx.AsyncClient", return_value=mock_client):
+        client = TestClient(main.app)
+        response = client.get("/keywords/tt0111161?ignore_cache=true")
+
+    assert response.status_code == 200
+    assert response.json()["keywords"] == {"escape": [22, 23]}
+
+
+def test_keywords_endpoint_returns_503_when_no_db(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/keywords/tt0111161")
+    assert response.status_code == 503
+
+
+def test_keywords_endpoint_returns_404_for_missing_title(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    error_response = {"errors": [{"message": "Title does not exist"}]}
+    mock_client = _mock_async_httpx_client(
+        [MagicMock(json=lambda: error_response, raise_for_status=MagicMock())]
+    )
+
+    with patch("main.httpx.AsyncClient", return_value=mock_client):
+        client = TestClient(main.app, raise_server_exceptions=False)
+        response = client.get("/keywords/tt9999999")
+
+    assert response.status_code == 404
+
+
+def test_keywords_endpoint_returns_502_on_graphql_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    error_response = {"errors": [{"message": "Internal server error"}]}
+    mock_client = _mock_async_httpx_client(
+        [MagicMock(json=lambda: error_response, raise_for_status=MagicMock())]
+    )
+
+    with patch("main.httpx.AsyncClient", return_value=mock_client):
+        client = TestClient(main.app, raise_server_exceptions=False)
+        response = client.get("/keywords/tt0111161")
+
+    assert response.status_code == 502
+
+
 @pytest.mark.parametrize(
     "path,bad_id,query",
     [
@@ -1730,6 +1921,7 @@ def test_parental_endpoint_returns_503_when_no_db(tmp_path, monkeypatch):
         ("/ratings/{id}", "bad", ""),
         ("/genre/{id}", "tt", ""),
         ("/parental/{id}", "ttabc", ""),
+        ("/keywords/{id}", "ttabc", ""),
         ("/episode-rating/{id}", "tt", "?season=1&episode=1"),
         ("/episode-ratings/{id}", "12345", ""),
         ("/person/{id}", "tt0111161", ""),
@@ -2810,6 +3002,79 @@ async def test_initial_import_then_schedule_runs_pipeline_on_failure():
 
     assert pipeline_called
     assert scheduler_called
+
+
+async def test_initial_import_then_schedule_starts_prefetch_worker():
+    """_initial_import_then_schedule starts the prefetch worker when enabled."""
+    import main
+
+    original_task = main.parental_prefetch_task
+    main.parental_prefetch_task = None
+
+    async def fake_pipeline():
+        pass
+
+    async def fake_scheduler():
+        pass
+
+    try:
+        with patch.object(main, "_run_import_pipeline", fake_pipeline):
+            with patch.object(main, "_refresh_scheduler", fake_scheduler):
+                with patch.object(
+                    main, "_parental_prefetch_worker", new=AsyncMock()
+                ) as mock_worker:
+                    with patch.object(main, "PARENTAL_PREFETCH_ENABLED", True):
+                        await main._initial_import_then_schedule()
+
+        assert main.parental_prefetch_task is not None
+        mock_worker.assert_called_once()
+    finally:
+        if main.parental_prefetch_task is not None:
+            main.parental_prefetch_task.cancel()
+            try:
+                await main.parental_prefetch_task
+            except asyncio.CancelledError:
+                pass
+        main.parental_prefetch_task = original_task
+
+
+async def test_rebuild_charts_then_schedule_sets_idle_phase(tmp_path, monkeypatch):
+    """_rebuild_charts_then_schedule must leave current_phase as idle."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    sqlite3.connect(db_path).close()
+
+    async def fake_scheduler():
+        pass
+
+    with patch.object(main.charts, "_cache_is_fresh", return_value=False):
+        with patch.object(main.charts, "rebuild_all_charts"):
+            with patch.object(main, "_refresh_scheduler", fake_scheduler):
+                await main._rebuild_charts_then_schedule()
+
+    assert main.current_phase == "idle"
+
+
+async def test_rebuild_charts_then_schedule_idle_when_cache_fresh(tmp_path, monkeypatch):
+    """_rebuild_charts_then_schedule resets phase to idle even when cache is fresh."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    sqlite3.connect(db_path).close()
+    monkeypatch.setattr(main, "current_phase", "building_charts")
+
+    async def fake_scheduler():
+        pass
+
+    with patch.object(main.charts, "_cache_is_fresh", return_value=True):
+        with patch.object(main.charts, "load_chart_cache", return_value=True):
+            with patch.object(main, "_refresh_scheduler", fake_scheduler):
+                await main._rebuild_charts_then_schedule()
+
+    assert main.current_phase == "idle"
 
 
 def test_dashboard_renders_html(tmp_path, monkeypatch):

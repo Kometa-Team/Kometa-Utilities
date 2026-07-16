@@ -1631,45 +1631,32 @@ def _parental_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
 
 async def _query_keywords_cache(
     imdb_id: str,
-) -> tuple[Optional[Dict[str, list[int]]], Optional[bool], Optional[str]]:
-    """Read cached keyword data, expiry flag, and last-updated timestamp."""
+) -> tuple[Optional[Dict[str, list[int]]], Optional[bool]]:
+    """Read cached keyword data and expiry flag."""
     await _ensure_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT keywords, updated_at FROM imdb_keywords WHERE imdb_id = ?", (imdb_id,)
+            "SELECT keywords, expiration_date FROM imdb_keywords WHERE imdb_id = ?", (imdb_id,)
         )
         row = await cursor.fetchone()
         if not row:
-            return None, None, None
-        updated_at = row["updated_at"]
+            return None, None
+        expiration_date = row["expiration_date"]
         expired = True
-        if updated_at:
-            updated_dt = datetime.fromisoformat(updated_at)
-            if updated_dt.tzinfo is None:
-                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-            expired = datetime.now(timezone.utc) - updated_dt > timedelta(days=KEYWORDS_TTL_DAYS)
+        if expiration_date:
+            expiration_dt = datetime.fromisoformat(expiration_date)
+            if expiration_dt.tzinfo is None:
+                expiration_dt = expiration_dt.replace(tzinfo=timezone.utc)
+            expired = datetime.now(timezone.utc) >= expiration_dt
         keywords: Dict[str, list[int]] = {}
         if row["keywords"]:
             try:
                 keywords = json.loads(row["keywords"])
             except json.JSONDecodeError:
                 keywords = {}
-        return keywords, expired, updated_at
-
-
-def _keywords_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
-    """Return the number of whole days since the keyword cache was last updated."""
-    if not cached_at:
-        return None
-    try:
-        updated_dt = datetime.fromisoformat(cached_at)
-        if updated_dt.tzinfo is None:
-            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - updated_dt).days
-    except (ValueError, TypeError):
-        return None
+        return keywords, expired
 
 
 def _build_keywords_query(imdb_id: str, after: Optional[str] = None) -> str:
@@ -1751,24 +1738,23 @@ async def _fetch_keywords_via_graphql(imdb_id: str) -> Dict[str, list[int]]:
     return keywords
 
 
-async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -> str:
-    """Upsert cached keyword data for a title and return the updated_at timestamp."""
+async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -> None:
+    """Upsert cached keyword data for a title with a TTL-based expiration date."""
     await _ensure_db_schema()
 
-    updated_at = datetime.now(timezone.utc).isoformat()
+    expiration_date = (datetime.now(timezone.utc) + timedelta(days=KEYWORDS_TTL_DAYS)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO imdb_keywords(imdb_id, keywords, updated_at)
+            INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date)
             VALUES(?, ?, ?)
             ON CONFLICT(imdb_id) DO UPDATE SET
                 keywords = excluded.keywords,
-                updated_at = excluded.updated_at
+                expiration_date = excluded.expiration_date
             """,
-            (imdb_id, json.dumps(keywords), updated_at),
+            (imdb_id, json.dumps(keywords), expiration_date),
         )
         await db.commit()
-    return updated_at
 
 
 async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
@@ -3042,29 +3028,13 @@ async def get_keywords(
         raise HTTPException(status_code=503, detail="Service initializing")
     imdb_id = _validate_imdb_id(imdb_id)
 
-    cached, expired, cached_at = (
-        (None, None, None) if ignore_cache else await _query_keywords_cache(imdb_id)
-    )
+    cached, expired = (None, None) if ignore_cache else await _query_keywords_cache(imdb_id)
     if cached and expired is False:
-        return {
-            "imdb_id": imdb_id,
-            "cached": True,
-            "cached_at": cached_at,
-            "cache_age_days": _keywords_cache_age_days(cached_at),
-            "ttl_days": KEYWORDS_TTL_DAYS,
-            "keywords": cached,
-        }
+        return {"imdb_id": imdb_id, "keywords": cached}
 
     keywords = await _fetch_keywords_via_graphql(imdb_id)
-    cached_at = await _update_keywords_cache(imdb_id, keywords)
-    return {
-        "imdb_id": imdb_id,
-        "cached": False,
-        "cached_at": cached_at,
-        "cache_age_days": 0,
-        "ttl_days": KEYWORDS_TTL_DAYS,
-        "keywords": keywords,
-    }
+    await _update_keywords_cache(imdb_id, keywords)
+    return {"imdb_id": imdb_id, "keywords": keywords}
 
 
 @app.get("/title/{imdb_id}")

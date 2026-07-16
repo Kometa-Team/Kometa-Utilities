@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS imdb_parental (
 CREATE TABLE IF NOT EXISTS imdb_keywords (
     imdb_id TEXT PRIMARY KEY,
     keywords TEXT,  -- JSON object: {"prison": [31, 32], ...}
-    updated_at TEXT
+    expiration_date TEXT
 );
 """
 

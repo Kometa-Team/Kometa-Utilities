@@ -1765,8 +1765,12 @@ def test_keywords_endpoint_returns_cached_value_when_fresh(tmp_path, monkeypatch
     keywords = {"prison": [31, 32], "escape": [22, 23]}
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO imdb_keywords(imdb_id, keywords, updated_at) VALUES (?, ?, ?)",
-        ("tt0111161", json.dumps(keywords), datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date) VALUES (?, ?, ?)",
+        (
+            "tt0111161",
+            json.dumps(keywords),
+            (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        ),
     )
     conn.commit()
     conn.close()
@@ -1775,9 +1779,7 @@ def test_keywords_endpoint_returns_cached_value_when_fresh(tmp_path, monkeypatch
     response = client.get("/keywords/tt0111161")
     assert response.status_code == 200
     data = response.json()
-    assert data["imdb_id"] == "tt0111161"
-    assert data["cached"] is True
-    assert data["keywords"] == keywords
+    assert data == {"imdb_id": "tt0111161", "keywords": keywords}
 
 
 def test_keywords_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch):
@@ -1796,9 +1798,10 @@ def test_keywords_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch
         response = client.get("/keywords/tt0111161")
 
     assert response.status_code == 200
-    data = response.json()
-    assert data["cached"] is False
-    assert data["keywords"] == {"prison": [31, 32], "escape": [22, 23]}
+    assert response.json() == {
+        "imdb_id": "tt0111161",
+        "keywords": {"prison": [31, 32], "escape": [22, 23]},
+    }
 
     conn = sqlite3.connect(db_path)
     row = conn.execute(
@@ -1842,8 +1845,12 @@ def test_keywords_endpoint_ignore_cache_forces_refresh(tmp_path, monkeypatch):
     keywords = {"prison": [31, 32]}
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO imdb_keywords(imdb_id, keywords, updated_at) VALUES (?, ?, ?)",
-        ("tt0111161", json.dumps(keywords), datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date) VALUES (?, ?, ?)",
+        (
+            "tt0111161",
+            json.dumps(keywords),
+            (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        ),
     )
     conn.commit()
     conn.close()

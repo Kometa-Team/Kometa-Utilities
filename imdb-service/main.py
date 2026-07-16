@@ -60,6 +60,10 @@ PARENTAL_PROXY_URLS = [
 PARENTAL_PROXY_RETRY_COUNT = int(os.getenv("PARENTAL_PROXY_RETRY_COUNT", "2"))
 PARENTAL_PROXY_BAN_TTL_MINUTES = int(os.getenv("PARENTAL_PROXY_BAN_TTL_MINUTES", "30"))
 IMDB_WEB_BASE_URL = "https://www.imdb.com"
+IMDB_GRAPHQL_URL = os.getenv("IMDB_GRAPHQL_URL", "https://api.graphql.imdb.com/")
+PARENTAL_GRAPHQL_ENABLED = (
+    os.getenv("PARENTAL_GRAPHQL_ENABLED", "true").lower() == "true"
+)
 PARENTAL_GUIDE_LOGGING_ENABLED = (
     os.getenv("PARENTAL_GUIDE_LOGGING_ENABLED", "true").lower() == "true"
 )
@@ -801,6 +805,7 @@ PARENTAL_TYPE_MAP: Dict[str, str] = {
     "Alcohol, Drugs & Smoking": "Alcohol",
     "Frightening & Intense Scenes": "Frightening",
 }
+PARENTAL_GRAPHQL_TYPE_MAP = {v: k for k, v in PARENTAL_TYPE_MAP.items()}
 
 PARENTAL_DB_COLUMNS: Dict[str, str] = {
     "Nudity": "nudity",
@@ -1151,6 +1156,75 @@ async def _fetch_parental_guide_html_via_http(imdb_id: str, proxy_url: Optional[
         raise HTTPException(status_code=502, detail=f"IMDb parental guide request failed: {e}")
 
 
+async def _fetch_parental_guide_via_graphql(imdb_id: str) -> str:
+    """Fetch parental-guide data from IMDb's GraphQL API.
+
+    Returns a synthetic HTML string containing the JS-injected rating comment so
+    the existing parser can consume it unchanged.
+    """
+    query = (
+        '{ title(id: "' + imdb_id + '") { parentsGuide { categories { category { text } severity { text } } } } } }'
+    )
+    started = time.monotonic()
+    _parental_log("graphql_fetch_start", imdb_id, url=IMDB_GRAPHQL_URL)
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
+                "content-type": "application/json",
+            },
+        ) as client:
+            response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as e:
+        _parental_log(
+            "graphql_fetch_error_status",
+            imdb_id,
+            status_code=e.response.status_code,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"IMDb GraphQL parental guide request failed with status {e.response.status_code}",
+        )
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        _parental_log(
+            "graphql_fetch_error",
+            imdb_id,
+            error=type(e).__name__,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise HTTPException(
+            status_code=502, detail=f"IMDb GraphQL parental guide request failed: {e}"
+        )
+
+    title = (data.get("data") or {}).get("title") or {}
+    parents_guide = title.get("parentsGuide") or {}
+    categories = parents_guide.get("categories") or []
+
+    results: Dict[str, str] = {}
+    for cat in categories:
+        cat_text = ((cat or {}).get("category") or {}).get("text", "")
+        sev_text = ((cat or {}).get("severity") or {}).get("text", "")
+        if cat_text in PARENTAL_TYPE_MAP and sev_text:
+            results[PARENTAL_TYPE_MAP[cat_text]] = sev_text
+
+    if not results:
+        _parental_log("graphql_fetch_no_results", imdb_id)
+        raise HTTPException(status_code=404, detail="No parental guide found")
+
+    _parental_log(
+        "graphql_fetch_success",
+        imdb_id,
+        categories=",".join(results.keys()),
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+    return f"<!-- kometa-parental-js:{json.dumps(results)} -->"
+
+
 async def _fetch_parental_guide_html_via_browser(
     imdb_id: str, proxy_url: Optional[str] = None
 ) -> str:
@@ -1322,7 +1396,7 @@ async def _fetch_parental_guide_html_via_browser(
 
 
 async def _fetch_parental_guide_html(imdb_id: str) -> str:
-    """Fetch the IMDb parental guide page for a title, falling back to a browser if needed."""
+    """Fetch the IMDb parental guide page for a title, falling back through HTTP, GraphQL, and browser."""
     attempted_proxies: set[str] = set()
     attempts = max(1, PARENTAL_PROXY_RETRY_COUNT if PARENTAL_PROXY_ENABLED else 1)
     last_error: Optional[HTTPException] = None
@@ -1335,6 +1409,7 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         proxy_count_total=len(PARENTAL_PROXY_URLS),
         proxy_count_healthy=len(healthy_proxies),
         attempts=attempts,
+        graphql_enabled=PARENTAL_GRAPHQL_ENABLED,
         decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
     )
 
@@ -1413,6 +1488,29 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
                     detail="IMDb blocked the direct parental guide request and no proxy or Decodo browser is configured",
                 )
 
+    # HTTP scraping failed or was blocked. Try IMDb's GraphQL API before the
+    # heavier browser fallback. GraphQL is structured, not WAF-gated, and
+    # cheaper than browser automation.
+    if PARENTAL_GRAPHQL_ENABLED:
+        try:
+            html_text = await _fetch_parental_guide_via_graphql(imdb_id)
+            _parental_log("fetch_graphql_success", imdb_id)
+            return html_text
+        except HTTPException as e:
+            if e.status_code == 404:
+                raise
+            last_error = e
+            _parental_log(
+                "fetch_graphql_failed",
+                imdb_id,
+                status_code=e.status_code,
+                detail=e.detail,
+            )
+
+    for attempt_index in range(attempts):
+        proxy_url = _choose_parental_proxy(attempted_proxies)
+        if proxy_url:
+            attempted_proxies.add(proxy_url)
         try:
             html_text = await _fetch_parental_guide_html_via_browser(imdb_id, proxy_url)
             _parental_log(

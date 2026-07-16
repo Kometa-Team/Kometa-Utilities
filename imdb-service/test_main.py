@@ -1571,6 +1571,111 @@ async def test_fetch_parental_html_does_not_fallback_on_404(monkeypatch):
         await main._fetch_parental_guide_html("tt9999999")
 
 
+@pytest.mark.asyncio
+async def test_fetch_parental_graphql_parses_categories(monkeypatch):
+    import main
+
+    gql_response = {
+        "data": {
+            "title": {
+                "parentsGuide": {
+                    "categories": [
+                        {"category": {"text": "Sex & Nudity"}, "severity": {"text": "Mild"}},
+                        {"category": {"text": "Violence & Gore"}, "severity": {"text": "Moderate"}},
+                        {"category": {"text": "Profanity"}, "severity": {"text": "Severe"}},
+                        {"category": {"text": "Alcohol, Drugs & Smoking"}, "severity": {"text": "None"}},
+                        {"category": {"text": "Frightening & Intense Scenes"}, "severity": {"text": "Mild"}},
+                    ]
+                }
+            }
+        }
+    }
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return gql_response
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def post(self, url, json):
+            return FakeResponse()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    html = await main._fetch_parental_guide_via_graphql("tt0111161")
+    assert "<!-- kometa-parental-js:" in html
+    parsed = main._parse_parental_guide_html(html)
+    assert parsed["Nudity"] == "Mild"
+    assert parsed["Violence"] == "Moderate"
+    assert parsed["Profanity"] == "Severe"
+    assert parsed["Alcohol"] == "None"
+    assert parsed["Frightening"] == "Mild"
+
+
+@pytest.mark.asyncio
+async def test_fetch_parental_graphql_raises_404_when_empty(monkeypatch):
+    from fastapi import HTTPException
+
+    import main
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": {"title": {"parentsGuide": {"categories": []}}}}
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def post(self, url, json):
+            return FakeResponse()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    with pytest.raises(HTTPException, match="No parental guide found"):
+        await main._fetch_parental_guide_via_graphql("tt9999999")
+
+
+@pytest.mark.asyncio
+async def test_fetch_parental_html_falls_back_to_graphql(monkeypatch):
+    import main
+
+    async def fail_http(_imdb_id, proxy_url=None):
+        raise main.HTTPException(status_code=403, detail="blocked")
+
+    async def fail_browser(_imdb_id, proxy_url=None):
+        raise AssertionError("browser fallback should not run when GraphQL succeeds")
+
+    async def fake_graphql(_imdb_id):
+        return "<!-- kometa-parental-js:{\"Nudity\":\"Mild\"} -->"
+
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", fail_http)
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_browser", fail_browser)
+    monkeypatch.setattr(main, "_fetch_parental_guide_via_graphql", fake_graphql)
+    # Enable a bypass so the 403 fail-fast does not kick in before GraphQL.
+    monkeypatch.setattr(main, "PARENTAL_DECODO_BROWSER_ENABLED", True)
+
+    html = await main._fetch_parental_guide_html("tt0111161")
+    assert "kometa-parental-js" in html
+
+
 def test_html_has_waf_challenge_detects_imdb_interstitial():
     import main
 

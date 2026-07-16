@@ -2,7 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Callable, Optional, TypedDict
 
 # Module-level chart cache. Replaced atomically by rebuild_all_charts().
 chart_cache: dict[str, list[dict[str, Any]]] = {}
@@ -101,14 +101,25 @@ def _compute_chart(
     ]
 
 
-def rebuild_all_charts(db_path: Path, min_votes: int) -> None:
-    """Recompute all charts and atomically replace chart_cache."""
+def rebuild_all_charts(
+    db_path: Path,
+    min_votes: int,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
+) -> None:
+    """Recompute all charts and atomically replace chart_cache.
+
+    If on_progress is provided, it is called before each chart computation with
+    (chart_name, completed_count, total_count).
+    """
     global chart_cache
 
     conn = sqlite3.connect(db_path)
     try:
         new_cache: dict[str, list[dict[str, Any]]] = {}
-        for name, config in CHART_CONFIGS.items():
+        total = len(CHART_CONFIGS)
+        for index, (name, config) in enumerate(CHART_CONFIGS.items(), start=1):
+            if on_progress:
+                on_progress(name, index - 1, total)
             print(f"Computing chart: {name}...")
             new_cache[name] = _compute_chart(conn, config, min_votes)
             print(f"   {len(new_cache[name])} entries")

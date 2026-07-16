@@ -548,9 +548,9 @@ def test_rebuild_all_charts_calls_progress_callback(tmp_path):
     charts.chart_cache = {}
     charts.rebuild_all_charts(db_path, min_votes=25000, on_progress=on_progress)
 
-    assert len(progress_calls) == len(charts.CHART_CONFIGS)
-    assert progress_calls[0] == (list(charts.CHART_CONFIGS.keys())[0], 0, len(charts.CHART_CONFIGS))
-    assert progress_calls[-1][2] == len(charts.CHART_CONFIGS)
+    assert len(progress_calls) == len(charts.ALL_CHART_NAMES)
+    assert progress_calls[0] == (charts.ALL_CHART_NAMES[0], 0, len(charts.ALL_CHART_NAMES))
+    assert progress_calls[-1][2] == len(charts.ALL_CHART_NAMES)
 
 
 def test_rebuild_all_charts_saves_cache_file(tmp_path):
@@ -564,7 +564,7 @@ def test_rebuild_all_charts_saves_cache_file(tmp_path):
 
     assert cache_path.exists()
     data = json.loads(cache_path.read_text())
-    assert set(data.keys()) == set(charts.CHART_CONFIGS.keys())
+    assert set(data.keys()) == set(charts.ALL_CHART_NAMES)
     assert len(data["top_movies"]) > 0
 
 
@@ -621,6 +621,161 @@ def test_cache_is_stale_when_db_newer_than_cache(tmp_path):
     db_path.write_text("db")
 
     assert charts._cache_is_fresh(cache_path, db_path) is False
+
+
+def test_fetch_graphql_chart_ids_charttitles():
+    import charts
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {
+            "chartTitles": {
+                "edges": [
+                    {"node": {"id": "tt0111161"}},
+                    {"node": {"id": "tt0068646"}},
+                ]
+            }
+        }
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    with patch("charts.httpx.Client", return_value=mock_client):
+        ids = charts.fetch_graphql_chart_ids("popular_movies")
+
+    assert ids == ["tt0111161", "tt0068646"]
+
+
+def test_fetch_graphql_chart_ids_box_office():
+    import charts
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {
+            "boxOfficeWeekendChart": {
+                "entries": [
+                    {"title": {"id": "tt0111161"}},
+                    {"title": {"id": "tt0068646"}},
+                ]
+            }
+        }
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    with patch("charts.httpx.Client", return_value=mock_client):
+        ids = charts.fetch_graphql_chart_ids("box_office")
+
+    assert ids == ["tt0111161", "tt0068646"]
+
+
+def test_fetch_graphql_chart_ids_trending():
+    import charts
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {
+            "topTrendingSetsPredefined": {
+                "edges": [
+                    {"node": {"item": {"id": "tt0111161"}}},
+                    {"node": {"item": {"id": "tt0068646"}}},
+                ]
+            }
+        }
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    with patch("charts.httpx.Client", return_value=mock_client):
+        ids = charts.fetch_graphql_chart_ids("trending_india")
+
+    assert ids == ["tt0111161", "tt0068646"]
+
+
+def test_fetch_graphql_chart_ids_failure_returns_empty():
+    import charts
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = RuntimeError("network down")
+
+    with patch("charts.httpx.Client", return_value=mock_client):
+        ids = charts.fetch_graphql_chart_ids("popular_movies")
+
+    assert ids == []
+
+
+def test_compute_graphql_chart_enriches_from_db(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    _seed_db_for_charts(db_path)
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    items = charts._compute_graphql_chart(
+        sqlite3.connect(db_path), "popular_movies", client=mock_client
+    )
+
+    assert len(items) == 1
+    assert items[0]["tconst"] == "tt0000001"
+    assert items[0]["rank"] == 1
+    assert items[0]["primaryTitle"] == "Alpha"
+    assert items[0]["averageRating"] == 9.0
+
+
+def test_rebuild_all_charts_fetches_graphql_charts(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    _seed_db_for_charts(db_path)
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(db_path, min_votes=25000, fetch_graphql=True)
+
+    assert "popular_movies" in charts.chart_cache
+    assert len(charts.chart_cache["popular_movies"]) == 1
+    assert charts.chart_cache["popular_movies"][0]["tconst"] == "tt0000001"
+    assert "box_office" in charts.chart_cache
+    assert "trending_india" in charts.chart_cache
+
+
+def test_get_chart_popular_movies(tmp_path, monkeypatch):
+    import charts
+
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "imdb.db")
+    charts.chart_cache = {
+        "popular_movies": [
+            {"tconst": "tt0111161", "rank": 1},
+            {"tconst": "tt0068646", "rank": 2},
+        ]
+    }
+    client = TestClient(main.app)
+    response = client.get("/chart/popular_movies?limit=1")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["chart"] == "popular_movies"
+    assert data["total"] == 1
+    assert data["results"][0]["tconst"] == "tt0111161"
 
 
 def test_stats_returns_initializing_when_no_db(tmp_path, monkeypatch):
@@ -2614,7 +2769,7 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     rebuilt = {}
 
-    def fake_rebuild(db, votes, on_progress=None, cache_path=None):
+    def fake_rebuild(db, votes, on_progress=None, cache_path=None, fetch_graphql=False):
         rebuilt["done"] = True
 
     import importer

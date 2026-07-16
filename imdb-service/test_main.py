@@ -2997,6 +2997,40 @@ async def test_initial_import_then_schedule_runs_pipeline_on_failure():
     assert scheduler_called
 
 
+async def test_initial_import_then_schedule_starts_prefetch_worker():
+    """_initial_import_then_schedule starts the prefetch worker when enabled."""
+    import main
+
+    original_task = main.parental_prefetch_task
+    main.parental_prefetch_task = None
+
+    async def fake_pipeline():
+        pass
+
+    async def fake_scheduler():
+        pass
+
+    try:
+        with patch.object(main, "_run_import_pipeline", fake_pipeline):
+            with patch.object(main, "_refresh_scheduler", fake_scheduler):
+                with patch.object(
+                    main, "_parental_prefetch_worker", new=AsyncMock()
+                ) as mock_worker:
+                    with patch.object(main, "PARENTAL_PREFETCH_ENABLED", True):
+                        await main._initial_import_then_schedule()
+
+        assert main.parental_prefetch_task is not None
+        mock_worker.assert_called_once()
+    finally:
+        if main.parental_prefetch_task is not None:
+            main.parental_prefetch_task.cancel()
+            try:
+                await main.parental_prefetch_task
+            except asyncio.CancelledError:
+                pass
+        main.parental_prefetch_task = original_task
+
+
 def test_dashboard_renders_html(tmp_path, monkeypatch):
     import main
 

@@ -719,10 +719,18 @@ async def _refresh_single_table(stem: str) -> None:
 
 async def _initial_import_then_schedule() -> None:
     """Run initial import immediately, then hand off to scheduler."""
+    global parental_prefetch_task
+
     try:
         await _run_import_pipeline()
     except Exception as e:
         print(f"❌ Initial import failed: {e}")
+
+    # The prefetch worker is only started in lifespan when a DB already exists.
+    # If we just created the DB during initial import, start it now.
+    if parental_prefetch_task is None and PARENTAL_PREFETCH_ENABLED:
+        parental_prefetch_task = asyncio.create_task(_parental_prefetch_worker())
+
     await _refresh_scheduler()
 
 

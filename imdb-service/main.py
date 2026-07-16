@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Mapping, Optional, cast
 from urllib.parse import unquote, urlsplit
 
 import aiosqlite
@@ -61,9 +61,7 @@ PARENTAL_PROXY_RETRY_COUNT = int(os.getenv("PARENTAL_PROXY_RETRY_COUNT", "2"))
 PARENTAL_PROXY_BAN_TTL_MINUTES = int(os.getenv("PARENTAL_PROXY_BAN_TTL_MINUTES", "30"))
 IMDB_WEB_BASE_URL = "https://www.imdb.com"
 IMDB_GRAPHQL_URL = os.getenv("IMDB_GRAPHQL_URL", "https://api.graphql.imdb.com/")
-PARENTAL_GRAPHQL_ENABLED = (
-    os.getenv("PARENTAL_GRAPHQL_ENABLED", "true").lower() == "true"
-)
+PARENTAL_GRAPHQL_ENABLED = os.getenv("PARENTAL_GRAPHQL_ENABLED", "true").lower() == "true"
 PARENTAL_GUIDE_LOGGING_ENABLED = (
     os.getenv("PARENTAL_GUIDE_LOGGING_ENABLED", "true").lower() == "true"
 )
@@ -72,25 +70,13 @@ PARENTAL_BROWSER_SCREENSHOT_DIR = Path(
 )
 
 # --- Parental prefetch config ---
-PARENTAL_PREFETCH_ENABLED = (
-    os.getenv("PARENTAL_PREFETCH_ENABLED", "true").lower() == "true"
-)
+PARENTAL_PREFETCH_ENABLED = os.getenv("PARENTAL_PREFETCH_ENABLED", "true").lower() == "true"
 PARENTAL_PREFETCH_MIN_VOTES = int(os.getenv("PARENTAL_PREFETCH_MIN_VOTES", "25000"))
-PARENTAL_PREFETCH_CANDIDATE_POOL = int(
-    os.getenv("PARENTAL_PREFETCH_CANDIDATE_POOL", "1000")
-)
-PARENTAL_PREFETCH_MIN_DELAY_SECONDS = int(
-    os.getenv("PARENTAL_PREFETCH_MIN_DELAY_SECONDS", "45")
-)
-PARENTAL_PREFETCH_MAX_DELAY_SECONDS = int(
-    os.getenv("PARENTAL_PREFETCH_MAX_DELAY_SECONDS", "180")
-)
-PARENTAL_PREFETCH_IDLE_SECONDS = int(
-    os.getenv("PARENTAL_PREFETCH_IDLE_SECONDS", "60")
-)
-PARENTAL_PREFETCH_DAILY_BUDGET = int(
-    os.getenv("PARENTAL_PREFETCH_DAILY_BUDGET", "100")
-)
+PARENTAL_PREFETCH_CANDIDATE_POOL = int(os.getenv("PARENTAL_PREFETCH_CANDIDATE_POOL", "1000"))
+PARENTAL_PREFETCH_MIN_DELAY_SECONDS = int(os.getenv("PARENTAL_PREFETCH_MIN_DELAY_SECONDS", "45"))
+PARENTAL_PREFETCH_MAX_DELAY_SECONDS = int(os.getenv("PARENTAL_PREFETCH_MAX_DELAY_SECONDS", "180"))
+PARENTAL_PREFETCH_IDLE_SECONDS = int(os.getenv("PARENTAL_PREFETCH_IDLE_SECONDS", "60"))
+PARENTAL_PREFETCH_DAILY_BUDGET = int(os.getenv("PARENTAL_PREFETCH_DAILY_BUDGET", "100"))
 PARENTAL_PREFETCH_ORDER = os.getenv("PARENTAL_PREFETCH_ORDER", "weighted_random")
 
 # --- Global state ---
@@ -602,7 +588,7 @@ async def _run_import_pipeline() -> None:
         gz_paths,
         DB_PATH,
         changed_stems,
-        None,
+        0,
         _on_table_start,
         _on_table_done,
         _on_table_progress,
@@ -686,7 +672,7 @@ async def _refresh_single_table(stem: str) -> None:
             gz_paths,
             DB_PATH,
             [stem],
-            None,
+            0,
             _on_table_start,
             _on_table_done,
             _on_table_progress,
@@ -908,7 +894,7 @@ class _ParentalGuideParser(HTMLParser):
             self._other_text.append(text)
 
 
-def _normalize_parental_payload(values: Dict[str, Optional[str]]) -> Dict[str, str]:
+def _normalize_parental_payload(values: Mapping[str, Optional[str]]) -> Dict[str, str]:
     """Fill missing parental categories with 'None' to match Kometa cache reads."""
     return {category: values.get(category) or "None" for category in PARENTAL_TYPE_MAP.values()}
 
@@ -1171,7 +1157,9 @@ async def _fetch_parental_guide_via_graphql(imdb_id: str) -> str:
     the existing parser can consume it unchanged.
     """
     query = (
-        '{ title(id: "' + imdb_id + '") { parentsGuide { categories { category { text } severity { text } } } } } }'
+        '{ title(id: "'
+        + imdb_id
+        + '") { parentsGuide { categories { category { text } severity { text } } } } } }'
     )
     started = time.monotonic()
     _parental_log("graphql_fetch_start", imdb_id, url=IMDB_GRAPHQL_URL)
@@ -1291,7 +1279,8 @@ async def _fetch_parental_guide_html_via_browser(
 
                     # Extract ratings directly from the live DOM. This is more
                     # reliable than parsing the serialized HTML after JS rendering.
-                    js_results = await page.evaluate("""
+                    js_results = await page.evaluate(
+                        """
                         () => {
                             const labels = [
                                 ["Sex & Nudity", "Nudity"],
@@ -1314,7 +1303,8 @@ async def _fetch_parental_guide_html_via_browser(
                             }
                             return results;
                         }
-                        """)
+                        """
+                    )
                     html_text = await _safe_page_content(page)
                     if js_results:
                         _parental_log(
@@ -1603,9 +1593,7 @@ def _validate_imdb_id(imdb_id: str, prefix: str = "tt") -> str:
     followed by digits (e.g. tt0111161 or nm0000093).
     """
     if not re.fullmatch(rf"{prefix}\d+", imdb_id, re.IGNORECASE):
-        raise HTTPException(
-            status_code=400, detail=f"Invalid IMDb ID: {imdb_id!r}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid IMDb ID: {imdb_id!r}")
     return imdb_id.lower()
 
 
@@ -1659,7 +1647,8 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
     await _ensure_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
+        cursor = await db.execute(
+            """
             SELECT
                 COUNT(*) AS items_cached,
                 SUM(CASE WHEN nudity IS NOT NULL AND nudity != '' THEN 1 ELSE 0 END) AS nudity,
@@ -1668,7 +1657,8 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
                 SUM(CASE WHEN alcohol IS NOT NULL AND alcohol != '' THEN 1 ELSE 0 END) AS alcohol,
                 SUM(CASE WHEN frightening IS NOT NULL AND frightening != '' THEN 1 ELSE 0 END) AS frightening
             FROM imdb_parental
-            """)
+            """
+        )
         row = await cursor.fetchone()
 
     if row is None:
@@ -1691,8 +1681,6 @@ async def _get_parental_cache_stats() -> Dict[str, Any]:
 
 async def _load_parental_fetch_success_counts() -> None:
     """Load persisted parental fetch success counts from import_meta."""
-    global parental_fetch_success_counts
-
     if not _db_is_ready():
         return
     await _ensure_db_schema()
@@ -1732,8 +1720,6 @@ async def _save_parental_fetch_success_counts() -> None:
 
 async def _increment_parental_fetch_success(method: str) -> None:
     """Increment the success counter for a fetch method and persist it."""
-    global parental_fetch_success_counts
-
     if method not in parental_fetch_success_counts:
         return
     parental_fetch_success_counts[method] += 1
@@ -1772,27 +1758,27 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
             """,  # nosec B608 - order_sql is an internal constant, not user input
             (PARENTAL_PREFETCH_MIN_VOTES, PARENTAL_PREFETCH_CANDIDATE_POOL),
         )
-        rows = await cursor.fetchall()
+        rows: list[Any] = list(await cursor.fetchall())
 
     if not rows:
         return None
 
     if PARENTAL_PREFETCH_ORDER == "votes_desc":
-        return rows[0]["tconst"]
+        return cast(str, rows[0]["tconst"])
 
     # Weighted random by log(votes) for the candidate pool.
     weights = [max(1, int(row["numVotes"])) for row in rows]
-    weights = [w ** 0.5 for w in weights]  # square root flattens the curve
+    weights = [w**0.5 for w in weights]  # square root flattens the curve
     total = sum(weights)
     if total <= 0:
-        return rows[0]["tconst"]
-    pick = random.uniform(0, total)
+        return cast(str, rows[0]["tconst"])
+    pick = random.uniform(0, total)  # nosec B311 - non-cryptographic candidate selection
     cumulative = 0.0
     for row, weight in zip(rows, weights):
         cumulative += weight
         if cumulative >= pick:
-            return row["tconst"]
-    return rows[-1]["tconst"]
+            return cast(str, row["tconst"])
+    return cast(str, rows[-1]["tconst"])
 
 
 async def _prefetch_parental_guide(imdb_id: str) -> bool:
@@ -1858,7 +1844,7 @@ async def _parental_prefetch_worker() -> None:
         if await _prefetch_parental_guide(candidate):
             parental_prefetch_count_today += 1
 
-        delay = random.uniform(
+        delay = random.uniform(  # nosec B311 - non-cryptographic jitter for idle prefetch
             PARENTAL_PREFETCH_MIN_DELAY_SECONDS,
             PARENTAL_PREFETCH_MAX_DELAY_SECONDS,
         )
@@ -2185,7 +2171,8 @@ async def endpoints(request: Request) -> HTMLResponse:
     base = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
     if ROOT_PATH:
         base += ROOT_PATH
-    return HTMLResponse(content=f"""<!DOCTYPE html>
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
 <html>
 <head>
     <title>IMDB Service</title>
@@ -2291,7 +2278,8 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 </body>
 </html>
-""")
+"""
+    )
 
 
 @app.post("/refresh/{table}")
@@ -2328,7 +2316,8 @@ async def dashboard(request: Request) -> HTMLResponse:
         for stem in DATASET_FILES
     }
 
-    return HTMLResponse(content=f"""<!DOCTYPE html>
+    return HTMLResponse(
+        content=f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -2609,7 +2598,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     </script>
 </body>
 </html>
-""")
+"""
+    )
 
 
 @app.get("/stats")
@@ -2850,9 +2840,7 @@ async def get_parental_guide(
 
     _parental_log("endpoint_start", imdb_id, ignore_cache=ignore_cache)
     cached, expired, cached_at = (
-        (None, None, None)
-        if ignore_cache
-        else await _query_parental_cache(imdb_id)
+        (None, None, None) if ignore_cache else await _query_parental_cache(imdb_id)
     )
     if cached and expired is False:
         _parental_log("endpoint_cache_hit", imdb_id, cached_at=cached_at)
@@ -2872,9 +2860,7 @@ async def get_parental_guide(
     html_text = await _fetch_parental_guide_html(imdb_id)
     parental = _parse_parental_guide_html(html_text)
     cached_at = await _update_parental_cache(imdb_id, parental)
-    _parental_log(
-        "endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys()))
-    )
+    _parental_log("endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys())))
     return {
         "imdb_id": imdb_id,
         "cached": False,

@@ -784,7 +784,9 @@ def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
-    monkeypatch.setattr(main, "parental_fetch_success_counts", {"http": 5, "graphql": 3, "browser": 2})
+    monkeypatch.setattr(
+        main, "parental_fetch_success_counts", {"http": 5, "graphql": 3, "browser": 2}
+    )
     client = TestClient(main.app)
     response = client.get("/stats")
     assert response.status_code == 200
@@ -799,7 +801,9 @@ async def test_parental_fetch_success_counts_persist_to_db(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
-    monkeypatch.setattr(main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0})
+    monkeypatch.setattr(
+        main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0}
+    )
 
     await main._increment_parental_fetch_success("graphql")
     await main._increment_parental_fetch_success("graphql")
@@ -830,7 +834,9 @@ async def test_parental_fetch_success_counts_load_from_db(tmp_path, monkeypatch)
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
-    monkeypatch.setattr(main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0})
+    monkeypatch.setattr(
+        main, "parental_fetch_success_counts", {"http": 0, "graphql": 0, "browser": 0}
+    )
     await main._load_parental_fetch_success_counts()
     assert main.parental_fetch_success_counts == {"http": 7, "graphql": 3, "browser": 1}
 
@@ -897,7 +903,8 @@ def _seed_full_test_db(db_path):
 def _seed_legacy_test_db_without_parental(db_path):
     """Seed an older DB shape that predates the imdb_parental table."""
     conn = sqlite3.connect(db_path)
-    conn.executescript("""
+    conn.executescript(
+        """
         CREATE TABLE import_meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -914,7 +921,8 @@ def _seed_legacy_test_db_without_parental(db_path):
             runtimeMinutes INTEGER,
             genres TEXT
         );
-        """)
+        """
+    )
     conn.execute(
         "INSERT INTO title_basics VALUES ('tt0111161','movie','The Shawshank Redemption','The Shawshank Redemption',0,1994,NULL,142,'Drama,Crime,Thriller')"
     )
@@ -1640,8 +1648,14 @@ async def test_fetch_parental_graphql_parses_categories(monkeypatch):
                         {"category": {"text": "Sex & Nudity"}, "severity": {"text": "Mild"}},
                         {"category": {"text": "Violence & Gore"}, "severity": {"text": "Moderate"}},
                         {"category": {"text": "Profanity"}, "severity": {"text": "Severe"}},
-                        {"category": {"text": "Alcohol, Drugs & Smoking"}, "severity": {"text": "None"}},
-                        {"category": {"text": "Frightening & Intense Scenes"}, "severity": {"text": "Mild"}},
+                        {
+                            "category": {"text": "Alcohol, Drugs & Smoking"},
+                            "severity": {"text": "None"},
+                        },
+                        {
+                            "category": {"text": "Frightening & Intense Scenes"},
+                            "severity": {"text": "Mild"},
+                        },
                     ]
                 }
             }
@@ -1721,7 +1735,7 @@ async def test_fetch_parental_html_falls_back_to_graphql(monkeypatch):
         raise AssertionError("browser fallback should not run when GraphQL succeeds")
 
     async def fake_graphql(_imdb_id):
-        return "<!-- kometa-parental-js:{\"Nudity\":\"Mild\"} -->"
+        return '<!-- kometa-parental-js:{"Nudity":"Mild"} -->'
 
     monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", fail_http)
     monkeypatch.setattr(main, "_fetch_parental_guide_html_via_browser", fail_browser)

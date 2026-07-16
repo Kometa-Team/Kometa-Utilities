@@ -1257,10 +1257,13 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
     attempts = max(1, PARENTAL_PROXY_RETRY_COUNT if PARENTAL_PROXY_ENABLED else 1)
     last_error: Optional[HTTPException] = None
 
+    healthy_proxies = _proxy_candidates()
     _parental_log(
         "fetch_start",
         imdb_id,
         proxy_enabled=PARENTAL_PROXY_ENABLED,
+        proxy_count_total=len(PARENTAL_PROXY_URLS),
+        proxy_count_healthy=len(healthy_proxies),
         attempts=attempts,
         decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
     )
@@ -1269,6 +1272,21 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         proxy_url = _choose_parental_proxy(attempted_proxies)
         if proxy_url:
             attempted_proxies.add(proxy_url)
+        elif PARENTAL_PROXY_ENABLED and PARENTAL_PROXY_URLS:
+            # All configured proxies are currently on cooldown; log details so the
+            # operator can see why we fell back to direct.
+            now = datetime.now(timezone.utc)
+            cooldowns = {
+                proxy: int(max(0, (proxy_health[proxy] - now).total_seconds()))
+                for proxy in PARENTAL_PROXY_URLS
+                if proxy in proxy_health and proxy_health[proxy] > now
+            }
+            _parental_log(
+                "fetch_attempt_no_healthy_proxy",
+                imdb_id,
+                attempt=attempt_index + 1,
+                cooldowns=cooldowns,
+            )
         _parental_log(
             "fetch_attempt",
             imdb_id,

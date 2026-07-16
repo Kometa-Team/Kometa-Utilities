@@ -814,12 +814,38 @@ def _html_has_no_parental_guide_notice(html_text: str) -> bool:
     )
 
 
+BLOCK_PAGE_MARKERS = (
+    "403 forbidden",
+    "403 - forbidden",
+    "access denied",
+    "access to this page has been denied",
+    "you have been blocked",
+    "request blocked",
+    "error code 1020",
+    "verify you are human",
+    "please verify you are a human",
+    "robot or human",
+    "recaptcha",
+    "g-recaptcha",
+    "cf-challenge",
+    "checking your browser",
+    "please wait while your request is being verified",
+)
+
+
+def _html_looks_blocked(html_text: str) -> bool:
+    """Return True when the HTML appears to be a block/WAF/human-verification page."""
+    lowered = unescape(html_text).lower()
+    return any(marker in lowered for marker in BLOCK_PAGE_MARKERS)
+
+
 async def _wait_for_parental_page_ready(page: Any) -> None:
     """Wait until the parental-guide page exposes a stable advisory element."""
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
     advisory_selector = ", ".join(PARENTAL_PAGE_READY_SELECTORS)
     deadline = asyncio.get_running_loop().time() + PARENTAL_BROWSER_NAV_TIMEOUT_SECONDS
+    not_ready_count = 0
 
     while asyncio.get_running_loop().time() < deadline:
         html_text = cast(str, await page.content())
@@ -829,6 +855,12 @@ async def _wait_for_parental_page_ready(page: Any) -> None:
         if _html_has_no_parental_guide_notice(html_text):
             _parental_log("browser_no_guide_notice_detected")
             raise HTTPException(status_code=404, detail="No parental guide found")
+        if _html_looks_blocked(html_text):
+            _parental_log("browser_page_looks_blocked")
+            raise HTTPException(
+                status_code=403,
+                detail="Playwright parental guide fetch received a blocked/access-denied page",
+            )
 
         remaining_ms = max(1, int((deadline - asyncio.get_running_loop().time()) * 1000))
         slice_timeout_ms = min(2000, remaining_ms)
@@ -854,15 +886,22 @@ async def _wait_for_parental_page_ready(page: Any) -> None:
                 timeout=slice_timeout_ms,
             )
         except Exception:
-            _parental_log("browser_page_not_ready", timeout_ms=slice_timeout_ms)
+            not_ready_count += 1
+            if not_ready_count % 5 == 1:
+                _parental_log(
+                    "browser_page_not_ready",
+                    timeout_ms=slice_timeout_ms,
+                    not_ready_count=not_ready_count,
+                )
 
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=min(1000, slice_timeout_ms))
         except PlaywrightTimeoutError:
-            _parental_log(
-                "browser_load_state_wait_timed_out",
-                timeout_ms=min(1000, slice_timeout_ms),
-            )
+            if not_ready_count % 5 == 1:
+                _parental_log(
+                    "browser_load_state_wait_timed_out",
+                    timeout_ms=min(1000, slice_timeout_ms),
+                )
         await page.wait_for_timeout(250)
 
     html_text = cast(str, await page.content())
@@ -872,6 +911,11 @@ async def _wait_for_parental_page_ready(page: Any) -> None:
     if _html_has_no_parental_guide_notice(html_text):
         _parental_log("browser_no_guide_notice_detected")
         raise HTTPException(status_code=404, detail="No parental guide found")
+    if _html_looks_blocked(html_text):
+        raise HTTPException(
+            status_code=403,
+            detail="Playwright parental guide fetch received a blocked/access-denied page",
+        )
     if _html_has_waf_challenge(html_text):
         raise HTTPException(
             status_code=504,
@@ -922,7 +966,12 @@ async def _fetch_parental_guide_html_via_http(imdb_id: str, proxy_url: Optional[
             status_code=e.response.status_code,
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
-        status_code = 404 if e.response.status_code == 404 else 502
+        if e.response.status_code == 404:
+            status_code = 404
+        elif e.response.status_code == 403:
+            status_code = 403
+        else:
+            status_code = 502
         raise HTTPException(
             status_code=status_code,
             detail=f"IMDb parental guide request failed with status {e.response.status_code}",
@@ -973,6 +1022,19 @@ async def _fetch_parental_guide_html_via_browser(
                     await page.wait_for_timeout(2000)
                     if response and response.status == 404:
                         raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
+                    if response and response.status == 403:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Playwright parental guide fetch received HTTP 403",
+                        )
+
+                    # Early check for a block page before the full ready-wait loop.
+                    early_html = cast(str, await page.content())
+                    if _html_looks_blocked(early_html):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Playwright parental guide fetch received a blocked/access-denied page",
+                        )
 
                     await _wait_for_parental_page_ready(page)
                     html_text = cast(str, await page.content())
@@ -1108,6 +1170,25 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
                 status_code=e.status_code,
                 detail=e.detail,
             )
+            # Direct HTTP was blocked and we have no proxy/residential-browser bypass
+            # configured. The browser fallback uses the same egress IP, so it will
+            # almost certainly be blocked too. Fail fast instead of spinning.
+            if (
+                e.status_code == 403
+                and proxy_url is None
+                and not PARENTAL_PROXY_ENABLED
+                and not PARENTAL_DECODO_BROWSER_ENABLED
+            ):
+                _parental_log(
+                    "fetch_direct_blocked_no_bypass",
+                    imdb_id,
+                    proxy_enabled=PARENTAL_PROXY_ENABLED,
+                    decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail="IMDb blocked the direct parental guide request and no proxy or Decodo browser is configured",
+                )
 
         try:
             html_text = await _fetch_parental_guide_html_via_browser(imdb_id, proxy_url)

@@ -736,6 +736,7 @@ def test_rebuild_all_charts_fetches_graphql_charts(tmp_path):
     import charts
 
     db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
     _seed_db_for_charts(db_path)
 
     mock_resp = MagicMock()
@@ -748,13 +749,136 @@ def test_rebuild_all_charts_fetches_graphql_charts(tmp_path):
 
     charts.chart_cache = {}
     with patch("charts.httpx.Client", return_value=mock_client):
-        charts.rebuild_all_charts(db_path, min_votes=25000, fetch_graphql=True)
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
 
     assert "popular_movies" in charts.chart_cache
     assert len(charts.chart_cache["popular_movies"]) == 1
     assert charts.chart_cache["popular_movies"][0]["tconst"] == "tt0000001"
     assert "box_office" in charts.chart_cache
     assert "trending_india" in charts.chart_cache
+    assert graphql_cache_path.exists()
+
+
+def _write_graphql_id_cache(cache_path, fetched_at, ids):
+    cache_path.write_text(
+        json.dumps({"fetched_at": fetched_at.isoformat(), "ids": ids}),
+        encoding="utf-8",
+    )
+
+
+def test_graphql_id_cache_reuses_fresh_cache(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    # First rebuild fetches and caches IDs.
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+    assert mock_client.post.call_count == len(charts.GRAPHQL_CHART_CONFIGS)
+
+    # Second rebuild with a failing client must reuse the cached IDs.
+    failing_client = MagicMock()
+    failing_client.post.side_effect = RuntimeError("network down")
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=failing_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert failing_client.post.call_count == 0
+    assert charts.chart_cache["popular_movies"][0]["tconst"] == "tt0000001"
+
+
+def test_graphql_id_cache_refreshes_stale_cache(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    from datetime import datetime, timedelta, timezone
+
+    stale_at = datetime.now(timezone.utc) - timedelta(seconds=charts.GRAPHQL_CACHE_TTL_SECONDS + 1)
+    _write_graphql_id_cache(
+        graphql_cache_path,
+        stale_at,
+        {"popular_movies": ["ttOLD"]},
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert charts.chart_cache["popular_movies"][0]["tconst"] == "tt0000001"
+    assert mock_client.post.call_count == len(charts.GRAPHQL_CHART_CONFIGS)
+
+
+def test_graphql_id_cache_keeps_stale_on_failure(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    from datetime import datetime, timedelta, timezone
+
+    stale_at = datetime.now(timezone.utc) - timedelta(seconds=charts.GRAPHQL_CACHE_TTL_SECONDS + 1)
+    _write_graphql_id_cache(
+        graphql_cache_path,
+        stale_at,
+        {"popular_movies": ["ttSTALE"]},
+    )
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = RuntimeError("network down")
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert charts.chart_cache["popular_movies"][0]["tconst"] == "ttSTALE"
 
 
 def test_get_chart_popular_movies(tmp_path, monkeypatch):
@@ -2769,7 +2893,9 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     rebuilt = {}
 
-    def fake_rebuild(db, votes, on_progress=None, cache_path=None, fetch_graphql=False):
+    def fake_rebuild(
+        db, votes, on_progress=None, cache_path=None, fetch_graphql=False, graphql_cache_path=None
+    ):
         rebuilt["done"] = True
 
     import importer

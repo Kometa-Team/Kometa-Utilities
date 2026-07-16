@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict, Union, cast
 
@@ -72,6 +73,9 @@ GRAPHQL_CHART_CONFIGS: dict[str, dict[str, Union[str, int]]] = {
 
 # Combined list of all chart names exposed by the service.
 ALL_CHART_NAMES = list(CHART_CONFIGS.keys()) + list(GRAPHQL_CHART_CONFIGS.keys())
+
+# GraphQL chart IDs are fetched at most once per day.
+GRAPHQL_CACHE_TTL_SECONDS = 86400
 
 DEFAULT_CHART_SIZE = 250
 MAX_CHART_SIZE = 500
@@ -216,6 +220,76 @@ def fetch_graphql_chart_ids(name: str, client: Optional[httpx.Client] = None) ->
             client.close()
 
 
+def _load_graphql_id_cache(
+    cache_path: Path,
+) -> tuple[Optional[datetime], dict[str, list[str]]]:
+    """Load the persisted GraphQL ID cache if it exists and is valid."""
+    if not cache_path.exists():
+        return None, {}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None, {}
+        fetched_at = datetime.fromisoformat(data["fetched_at"])
+        ids = data.get("ids", {})
+        if not isinstance(ids, dict):
+            return None, {}
+        return fetched_at, ids
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None, {}
+
+
+def _save_graphql_id_cache(
+    cache_path: Path,
+    fetched_at: datetime,
+    ids: dict[str, list[str]],
+) -> None:
+    """Persist GraphQL chart IDs and their fetch timestamp."""
+    cache_path.write_text(
+        json.dumps({"fetched_at": fetched_at.isoformat(), "ids": ids}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _fetch_all_graphql_chart_ids(client: httpx.Client) -> dict[str, list[str]]:
+    """Fetch IMDb IDs for all GraphQL-backed charts in one shared session."""
+    return {name: fetch_graphql_chart_ids(name, client=client) for name in GRAPHQL_CHART_CONFIGS}
+
+
+def _get_graphql_chart_ids(
+    graphql_cache_path: Optional[Path],
+    client: httpx.Client,
+    ttl_seconds: int = GRAPHQL_CACHE_TTL_SECONDS,
+) -> dict[str, list[str]]:
+    """Return GraphQL chart IDs, using a cached copy when it is still fresh.
+
+    If the cache is stale or missing, fetch from IMDb and persist the result.
+    If the fetch returns no IDs at all but a stale cache exists, the stale IDs
+    are kept so a temporary outage does not wipe the charts.
+    """
+    now = datetime.now(timezone.utc)
+    fetched_at: Optional[datetime] = None
+    cached_ids: dict[str, list[str]] = {}
+
+    if graphql_cache_path is not None:
+        fetched_at, cached_ids = _load_graphql_id_cache(graphql_cache_path)
+
+    if fetched_at is not None and (now - fetched_at).total_seconds() < ttl_seconds:
+        print("Using cached GraphQL chart IDs")
+        return cached_ids
+
+    fetched_ids = _fetch_all_graphql_chart_ids(client)
+
+    if graphql_cache_path is not None and not any(fetched_ids.values()) and cached_ids:
+        print("GraphQL fetch returned no IDs; keeping stale cache")
+        return cached_ids
+
+    if graphql_cache_path is not None:
+        _save_graphql_id_cache(graphql_cache_path, now, fetched_ids)
+
+    return fetched_ids
+
+
 def _enrich_chart_ids(
     conn: Optional[sqlite3.Connection],
     ids: list[str],
@@ -294,6 +368,7 @@ def rebuild_all_charts(
     on_progress: Optional[Callable[[str, int, int], None]] = None,
     cache_path: Optional[Path] = None,
     fetch_graphql: bool = False,
+    graphql_cache_path: Optional[Path] = None,
 ) -> None:
     """Recompute all charts and atomically replace chart_cache.
 
@@ -304,14 +379,17 @@ def rebuild_all_charts(
 
     GraphQL-backed charts (popular_movies, box_office, trending_*, etc.) are
     only fetched from IMDb when fetch_graphql=True to keep tests deterministic
-    and offline by default.
+    and offline by default.  When fetch_graphql=True, graphql_cache_path may be
+    provided to cache the raw IMDb IDs for 24 hours.
     """
     global chart_cache
 
     conn = sqlite3.connect(db_path)
     client: Optional[httpx.Client] = None
+    graphql_ids: dict[str, list[str]] = {}
     if fetch_graphql:
         client = httpx.Client(timeout=30.0)
+        graphql_ids = _get_graphql_chart_ids(graphql_cache_path, client)
 
     try:
         new_cache: dict[str, list[dict[str, Any]]] = {}
@@ -331,7 +409,7 @@ def rebuild_all_charts(
                 on_progress(name, index - 1, total)
             print(f"Computing chart: {name}...")
             if fetch_graphql:
-                new_cache[name] = _compute_graphql_chart(conn, name, client=client)
+                new_cache[name] = _enrich_chart_ids(conn, graphql_ids.get(name, []))
             else:
                 new_cache[name] = []
             print(f"   {len(new_cache[name])} entries")

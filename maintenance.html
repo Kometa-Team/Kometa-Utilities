@@ -29,10 +29,42 @@
 <body>
     <div class="container">
         <h1>🛡️ Mirror Maintenance</h1>
-        <p>The <strong>anidb-service</strong> is currently updating its database or performing scheduled maintenance.
+        <p>The <strong id="service-name">service</strong> is currently updating its database or performing scheduled maintenance.
         </p>
         <p>This usually takes less than 2 minutes. Kometa will retry on its next scheduled run.</p>
     </div>
+
+    <script>
+        (function () {
+            const params = new URLSearchParams(window.location.search);
+            const path = params.get('path') || window.location.pathname;
+            const host = params.get('host') || window.location.host;
+
+            const displayNames = {
+                'anidb-service': 'AniDB Service',
+                'imdb-service': 'IMDb Service',
+                'simkl-service': 'SIMKL Service',
+                'plex-oauth': 'Plex OAuth',
+                'trakt-oauth': 'Trakt OAuth',
+                'mal-oauth': 'MyAnimeList OAuth',
+                'simkl-oauth': 'SIMKL OAuth',
+                'features-fider': 'Feature Requests',
+            };
+
+            let service = 'service';
+            const pathMatch = path.match(/^\/([^/]+)/);
+            if (pathMatch && pathMatch[1] && pathMatch[1] !== 'maintenance.html') {
+                service = pathMatch[1];
+            } else {
+                const hostParts = host.split('.');
+                if (hostParts.length > 2) {
+                    service = hostParts[0];
+                }
+            }
+
+            document.getElementById('service-name').textContent = displayNames[service] || service;
+        })();
+    </script>
 </body>
 
 </html>

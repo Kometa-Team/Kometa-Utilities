@@ -32,6 +32,8 @@ ROOT_PATH = os.getenv("ROOT_PATH", "")
 REFRESH_HOUR = int(os.getenv("REFRESH_HOUR", "3"))
 MIN_VOTES_CHART = int(os.getenv("MIN_VOTES_CHART", "25000"))
 PARENTAL_GUIDE_TTL_DAYS = int(os.getenv("PARENTAL_GUIDE_TTL_DAYS", "90"))
+KEYWORDS_TTL_DAYS = int(os.getenv("KEYWORDS_TTL_DAYS", "30"))
+KEYWORDS_MAX_PAGES = int(os.getenv("KEYWORDS_MAX_PAGES", "10"))
 PARENTAL_BROWSER_ENABLED = os.getenv("PARENTAL_BROWSER_ENABLED", "true").lower() == "true"
 PARENTAL_BROWSER_TIMEOUT_SECONDS = int(os.getenv("PARENTAL_BROWSER_TIMEOUT_SECONDS", "30"))
 PARENTAL_BROWSER_NAV_TIMEOUT_SECONDS = int(os.getenv("PARENTAL_BROWSER_NAV_TIMEOUT_SECONDS", "120"))
@@ -1617,6 +1619,148 @@ def _parental_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
         return None
 
 
+async def _query_keywords_cache(
+    imdb_id: str,
+) -> tuple[Optional[Dict[str, list[int]]], Optional[bool], Optional[str]]:
+    """Read cached keyword data, expiry flag, and last-updated timestamp."""
+    await _ensure_db_schema()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT keywords, updated_at FROM imdb_keywords WHERE imdb_id = ?", (imdb_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None, None, None
+        updated_at = row["updated_at"]
+        expired = True
+        if updated_at:
+            updated_dt = datetime.fromisoformat(updated_at)
+            if updated_dt.tzinfo is None:
+                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+            expired = datetime.now(timezone.utc) - updated_dt > timedelta(days=KEYWORDS_TTL_DAYS)
+        keywords: Dict[str, list[int]] = {}
+        if row["keywords"]:
+            try:
+                keywords = json.loads(row["keywords"])
+            except json.JSONDecodeError:
+                keywords = {}
+        return keywords, expired, updated_at
+
+
+def _keywords_cache_age_days(cached_at: Optional[str]) -> Optional[int]:
+    """Return the number of whole days since the keyword cache was last updated."""
+    if not cached_at:
+        return None
+    try:
+        updated_dt = datetime.fromisoformat(cached_at)
+        if updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - updated_dt).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_keywords_query(imdb_id: str, after: Optional[str] = None) -> str:
+    """Build the IMDb GraphQL keywords query, optionally paginated."""
+    pagination = f', after: "{after}"' if after else ""
+    return (
+        '{ title(id: "'
+        + imdb_id
+        + '") { keywords(first: 250'
+        + pagination
+        + ") { pageInfo { hasNextPage endCursor } edges { node { interestScore { usersInterested usersVoted } keyword { id text { text } } } } } } } }"
+    )
+
+
+async def _fetch_keywords_via_graphql(imdb_id: str) -> Dict[str, list[int]]:
+    """Fetch all keywords for a title via IMDb GraphQL, paginating up to KEYWORDS_MAX_PAGES."""
+    keywords: Dict[str, list[int]] = {}
+    cursor: Optional[str] = None
+    page = 0
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
+                "content-type": "application/json",
+            },
+        ) as client:
+            while page < KEYWORDS_MAX_PAGES:
+                query = _build_keywords_query(imdb_id, cursor)
+                response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+                response.raise_for_status()
+                data = response.json()
+
+                if "errors" in data:
+                    error_message = data["errors"][0].get("message", "unknown error")
+                    if (
+                        "not found" in error_message.lower()
+                        or "does not exist" in error_message.lower()
+                    ):
+                        raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"IMDb GraphQL keywords request failed: {error_message}",
+                    )
+
+                title = (data.get("data") or {}).get("title") or {}
+                keywords_data = title.get("keywords") or {}
+                edges = keywords_data.get("edges", [])
+                for edge in edges:
+                    node = edge.get("node") or {}
+                    keyword = (node.get("keyword") or {}).get("text") or {}
+                    name = keyword.get("text", "").lower()
+                    score = node.get("interestScore") or {}
+                    if name:
+                        keywords[name] = [
+                            score.get("usersInterested", 0),
+                            score.get("usersVoted", 0),
+                        ]
+
+                page_info = keywords_data.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    break
+                cursor = page_info.get("endCursor")
+                if not cursor:
+                    break
+                page += 1
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"IMDb GraphQL keywords request failed with status {e.response.status_code}",
+        ) from e
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=502, detail=f"IMDb GraphQL keywords request failed: {e}"
+        ) from e
+
+    return keywords
+
+
+async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -> str:
+    """Upsert cached keyword data for a title and return the updated_at timestamp."""
+    await _ensure_db_schema()
+
+    updated_at = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO imdb_keywords(imdb_id, keywords, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(imdb_id) DO UPDATE SET
+                keywords = excluded.keywords,
+                updated_at = excluded.updated_at
+            """,
+            (imdb_id, json.dumps(keywords), updated_at),
+        )
+        await db.commit()
+    return updated_at
+
+
 async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
     """Upsert cached parental-guide data for a title and return the updated_at timestamp."""
     await _ensure_db_schema()
@@ -2875,6 +3019,41 @@ async def get_parental_guide(
         "cache_age_days": 0,
         "ttl_days": PARENTAL_GUIDE_TTL_DAYS,
         "parental_guide": parental,
+    }
+
+
+@app.get("/keywords/{imdb_id}")
+async def get_keywords(
+    imdb_id: str,
+    ignore_cache: bool = False,
+) -> Dict[str, Any]:
+    """Return cached IMDb keywords for a title, refreshing when stale."""
+    if not _db_is_ready():
+        raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
+
+    cached, expired, cached_at = (
+        (None, None, None) if ignore_cache else await _query_keywords_cache(imdb_id)
+    )
+    if cached and expired is False:
+        return {
+            "imdb_id": imdb_id,
+            "cached": True,
+            "cached_at": cached_at,
+            "cache_age_days": _keywords_cache_age_days(cached_at),
+            "ttl_days": KEYWORDS_TTL_DAYS,
+            "keywords": cached,
+        }
+
+    keywords = await _fetch_keywords_via_graphql(imdb_id)
+    cached_at = await _update_keywords_cache(imdb_id, keywords)
+    return {
+        "imdb_id": imdb_id,
+        "cached": False,
+        "cached_at": cached_at,
+        "cache_age_days": 0,
+        "ttl_days": KEYWORDS_TTL_DAYS,
+        "keywords": keywords,
     }
 
 

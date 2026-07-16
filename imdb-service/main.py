@@ -1667,7 +1667,7 @@ def _build_keywords_query(imdb_id: str, after: Optional[str] = None) -> str:
         + imdb_id
         + '") { keywords(first: 250'
         + pagination
-        + ") { pageInfo { hasNextPage endCursor } edges { node { interestScore { usersInterested usersVoted } keyword { id text { text } } } } } } } }"
+        + ") { pageInfo { hasNextPage endCursor } edges { node { interestScore { usersInterested usersVoted } keyword { id text { text } } } } } } }"
     )
 
 

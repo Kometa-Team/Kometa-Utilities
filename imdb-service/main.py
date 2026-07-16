@@ -1076,7 +1076,9 @@ async def _fetch_parental_guide_html_via_browser(
                         retries=browser_retries,
                         url=url,
                     )
-                    response = await page.goto(url, wait_until="commit", timeout=timeout_ms)
+                    response = await page.goto(
+                        url, wait_until="domcontentloaded", timeout=timeout_ms
+                    )
                     await page.wait_for_timeout(2000)
                     if response and response.status == 404:
                         raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
@@ -1095,6 +1097,9 @@ async def _fetch_parental_guide_html_via_browser(
                         )
 
                     await _wait_for_parental_page_ready(page)
+                    # Give the page a moment to settle before reading content();
+                    # otherwise Page.content can race with ongoing navigation.
+                    await page.wait_for_timeout(1000)
                     html_text = cast(str, await page.content())
                     if _html_has_parental_markers(html_text):
                         _parental_log(

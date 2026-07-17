@@ -35,8 +35,6 @@ def test_create_schema_creates_all_tables():
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cursor.fetchall()}
         assert tables == {
-            "imdb_keywords",
-            "imdb_parental",
             "title_basics",
             "title_ratings",
             "title_akas",
@@ -954,7 +952,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     conn = sqlite3.connect(db_path)
     import json
 
-    from importer import create_schema
+    from importer import CACHE_SCHEMA_SQL, create_schema
 
     row_counts = {
         "title_basics": 100,
@@ -966,6 +964,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
         "name_basics": 80,
     }
     create_schema(conn)
+    conn.executescript(CACHE_SCHEMA_SQL)
     conn.execute("INSERT INTO import_meta VALUES ('last_refresh', '2026-03-24T03:00:00+00:00')")
     conn.execute("INSERT INTO import_meta VALUES ('row_counts', ?)", (json.dumps(row_counts),))
     table_updated = {t: "2026-03-24T03:00:00+00:00" for t in row_counts}
@@ -980,6 +979,8 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "idle")
     monkeypatch.setattr(main, "last_activity", None)
@@ -1015,6 +1016,8 @@ def test_stats_includes_chart_progress_during_rebuild(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "building_charts")
     monkeypatch.setattr(main, "last_activity", None)
@@ -1068,6 +1071,8 @@ def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "idle")
     monkeypatch.setattr(main, "last_activity", None)
@@ -1093,6 +1098,8 @@ def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(
         main, "parental_fetch_success_counts", {"http": 5, "graphql": 3, "browser": 2}
     )
@@ -1178,9 +1185,10 @@ def test_endpoints_returns_html(tmp_path, monkeypatch):
 def _seed_full_test_db(db_path):
     """Seed a test DB with a complete set of test data for endpoint tests."""
     conn = sqlite3.connect(db_path)
-    from importer import create_schema
+    from importer import CACHE_SCHEMA_SQL, create_schema
 
     create_schema(conn)
+    conn.executescript(CACHE_SCHEMA_SQL)
     conn.execute(
         "INSERT INTO title_basics VALUES ('tt0111161','movie','The Shawshank Redemption','The Shawshank Redemption',0,1994,NULL,142,'Drama,Crime,Thriller')"
     )
@@ -1455,6 +1463,8 @@ def test_parental_endpoint_uses_cached_value_when_fresh(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "PARENTAL_GUIDE_TTL_DAYS", 30)
 
     async def fail_fetch(_imdb_id):
@@ -1479,6 +1489,8 @@ def test_parental_endpoint_uses_regex_fallback_when_structured_parser_misses(tmp
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     # Real IMDb parental-guide markup (as of mid-2026) where the severity is in
     # a nested <div class="ipc-html-content-inner-div"> rather than the older
     # flat <li> structure the DOM parser targets.
@@ -1555,6 +1567,8 @@ def test_parental_endpoint_uses_js_injection_when_present(tmp_path, monkeypatch)
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     # HTML with the browser JS-extraction marker. The parser/regex would fail,
     # but the injected JSON should be used.
     sample_html = """
@@ -1583,6 +1597,8 @@ def test_parental_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     sample_html = """
     <html><body>
       <li class="ipc-metadata-list__item ipc-metadata-list-item--link">
@@ -1638,6 +1654,8 @@ def test_parental_endpoint_creates_missing_parental_table_on_existing_db(tmp_pat
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     sample_html = """
     <li class="ipc-metadata-list-item--link">
       <a>Sex &amp; Nudity:</a><div><div><div>Mild</div></div></div>
@@ -1687,6 +1705,8 @@ def test_parental_endpoint_ignore_cache_forces_refresh(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     sample_html = """
     <li class="ipc-metadata-list-item--link">
       <a>Sex &amp; Nudity:</a><div><div><div>Severe</div></div></div>
@@ -1712,6 +1732,8 @@ def test_parental_endpoint_returns_404_when_page_has_no_categories(tmp_path, mon
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
 
     async def fake_fetch(_imdb_id):
         return "<html><body>No parental guide</body></html>"
@@ -1728,6 +1750,8 @@ def test_parental_endpoint_returns_404_when_page_has_no_guide_notice(tmp_path, m
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
 
     async def fake_fetch(_imdb_id):
         return """
@@ -1794,6 +1818,8 @@ def test_keywords_endpoint_returns_cached_value_when_fresh(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     keywords = {"prison": [31, 32], "escape": [22, 23]}
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -1820,6 +1846,8 @@ def test_keywords_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     response_data = _keywords_graphql_response([("prison", 31, 32), ("escape", 22, 23)])
     mock_client = _mock_async_httpx_client(
         [MagicMock(json=lambda: response_data, raise_for_status=MagicMock())]
@@ -1850,6 +1878,8 @@ def test_keywords_endpoint_paginates(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     page1 = _keywords_graphql_response(
         [("prison", 31, 32)], has_next_page=True, end_cursor="cursor1"
     )
@@ -1874,6 +1904,8 @@ def test_keywords_endpoint_ignore_cache_forces_refresh(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     keywords = {"prison": [31, 32]}
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -1915,6 +1947,8 @@ def test_keywords_endpoint_returns_404_for_missing_title(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     error_response = {"errors": [{"message": "Title does not exist"}]}
     mock_client = _mock_async_httpx_client(
         [MagicMock(json=lambda: error_response, raise_for_status=MagicMock())]
@@ -1933,6 +1967,8 @@ def test_keywords_endpoint_returns_502_on_graphql_error(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     error_response = {"errors": [{"message": "Internal server error"}]}
     mock_client = _mock_async_httpx_client(
         [MagicMock(json=lambda: error_response, raise_for_status=MagicMock())]
@@ -2000,9 +2036,10 @@ def test_endpoints_reject_malformed_imdb_ids(tmp_path, monkeypatch, path, bad_id
 def _seed_prefetch_test_db(db_path):
     """Seed DB with title_basics + title_ratings rows for prefetch tests."""
     conn = sqlite3.connect(db_path)
-    from importer import create_schema
+    from importer import CACHE_SCHEMA_SQL, create_schema
 
     create_schema(conn)
+    conn.executescript(CACHE_SCHEMA_SQL)
     conn.executemany(
         "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
@@ -2030,6 +2067,8 @@ async def test_prefetch_candidate_returns_highest_voted_uncached_title(tmp_path,
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "votes_desc")
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
     candidate = await main._get_parental_prefetch_candidate()
@@ -2054,6 +2093,8 @@ async def test_prefetch_candidate_returns_none_when_all_cached(tmp_path, monkeyp
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "votes_desc")
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
     candidate = await main._get_parental_prefetch_candidate()
@@ -2067,6 +2108,8 @@ async def test_prefetch_parental_guide_caches_result(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
 
     async def fake_fetch(_imdb_id):
         return """
@@ -2967,6 +3010,737 @@ def test_search_imdb_top_filters_to_chart(tmp_path, monkeypatch):
     data = response.json()
     assert "tt0000001" in data["results"]
     assert "tt0000002" not in data["results"]
+
+
+def test_search_with_keyword_all(tmp_path, monkeypatch):
+    """keyword=... intersects the SQLite result set with the cached keyword IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_constraint_ids", AsyncMock(return_value=["tt0000001", "tt0000003"])
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword=prison")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000003" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+
+def test_search_with_keyword_any(tmp_path, monkeypatch):
+    """keyword.any=... unions multiple keyword values before intersecting."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints,
+        "get_constraint_ids",
+        AsyncMock(return_value=["tt0000001", "tt0000002"]),
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword.any=prison,escape")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" in data["results"]
+    assert "tt0000003" not in data["results"]
+
+
+def test_search_with_keyword_not(tmp_path, monkeypatch):
+    """keyword.not=... excludes titles that match any of the given keywords."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_constraint_ids", AsyncMock(return_value=["tt0000001"])
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword.not=prison")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+
+def test_search_with_keyword_and_type(tmp_path, monkeypatch):
+    """Keyword constraints compose with existing SQLite filters."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints,
+        "get_constraint_ids",
+        AsyncMock(return_value=["tt0000001", "tt0000003"]),
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword=prison&type=movie")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000003" not in data["results"]
+
+
+def test_search_with_keyword_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the GraphQL constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?keyword=nonexistent")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_with_content_rating(tmp_path, monkeypatch):
+    """content_rating=... intersects results with the certificate constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?content_rating=US:PG-13")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "content_rating"
+    assert args[2] == {
+        "certificateConstraint": {
+            "anyRegionCertificateRatings": [{"region": "US", "rating": "PG-13"}]
+        }
+    }
+
+
+def test_search_content_rating_defaults_region_to_us(tmp_path, monkeypatch):
+    """A bare rating without a region defaults to the US region."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?content_rating=R")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {
+        "certificateConstraint": {"anyRegionCertificateRatings": [{"region": "US", "rating": "R"}]}
+    }
+
+
+def test_search_content_rating_not_excludes(tmp_path, monkeypatch):
+    """content_rating.not=... excludes titles with the given certificate."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?content_rating.not=US:R")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {
+        "certificateConstraint": {
+            "excludeRegionCertificateRatings": [{"region": "US", "rating": "R"}]
+        }
+    }
+
+
+def test_search_content_rating_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the certificate constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?content_rating=US:PG-13")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_with_company(tmp_path, monkeypatch):
+    """company=... intersects results with the credited-company constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?company=co0023400")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "company"
+    assert args[2] == {"creditedCompanyConstraint": {"anyCompanyIds": ["co0023400"]}}
+
+
+def test_search_company_multiple_ids(tmp_path, monkeypatch):
+    """company=... accepts a comma-separated list of company IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?company=co0023400,co0098765")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"creditedCompanyConstraint": {"anyCompanyIds": ["co0023400", "co0098765"]}}
+
+
+def test_search_company_not_excludes(tmp_path, monkeypatch):
+    """company.not=... excludes titles from the given companies."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?company.not=co0023400")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"creditedCompanyConstraint": {"excludeCompanyIds": ["co0023400"]}}
+
+
+def test_search_company_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the company constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?company=co0023400")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_with_event(tmp_path, monkeypatch):
+    """event=... intersects results with the award-nomination constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?event=ev0000003")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "event"
+    assert args[2] == {"awardConstraint": {"anyEventNominations": [{"eventId": "ev0000003"}]}}
+
+
+def test_search_event_winning_sets_winner_filter(tmp_path, monkeypatch):
+    """event.winning=... restricts to winners via winnerFilter=WINNER_ONLY."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?event.winning=ev0000003")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {
+        "awardConstraint": {
+            "anyEventNominations": [{"eventId": "ev0000003", "winnerFilter": "WINNER_ONLY"}]
+        }
+    }
+
+
+def test_search_event_multiple_ids(tmp_path, monkeypatch):
+    """event=... accepts a comma-separated list of event IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?event=ev0000003,ev0000123")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {
+        "awardConstraint": {
+            "anyEventNominations": [{"eventId": "ev0000003"}, {"eventId": "ev0000123"}]
+        }
+    }
+
+
+def test_search_event_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the event constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?event=ev0000003")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_with_interest(tmp_path, monkeypatch):
+    """interest=... intersects results with the interest constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?interest=in0000008")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "interest"
+    assert args[2] == {"interestConstraint": {"anyInterestIds": ["in0000008"]}}
+
+
+def test_search_interest_multiple_ids(tmp_path, monkeypatch):
+    """interest=... accepts a comma-separated list of interest IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?interest=in0000008,in0000123")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"interestConstraint": {"anyInterestIds": ["in0000008", "in0000123"]}}
+
+
+def test_search_interest_not_excludes(tmp_path, monkeypatch):
+    """interest.not=... excludes titles with the given interests."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?interest.not=in0000008")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"interestConstraint": {"excludeInterestIds": ["in0000008"]}}
+
+
+def test_search_interest_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the interest constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?interest=in0000008")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_with_topic(tmp_path, monkeypatch):
+    """topic=... intersects results with the title-data constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?topic=GOOF")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "topic"
+    assert args[2] == {"withTitleDataConstraint": {"anyDataAvailable": ["GOOF"]}}
+
+
+def test_search_topic_uppercases_enum(tmp_path, monkeypatch):
+    """Topic values are normalized to uppercase enum names."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?topic=goof,quote")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"withTitleDataConstraint": {"anyDataAvailable": ["GOOF", "QUOTE"]}}
+
+
+def test_search_topic_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the topic constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?topic=GOOF")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+@pytest.mark.parametrize(
+    "param,cache_type,constraint_key,field",
+    [
+        (
+            "alternate_version",
+            "alternate_version",
+            "alternateVersionMatchingConstraint",
+            "allAlternateVersionTextTerms",
+        ),
+        (
+            "crazy_credit",
+            "crazy_credit",
+            "crazyCreditMatchingConstraint",
+            "allCrazyCreditTextTerms",
+        ),
+        ("goof", "goof", "goofMatchingConstraint", "allGoofTextTerms"),
+        ("plot", "plot", "plotMatchingConstraint", "allPlotTextTerms"),
+        ("quote", "quote", "quoteMatchingConstraint", "allQuoteTextTerms"),
+        ("soundtrack", "soundtrack", "soundtrackMatchingConstraint", "allSoundtrackTextTerms"),
+        ("trivia", "trivia", "triviaMatchingConstraint", "allTriviaTextTerms"),
+        ("location", "location", "filmingLocationConstraint", "allLocations"),
+    ],
+)
+def test_search_text_match_constraints(
+    tmp_path, monkeypatch, param, cache_type, constraint_key, field
+):
+    """Each free-text matching constraint maps to its GraphQL all-terms field."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get(f"/search?{param}=hello,world")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == cache_type
+    assert args[2] == {constraint_key: {field: ["hello", "world"]}}
+
+
+def test_search_text_match_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If a text-match constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?plot=spaceship")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_with_popularity_range(tmp_path, monkeypatch):
+    """popularity.gte/.lte map to titleMeterConstraint rankRange min/max."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?popularity.gte=1&popularity.lte=1000")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "popularity"
+    assert args[2] == {
+        "titleMeterConstraint": {
+            "rankRange": {"min": 1, "max": 1000},
+            "titleMeterType": "TITLE_METER",
+        }
+    }
+
+
+def test_search_popularity_type_override(tmp_path, monkeypatch):
+    """popularity.type overrides the meter type and is uppercased."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?popularity.lte=500&popularity.type=movie_meter")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {
+        "titleMeterConstraint": {
+            "rankRange": {"max": 500},
+            "titleMeterType": "MOVIE_METER",
+        }
+    }
+
+
+def test_search_with_character(tmp_path, monkeypatch):
+    """character=... maps to characterConstraint.anyCharacterNames."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?character=James Bond,Q")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "character"
+    assert args[2] == {"characterConstraint": {"anyCharacterNames": ["James Bond", "Q"]}}
+
+
+def test_search_with_list_all(tmp_path, monkeypatch):
+    """list=... maps to listConstraint.inAllLists."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?list=ls000000001")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "list"
+    assert args[2] == {"listConstraint": {"inAllLists": ["ls000000001"]}}
+
+
+def test_search_list_any(tmp_path, monkeypatch):
+    """list.any=... maps to listConstraint.inAnyList."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?list.any=ls000000001,ls000000002")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"listConstraint": {"inAnyList": ["ls000000001", "ls000000002"]}}
+
+
+def test_search_list_not_excludes(tmp_path, monkeypatch):
+    """list.not=... maps to listConstraint.notInAnyList and excludes results."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?list.not=ls000000001")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"listConstraint": {"notInAnyList": ["ls000000001"]}}
+
+
+def test_search_character_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If a GraphQL-only include constraint returns no IDs, search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?character=Nobody")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
+def test_search_advanced_passthrough(tmp_path, monkeypatch):
+    """POST /search/advanced forwards the constraints object and returns ordered IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=(["tt0000003", "tt0000001"], False))
+    monkeypatch.setattr(main.constraints, "get_search_ids", mock)
+    client = TestClient(main.app)
+    body = {
+        "constraints": {"genreConstraint": {"allGenreIds": ["Drama"]}},
+        "sort": {"sortBy": "POPULARITY", "sortOrder": "ASC"},
+        "limit": 250,
+    }
+    response = client.post("/search/advanced", json=body)
+    assert response.status_code == 200
+    assert response.json() == {
+        "results": ["tt0000003", "tt0000001"],
+        "total": 2,
+        "cached": False,
+    }
+
+    _, args, kwargs = mock.mock_calls[0]
+    assert args[1] == {"genreConstraint": {"allGenreIds": ["Drama"]}}
+    assert kwargs["sort"] == {"sortBy": "POPULARITY", "sortOrder": "ASC"}
+    assert kwargs["limit"] == 250
+
+
+def test_search_advanced_reports_cache_hit(tmp_path, monkeypatch):
+    """A cache hit is reflected in the response."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_search_ids", AsyncMock(return_value=(["tt0000001"], True))
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/search/advanced", json={"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}}
+    )
+    assert response.status_code == 200
+    assert response.json()["cached"] is True
+
+
+def test_search_advanced_requires_constraints(tmp_path, monkeypatch):
+    """A missing or empty constraints object is a 400."""
+    import main
+
+    client = TestClient(main.app)
+    assert client.post("/search/advanced", json={}).status_code == 400
+    assert client.post("/search/advanced", json={"constraints": {}}).status_code == 400
+    assert client.post("/search/advanced", json={"constraints": "x"}).status_code == 400
+
+
+def test_search_advanced_rejects_bad_limit(tmp_path, monkeypatch):
+    """A non-positive-integer limit is a 400."""
+    import main
+
+    client = TestClient(main.app)
+    body = {"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}, "limit": 0}
+    assert client.post("/search/advanced", json=body).status_code == 400
+    body["limit"] = "many"
+    assert client.post("/search/advanced", json=body).status_code == 400
+
+
+def test_search_advanced_surfaces_graphql_error(tmp_path, monkeypatch):
+    """A RuntimeError from the fetcher becomes a 502."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_search_ids", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/search/advanced", json={"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}}
+    )
+    assert response.status_code == 502
+    assert "boom" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

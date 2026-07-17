@@ -89,7 +89,13 @@ CREATE TABLE IF NOT EXISTS import_meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+"""
 
+# Schema for service-generated cache tables.  These live in a separate database
+# file (``imdb_cache.db``) so they can be backed up independently of the large,
+# fully-rebuildable IMDb dataset in ``imdb.db``.  The ``imdb_constraint_cache``
+# table is created on demand by ``constraints.py``.
+CACHE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS imdb_parental (
     imdb_id TEXT PRIMARY KEY,
     nudity TEXT,
@@ -109,7 +115,7 @@ CREATE TABLE IF NOT EXISTS imdb_keywords (
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
-    """Create all tables and indexes in the given connection."""
+    """Create all dataset tables and indexes in the given connection."""
     conn.executescript(SCHEMA_SQL)
 
 

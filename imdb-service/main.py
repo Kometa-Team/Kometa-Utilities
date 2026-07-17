@@ -18,14 +18,18 @@ from urllib.parse import unquote, urlsplit
 
 import aiosqlite
 import charts
+import constraints
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from importer import ALLOWED_TABLES, SCHEMA_SQL, TABLE_TO_STEM
+from importer import ALLOWED_TABLES, CACHE_SCHEMA_SQL, SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "imdb.db"
+# Service-generated cache (parental guides, keywords, constraint search results)
+# lives in its own file so it can be backed up apart from the rebuildable dataset.
+CACHE_DB_PATH = DATA_DIR / "imdb_cache.db"
 CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"
 GRAPHQL_CHART_CACHE_PATH = DATA_DIR / "graphql_chart_cache.json"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
@@ -479,6 +483,61 @@ async def _ensure_db_schema() -> None:
         await db.commit()
 
 
+async def _ensure_cache_db_schema() -> None:
+    """Create the service-cache database and its tables if missing.
+
+    Unlike ``_ensure_db_schema`` this always runs, because parental guides and
+    keywords may be fetched and cached before the large dataset import finishes.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.executescript(CACHE_SCHEMA_SQL)
+        await db.commit()
+
+
+async def _migrate_cache_tables() -> None:
+    """One-time migration: copy cache rows from the legacy ``imdb.db``.
+
+    Older deployments stored ``imdb_parental``/``imdb_keywords`` (and the
+    constraint cache) inside ``imdb.db``.  On first startup after the split we
+    copy any existing rows into ``imdb_cache.db``.  The old copies are left in
+    place (harmless, unused) rather than dropped.
+    """
+    await _ensure_cache_db_schema()
+    if not DB_PATH.exists():
+        return
+
+    for table in ("imdb_parental", "imdb_keywords"):
+        try:
+            async with aiosqlite.connect(CACHE_DB_PATH) as db:
+                # Only migrate when the cache table is still empty.
+                cursor = await db.execute(f"SELECT COUNT(*) FROM {table}")  # nosec B608
+                count_row = await cursor.fetchone()
+                if count_row and count_row[0]:
+                    continue
+
+                # Confirm the legacy table exists in imdb.db before attaching.
+                await db.execute("ATTACH DATABASE ? AS legacy", (str(DB_PATH),))
+                try:
+                    check = await db.execute(
+                        "SELECT name FROM legacy.sqlite_master "
+                        "WHERE type = 'table' AND name = ?",
+                        (table,),
+                    )
+                    if await check.fetchone() is None:
+                        continue
+                    await db.execute(
+                        f"INSERT INTO {table} SELECT * FROM legacy.{table}"  # nosec B608
+                    )
+                    await db.commit()
+                    print(f"📦 Migrated {table} into {CACHE_DB_PATH.name}")
+                finally:
+                    await db.execute("DETACH DATABASE legacy")
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"⚠️  Could not migrate {table}: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown: load DB state, rebuild charts, start scheduler."""
@@ -486,6 +545,12 @@ async def lifespan(app: FastAPI):
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("🔧 Initializing IMDB Service...")
+
+    # Ensure the service-cache DB exists and migrate any legacy rows out of imdb.db.
+    try:
+        await _migrate_cache_tables()
+    except Exception as e:
+        print(f"⚠️  Could not initialize cache DB: {e}")
 
     if DB_PATH.exists():
         try:
@@ -539,7 +604,7 @@ async def lifespan(app: FastAPI):
 
 
 async def _run_import_pipeline() -> None:
-    """Download datasets and import into shadow DB, then rebuild charts."""
+    """Download datasets and import into the live DB, then rebuild charts."""
     global last_refresh, download_progress, import_progress, chart_progress
     from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
 
@@ -1573,9 +1638,9 @@ async def _query_parental_cache(
     imdb_id: str,
 ) -> tuple[Optional[Dict[str, str]], Optional[bool], Optional[str]]:
     """Read cached parental-guide data, expiry flag, and last-updated timestamp."""
-    await _ensure_db_schema()
+    await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM imdb_parental WHERE imdb_id = ?", (imdb_id,))
         row = await cursor.fetchone()
@@ -1633,9 +1698,9 @@ async def _query_keywords_cache(
     imdb_id: str,
 ) -> tuple[Optional[Dict[str, list[int]]], Optional[bool]]:
     """Read cached keyword data and expiry flag."""
-    await _ensure_db_schema()
+    await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT keywords, expiration_date FROM imdb_keywords WHERE imdb_id = ?", (imdb_id,)
@@ -1740,10 +1805,10 @@ async def _fetch_keywords_via_graphql(imdb_id: str) -> Dict[str, list[int]]:
 
 async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -> None:
     """Upsert cached keyword data for a title with a TTL-based expiration date."""
-    await _ensure_db_schema()
+    await _ensure_cache_db_schema()
 
     expiration_date = (datetime.now(timezone.utc) + timedelta(days=KEYWORDS_TTL_DAYS)).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
         await db.execute(
             """
             INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date)
@@ -1759,10 +1824,10 @@ async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -
 
 async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
     """Upsert cached parental-guide data for a title and return the updated_at timestamp."""
-    await _ensure_db_schema()
+    await _ensure_cache_db_schema()
 
     updated_at = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
         await db.execute(
             """
             INSERT INTO imdb_parental(imdb_id, nudity, violence, profanity, alcohol, frightening, updated_at)
@@ -1791,9 +1856,9 @@ async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
 
 async def _get_parental_cache_stats() -> Dict[str, Any]:
     """Return cached parental-guide item counts for the stats endpoint."""
-    await _ensure_db_schema()
+    await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
         cursor = await db.execute(
             """
             SELECT
@@ -1885,9 +1950,13 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
     if not _db_is_ready():
         return None
     await _ensure_db_schema()
+    await _ensure_cache_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        # The parental cache now lives in a separate DB file; attach it so we can
+        # still exclude already-cached titles in a single query.
+        await db.execute("ATTACH DATABASE ? AS cache", (str(CACHE_DB_PATH),))
         order_sql = "tr.numVotes DESC"
         if PARENTAL_PREFETCH_ORDER == "weighted_random":
             # Randomize within the top pool; log(votes) keeps megahits from
@@ -1898,7 +1967,7 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
             SELECT tb.tconst, tr.numVotes
             FROM title_basics tb
             JOIN title_ratings tr ON tb.tconst = tr.tconst
-            LEFT JOIN imdb_parental ip ON tb.tconst = ip.imdb_id
+            LEFT JOIN cache.imdb_parental ip ON tb.tconst = ip.imdb_id
             WHERE tr.numVotes >= ? AND ip.imdb_id IS NULL
             ORDER BY {order_sql}
             LIMIT ?
@@ -2004,6 +2073,61 @@ async def _parental_prefetch_worker() -> None:
             await asyncio.sleep(min(5, deadline - asyncio.get_running_loop().time()))
 
 
+@app.post("/search/advanced")
+async def search_advanced(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a full IMDb ``advancedTitleSearch`` from a pre-built constraints object.
+
+    Kometa builds the ``AdvancedTitleSearchConstraints`` object (and its friendly-name
+    translations) itself, then posts it here.  The service runs one combined,
+    paginated query against IMDb GraphQL, caches the ordered result, and returns
+    the title IDs in IMDb's own order.
+
+    Body::
+
+        {
+          "constraints": { ... AdvancedTitleSearchConstraints ... },  # required
+          "sort": {"sortBy": "POPULARITY", "sortOrder": "ASC"},        # optional
+          "limit": 250,                                                # optional
+          "ignore_cache": false                                        # optional
+        }
+    """
+    search_constraints = payload.get("constraints")
+    if not isinstance(search_constraints, dict) or not search_constraints:
+        raise HTTPException(
+            status_code=400, detail="'constraints' object is required and must be non-empty"
+        )
+
+    sort = payload.get("sort")
+    if sort is not None and not isinstance(sort, dict):
+        raise HTTPException(status_code=400, detail="'sort' must be an object")
+
+    limit = payload.get("limit")
+    if limit is not None:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise HTTPException(status_code=400, detail="'limit' must be a positive integer")
+
+    ignore_cache = bool(payload.get("ignore_cache", False))
+
+    try:
+        ids, cache_hit = await constraints.get_search_ids(
+            CACHE_DB_PATH,
+            search_constraints,
+            sort=sort,
+            limit=limit,
+            ignore_cache=ignore_cache,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"IMDb GraphQL request failed: {e}")
+
+    return {
+        "results": ids,
+        "total": len(ids),
+        "cached": cache_hit,
+    }
+
+
 @app.get("/search")
 async def search(
     type: Optional[str] = Query(None, alias="type"),  # noqa: B008
@@ -2038,6 +2162,33 @@ async def search(
     cast_not: Optional[str] = Query(None, alias="cast.not"),  # noqa: B008
     series: Optional[str] = Query(None, alias="series"),  # noqa: B008
     series_not: Optional[str] = Query(None, alias="series.not"),  # noqa: B008
+    keyword: Optional[str] = Query(None, alias="keyword"),  # noqa: B008
+    keyword_any: Optional[str] = Query(None, alias="keyword.any"),  # noqa: B008
+    keyword_not: Optional[str] = Query(None, alias="keyword.not"),  # noqa: B008
+    content_rating: Optional[str] = Query(None, alias="content_rating"),  # noqa: B008
+    content_rating_not: Optional[str] = Query(None, alias="content_rating.not"),  # noqa: B008
+    company: Optional[str] = Query(None, alias="company"),  # noqa: B008
+    company_not: Optional[str] = Query(None, alias="company.not"),  # noqa: B008
+    event: Optional[str] = Query(None, alias="event"),  # noqa: B008
+    event_winning: Optional[str] = Query(None, alias="event.winning"),  # noqa: B008
+    interest: Optional[str] = Query(None, alias="interest"),  # noqa: B008
+    interest_not: Optional[str] = Query(None, alias="interest.not"),  # noqa: B008
+    topic: Optional[str] = Query(None, alias="topic"),  # noqa: B008
+    alternate_version: Optional[str] = Query(None, alias="alternate_version"),  # noqa: B008
+    crazy_credit: Optional[str] = Query(None, alias="crazy_credit"),  # noqa: B008
+    goof: Optional[str] = Query(None, alias="goof"),  # noqa: B008
+    plot: Optional[str] = Query(None, alias="plot"),  # noqa: B008
+    quote: Optional[str] = Query(None, alias="quote"),  # noqa: B008
+    soundtrack: Optional[str] = Query(None, alias="soundtrack"),  # noqa: B008
+    trivia: Optional[str] = Query(None, alias="trivia"),  # noqa: B008
+    location: Optional[str] = Query(None, alias="location"),  # noqa: B008
+    popularity_gte: Optional[int] = Query(None, alias="popularity.gte"),  # noqa: B008
+    popularity_lte: Optional[int] = Query(None, alias="popularity.lte"),  # noqa: B008
+    popularity_type: Optional[str] = Query(None, alias="popularity.type"),  # noqa: B008
+    character: Optional[str] = Query(None, alias="character"),  # noqa: B008
+    list_all: Optional[str] = Query(None, alias="list"),  # noqa: B008
+    list_any: Optional[str] = Query(None, alias="list.any"),  # noqa: B008
+    list_not: Optional[str] = Query(None, alias="list.not"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2166,6 +2317,258 @@ async def search(
         series,
         series_not,
     )
+
+    async def _add_id_filter(ids: list[str], include: bool = True) -> None:
+        """Append a tconst IN / NOT IN condition."""
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        op = "IN" if include else "NOT IN"
+        conditions.append(f"tb.tconst {op} ({placeholders})")
+        params.extend(ids)
+
+    if keyword:
+        values = [v.strip() for v in keyword.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH, "keyword", {"keywordConstraint": {"allKeywords": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if keyword_any:
+        values = [v.strip() for v in keyword_any.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH, "keyword", {"keywordConstraint": {"anyKeywords": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if keyword_not:
+        values = [v.strip() for v in keyword_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH, "keyword", {"keywordConstraint": {"excludeKeywords": values}}
+            )
+            await _add_id_filter(ids, include=False)
+
+    def _parse_certificate_ratings(raw: str) -> list[dict[str, str]]:
+        """Parse ``region:rating`` pairs into GraphQL certificate objects.
+
+        A value without a ``:`` separator defaults to the ``US`` region.
+        """
+        pairs: list[dict[str, str]] = []
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if ":" in token:
+                region, rating = token.split(":", 1)
+                region = region.strip().upper()
+                rating = rating.strip()
+            else:
+                region, rating = "US", token
+            if rating:
+                pairs.append({"region": region, "rating": rating})
+        return pairs
+
+    if content_rating:
+        ratings = _parse_certificate_ratings(content_rating)
+        if ratings:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "content_rating",
+                {"certificateConstraint": {"anyRegionCertificateRatings": ratings}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if content_rating_not:
+        ratings = _parse_certificate_ratings(content_rating_not)
+        if ratings:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "content_rating",
+                {"certificateConstraint": {"excludeRegionCertificateRatings": ratings}},
+            )
+            await _add_id_filter(ids, include=False)
+
+    if company:
+        values = [v.strip() for v in company.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "company",
+                {"creditedCompanyConstraint": {"anyCompanyIds": values}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if company_not:
+        values = [v.strip() for v in company_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "company",
+                {"creditedCompanyConstraint": {"excludeCompanyIds": values}},
+            )
+            await _add_id_filter(ids, include=False)
+
+    if event:
+        values = [v.strip() for v in event.split(",") if v.strip()]
+        if values:
+            nominations = [{"eventId": event_id} for event_id in values]
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "event",
+                {"awardConstraint": {"anyEventNominations": nominations}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if event_winning:
+        values = [v.strip() for v in event_winning.split(",") if v.strip()]
+        if values:
+            nominations = [
+                {"eventId": event_id, "winnerFilter": "WINNER_ONLY"} for event_id in values
+            ]
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "event",
+                {"awardConstraint": {"anyEventNominations": nominations}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if interest:
+        values = [v.strip() for v in interest.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "interest",
+                {"interestConstraint": {"anyInterestIds": values}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if interest_not:
+        values = [v.strip() for v in interest_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "interest",
+                {"interestConstraint": {"excludeInterestIds": values}},
+            )
+            await _add_id_filter(ids, include=False)
+
+    if topic:
+        values = [v.strip().upper() for v in topic.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "topic",
+                {"withTitleDataConstraint": {"anyDataAvailable": values}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    # Free-text "matching" constraints: each maps to a GraphQL constraint whose
+    # ``all<X>TextTerms`` (or ``allLocations``) field must all match.
+    text_match_constraints: list[tuple[Optional[str], str, str, str]] = [
+        (
+            alternate_version,
+            "alternate_version",
+            "alternateVersionMatchingConstraint",
+            "allAlternateVersionTextTerms",
+        ),  # noqa: E501
+        (crazy_credit, "crazy_credit", "crazyCreditMatchingConstraint", "allCrazyCreditTextTerms"),
+        (goof, "goof", "goofMatchingConstraint", "allGoofTextTerms"),
+        (plot, "plot", "plotMatchingConstraint", "allPlotTextTerms"),
+        (quote, "quote", "quoteMatchingConstraint", "allQuoteTextTerms"),
+        (soundtrack, "soundtrack", "soundtrackMatchingConstraint", "allSoundtrackTextTerms"),
+        (trivia, "trivia", "triviaMatchingConstraint", "allTriviaTextTerms"),
+        (location, "location", "filmingLocationConstraint", "allLocations"),
+    ]
+    for raw, cache_type, constraint_key, field in text_match_constraints:
+        if not raw:
+            continue
+        terms = [v.strip() for v in raw.split(",") if v.strip()]
+        if not terms:
+            continue
+        ids = await constraints.get_constraint_ids(
+            CACHE_DB_PATH,
+            cache_type,
+            {constraint_key: {field: terms}},
+        )
+        if not ids:
+            return {"results": [], "total": 0}
+        await _add_id_filter(ids, include=True)
+
+    if popularity_gte is not None or popularity_lte is not None:
+        rank_range: dict[str, int] = {}
+        if popularity_gte is not None:
+            rank_range["min"] = popularity_gte
+        if popularity_lte is not None:
+            rank_range["max"] = popularity_lte
+        meter = {
+            "rankRange": rank_range,
+            "titleMeterType": (popularity_type or "TITLE_METER").strip().upper(),
+        }
+        ids = await constraints.get_constraint_ids(
+            CACHE_DB_PATH, "popularity", {"titleMeterConstraint": meter}
+        )
+        if not ids:
+            return {"results": [], "total": 0}
+        await _add_id_filter(ids, include=True)
+
+    if character:
+        names = [v.strip() for v in character.split(",") if v.strip()]
+        if names:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH,
+                "character",
+                {"characterConstraint": {"anyCharacterNames": names}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if list_all:
+        values = [v.strip() for v in list_all.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH, "list", {"listConstraint": {"inAllLists": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if list_any:
+        values = [v.strip() for v in list_any.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH, "list", {"listConstraint": {"inAnyList": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if list_not:
+        values = [v.strip() for v in list_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                CACHE_DB_PATH, "list", {"listConstraint": {"notInAnyList": values}}
+            )
+            await _add_id_filter(ids, include=False)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

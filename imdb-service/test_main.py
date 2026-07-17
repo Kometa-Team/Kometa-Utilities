@@ -35,8 +35,6 @@ def test_create_schema_creates_all_tables():
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cursor.fetchall()}
         assert tables == {
-            "imdb_keywords",
-            "imdb_parental",
             "title_basics",
             "title_ratings",
             "title_akas",
@@ -954,7 +952,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     conn = sqlite3.connect(db_path)
     import json
 
-    from importer import create_schema
+    from importer import CACHE_SCHEMA_SQL, create_schema
 
     row_counts = {
         "title_basics": 100,
@@ -966,6 +964,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
         "name_basics": 80,
     }
     create_schema(conn)
+    conn.executescript(CACHE_SCHEMA_SQL)
     conn.execute("INSERT INTO import_meta VALUES ('last_refresh', '2026-03-24T03:00:00+00:00')")
     conn.execute("INSERT INTO import_meta VALUES ('row_counts', ?)", (json.dumps(row_counts),))
     table_updated = {t: "2026-03-24T03:00:00+00:00" for t in row_counts}
@@ -980,6 +979,8 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "idle")
     monkeypatch.setattr(main, "last_activity", None)
@@ -1015,6 +1016,8 @@ def test_stats_includes_chart_progress_during_rebuild(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "building_charts")
     monkeypatch.setattr(main, "last_activity", None)
@@ -1068,6 +1071,8 @@ def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "last_refresh", "2026-03-24T03:00:00+00:00")
     monkeypatch.setattr(main, "current_phase", "idle")
     monkeypatch.setattr(main, "last_activity", None)
@@ -1093,6 +1098,8 @@ def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(
         main, "parental_fetch_success_counts", {"http": 5, "graphql": 3, "browser": 2}
     )
@@ -1178,9 +1185,10 @@ def test_endpoints_returns_html(tmp_path, monkeypatch):
 def _seed_full_test_db(db_path):
     """Seed a test DB with a complete set of test data for endpoint tests."""
     conn = sqlite3.connect(db_path)
-    from importer import create_schema
+    from importer import CACHE_SCHEMA_SQL, create_schema
 
     create_schema(conn)
+    conn.executescript(CACHE_SCHEMA_SQL)
     conn.execute(
         "INSERT INTO title_basics VALUES ('tt0111161','movie','The Shawshank Redemption','The Shawshank Redemption',0,1994,NULL,142,'Drama,Crime,Thriller')"
     )
@@ -1455,6 +1463,8 @@ def test_parental_endpoint_uses_cached_value_when_fresh(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "PARENTAL_GUIDE_TTL_DAYS", 30)
 
     async def fail_fetch(_imdb_id):
@@ -1479,6 +1489,8 @@ def test_parental_endpoint_uses_regex_fallback_when_structured_parser_misses(tmp
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     # Real IMDb parental-guide markup (as of mid-2026) where the severity is in
     # a nested <div class="ipc-html-content-inner-div"> rather than the older
     # flat <li> structure the DOM parser targets.
@@ -1555,6 +1567,8 @@ def test_parental_endpoint_uses_js_injection_when_present(tmp_path, monkeypatch)
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     # HTML with the browser JS-extraction marker. The parser/regex would fail,
     # but the injected JSON should be used.
     sample_html = """
@@ -1583,6 +1597,8 @@ def test_parental_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     sample_html = """
     <html><body>
       <li class="ipc-metadata-list__item ipc-metadata-list-item--link">
@@ -1638,6 +1654,8 @@ def test_parental_endpoint_creates_missing_parental_table_on_existing_db(tmp_pat
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     sample_html = """
     <li class="ipc-metadata-list-item--link">
       <a>Sex &amp; Nudity:</a><div><div><div>Mild</div></div></div>
@@ -1687,6 +1705,8 @@ def test_parental_endpoint_ignore_cache_forces_refresh(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     sample_html = """
     <li class="ipc-metadata-list-item--link">
       <a>Sex &amp; Nudity:</a><div><div><div>Severe</div></div></div>
@@ -1712,6 +1732,8 @@ def test_parental_endpoint_returns_404_when_page_has_no_categories(tmp_path, mon
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
 
     async def fake_fetch(_imdb_id):
         return "<html><body>No parental guide</body></html>"
@@ -1728,6 +1750,8 @@ def test_parental_endpoint_returns_404_when_page_has_no_guide_notice(tmp_path, m
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
 
     async def fake_fetch(_imdb_id):
         return """
@@ -1794,6 +1818,8 @@ def test_keywords_endpoint_returns_cached_value_when_fresh(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     keywords = {"prison": [31, 32], "escape": [22, 23]}
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -1820,6 +1846,8 @@ def test_keywords_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     response_data = _keywords_graphql_response([("prison", 31, 32), ("escape", 22, 23)])
     mock_client = _mock_async_httpx_client(
         [MagicMock(json=lambda: response_data, raise_for_status=MagicMock())]
@@ -1850,6 +1878,8 @@ def test_keywords_endpoint_paginates(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     page1 = _keywords_graphql_response(
         [("prison", 31, 32)], has_next_page=True, end_cursor="cursor1"
     )
@@ -1874,6 +1904,8 @@ def test_keywords_endpoint_ignore_cache_forces_refresh(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     keywords = {"prison": [31, 32]}
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -1915,6 +1947,8 @@ def test_keywords_endpoint_returns_404_for_missing_title(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     error_response = {"errors": [{"message": "Title does not exist"}]}
     mock_client = _mock_async_httpx_client(
         [MagicMock(json=lambda: error_response, raise_for_status=MagicMock())]
@@ -1933,6 +1967,8 @@ def test_keywords_endpoint_returns_502_on_graphql_error(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     error_response = {"errors": [{"message": "Internal server error"}]}
     mock_client = _mock_async_httpx_client(
         [MagicMock(json=lambda: error_response, raise_for_status=MagicMock())]
@@ -2000,9 +2036,10 @@ def test_endpoints_reject_malformed_imdb_ids(tmp_path, monkeypatch, path, bad_id
 def _seed_prefetch_test_db(db_path):
     """Seed DB with title_basics + title_ratings rows for prefetch tests."""
     conn = sqlite3.connect(db_path)
-    from importer import create_schema
+    from importer import CACHE_SCHEMA_SQL, create_schema
 
     create_schema(conn)
+    conn.executescript(CACHE_SCHEMA_SQL)
     conn.executemany(
         "INSERT INTO title_basics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
@@ -2030,6 +2067,8 @@ async def test_prefetch_candidate_returns_highest_voted_uncached_title(tmp_path,
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "votes_desc")
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
     candidate = await main._get_parental_prefetch_candidate()
@@ -2054,6 +2093,8 @@ async def test_prefetch_candidate_returns_none_when_all_cached(tmp_path, monkeyp
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "votes_desc")
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
     candidate = await main._get_parental_prefetch_candidate()
@@ -2067,6 +2108,8 @@ async def test_prefetch_parental_guide_caches_result(tmp_path, monkeypatch):
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
 
     async def fake_fetch(_imdb_id):
         return """

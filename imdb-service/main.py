@@ -2048,6 +2048,8 @@ async def search(
     company_not: Optional[str] = Query(None, alias="company.not"),  # noqa: B008
     event: Optional[str] = Query(None, alias="event"),  # noqa: B008
     event_winning: Optional[str] = Query(None, alias="event.winning"),  # noqa: B008
+    interest: Optional[str] = Query(None, alias="interest"),  # noqa: B008
+    interest_not: Optional[str] = Query(None, alias="interest.not"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2305,6 +2307,28 @@ async def search(
             if not ids:
                 return {"results": [], "total": 0}
             await _add_id_filter(ids, include=True)
+
+    if interest:
+        values = [v.strip() for v in interest.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "interest",
+                {"interestConstraint": {"anyInterestIds": values}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if interest_not:
+        values = [v.strip() for v in interest_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "interest",
+                {"interestConstraint": {"excludeInterestIds": values}},
+            )
+            await _add_id_filter(ids, include=False)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

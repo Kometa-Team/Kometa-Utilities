@@ -3292,6 +3292,78 @@ def test_search_event_returns_empty_when_no_matches(tmp_path, monkeypatch):
     assert response.json() == {"results": [], "total": 0}
 
 
+def test_search_with_interest(tmp_path, monkeypatch):
+    """interest=... intersects results with the interest constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?interest=in0000008")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "interest"
+    assert args[2] == {"interestConstraint": {"anyInterestIds": ["in0000008"]}}
+
+
+def test_search_interest_multiple_ids(tmp_path, monkeypatch):
+    """interest=... accepts a comma-separated list of interest IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?interest=in0000008,in0000123")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"interestConstraint": {"anyInterestIds": ["in0000008", "in0000123"]}}
+
+
+def test_search_interest_not_excludes(tmp_path, monkeypatch):
+    """interest.not=... excludes titles with the given interests."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?interest.not=in0000008")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"interestConstraint": {"excludeInterestIds": ["in0000008"]}}
+
+
+def test_search_interest_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the interest constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?interest=in0000008")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

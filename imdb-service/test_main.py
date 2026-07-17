@@ -3476,6 +3476,144 @@ def test_search_text_match_returns_empty_when_no_matches(tmp_path, monkeypatch):
     assert response.json() == {"results": [], "total": 0}
 
 
+def test_search_with_popularity_range(tmp_path, monkeypatch):
+    """popularity.gte/.lte map to titleMeterConstraint rankRange min/max."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?popularity.gte=1&popularity.lte=1000")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "popularity"
+    assert args[2] == {
+        "titleMeterConstraint": {
+            "rankRange": {"min": 1, "max": 1000},
+            "titleMeterType": "TITLE_METER",
+        }
+    }
+
+
+def test_search_popularity_type_override(tmp_path, monkeypatch):
+    """popularity.type overrides the meter type and is uppercased."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?popularity.lte=500&popularity.type=movie_meter")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {
+        "titleMeterConstraint": {
+            "rankRange": {"max": 500},
+            "titleMeterType": "MOVIE_METER",
+        }
+    }
+
+
+def test_search_with_character(tmp_path, monkeypatch):
+    """character=... maps to characterConstraint.anyCharacterNames."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?character=James Bond,Q")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "character"
+    assert args[2] == {"characterConstraint": {"anyCharacterNames": ["James Bond", "Q"]}}
+
+
+def test_search_with_list_all(tmp_path, monkeypatch):
+    """list=... maps to listConstraint.inAllLists."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?list=ls000000001")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "list"
+    assert args[2] == {"listConstraint": {"inAllLists": ["ls000000001"]}}
+
+
+def test_search_list_any(tmp_path, monkeypatch):
+    """list.any=... maps to listConstraint.inAnyList."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?list.any=ls000000001,ls000000002")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"listConstraint": {"inAnyList": ["ls000000001", "ls000000002"]}}
+
+
+def test_search_list_not_excludes(tmp_path, monkeypatch):
+    """list.not=... maps to listConstraint.notInAnyList and excludes results."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?list.not=ls000000001")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"listConstraint": {"notInAnyList": ["ls000000001"]}}
+
+
+def test_search_character_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If a GraphQL-only include constraint returns no IDs, search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?character=Nobody")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

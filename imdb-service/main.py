@@ -2059,6 +2059,13 @@ async def search(
     soundtrack: Optional[str] = Query(None, alias="soundtrack"),  # noqa: B008
     trivia: Optional[str] = Query(None, alias="trivia"),  # noqa: B008
     location: Optional[str] = Query(None, alias="location"),  # noqa: B008
+    popularity_gte: Optional[int] = Query(None, alias="popularity.gte"),  # noqa: B008
+    popularity_lte: Optional[int] = Query(None, alias="popularity.lte"),  # noqa: B008
+    popularity_type: Optional[str] = Query(None, alias="popularity.type"),  # noqa: B008
+    character: Optional[str] = Query(None, alias="character"),  # noqa: B008
+    list_all: Optional[str] = Query(None, alias="list"),  # noqa: B008
+    list_any: Optional[str] = Query(None, alias="list.any"),  # noqa: B008
+    list_not: Optional[str] = Query(None, alias="list.not"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2382,6 +2389,63 @@ async def search(
         if not ids:
             return {"results": [], "total": 0}
         await _add_id_filter(ids, include=True)
+
+    if popularity_gte is not None or popularity_lte is not None:
+        rank_range: dict[str, int] = {}
+        if popularity_gte is not None:
+            rank_range["min"] = popularity_gte
+        if popularity_lte is not None:
+            rank_range["max"] = popularity_lte
+        meter = {
+            "rankRange": rank_range,
+            "titleMeterType": (popularity_type or "TITLE_METER").strip().upper(),
+        }
+        ids = await constraints.get_constraint_ids(
+            DB_PATH, "popularity", {"titleMeterConstraint": meter}
+        )
+        if not ids:
+            return {"results": [], "total": 0}
+        await _add_id_filter(ids, include=True)
+
+    if character:
+        names = [v.strip() for v in character.split(",") if v.strip()]
+        if names:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "character",
+                {"characterConstraint": {"anyCharacterNames": names}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if list_all:
+        values = [v.strip() for v in list_all.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH, "list", {"listConstraint": {"inAllLists": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if list_any:
+        values = [v.strip() for v in list_any.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH, "list", {"listConstraint": {"inAnyList": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if list_not:
+        values = [v.strip() for v in list_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH, "list", {"listConstraint": {"notInAnyList": values}}
+            )
+            await _add_id_filter(ids, include=False)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

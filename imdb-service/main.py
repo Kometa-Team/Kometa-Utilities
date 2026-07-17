@@ -2005,6 +2005,61 @@ async def _parental_prefetch_worker() -> None:
             await asyncio.sleep(min(5, deadline - asyncio.get_running_loop().time()))
 
 
+@app.post("/search/advanced")
+async def search_advanced(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a full IMDb ``advancedTitleSearch`` from a pre-built constraints object.
+
+    Kometa builds the ``AdvancedTitleSearchConstraints`` object (and its friendly-name
+    translations) itself, then posts it here.  The service runs one combined,
+    paginated query against IMDb GraphQL, caches the ordered result, and returns
+    the title IDs in IMDb's own order.
+
+    Body::
+
+        {
+          "constraints": { ... AdvancedTitleSearchConstraints ... },  # required
+          "sort": {"sortBy": "POPULARITY", "sortOrder": "ASC"},        # optional
+          "limit": 250,                                                # optional
+          "ignore_cache": false                                        # optional
+        }
+    """
+    search_constraints = payload.get("constraints")
+    if not isinstance(search_constraints, dict) or not search_constraints:
+        raise HTTPException(
+            status_code=400, detail="'constraints' object is required and must be non-empty"
+        )
+
+    sort = payload.get("sort")
+    if sort is not None and not isinstance(sort, dict):
+        raise HTTPException(status_code=400, detail="'sort' must be an object")
+
+    limit = payload.get("limit")
+    if limit is not None:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise HTTPException(status_code=400, detail="'limit' must be a positive integer")
+
+    ignore_cache = bool(payload.get("ignore_cache", False))
+
+    try:
+        ids, cache_hit = await constraints.get_search_ids(
+            DB_PATH,
+            search_constraints,
+            sort=sort,
+            limit=limit,
+            ignore_cache=ignore_cache,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"IMDb GraphQL request failed: {e}")
+
+    return {
+        "results": ids,
+        "total": len(ids),
+        "cached": cache_hit,
+    }
+
+
 @app.get("/search")
 async def search(
     type: Optional[str] = Query(None, alias="type"),  # noqa: B008

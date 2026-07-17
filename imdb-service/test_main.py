@@ -3614,6 +3614,92 @@ def test_search_character_returns_empty_when_no_matches(tmp_path, monkeypatch):
     assert response.json() == {"results": [], "total": 0}
 
 
+def test_search_advanced_passthrough(tmp_path, monkeypatch):
+    """POST /search/advanced forwards the constraints object and returns ordered IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=(["tt0000003", "tt0000001"], False))
+    monkeypatch.setattr(main.constraints, "get_search_ids", mock)
+    client = TestClient(main.app)
+    body = {
+        "constraints": {"genreConstraint": {"allGenreIds": ["Drama"]}},
+        "sort": {"sortBy": "POPULARITY", "sortOrder": "ASC"},
+        "limit": 250,
+    }
+    response = client.post("/search/advanced", json=body)
+    assert response.status_code == 200
+    assert response.json() == {
+        "results": ["tt0000003", "tt0000001"],
+        "total": 2,
+        "cached": False,
+    }
+
+    _, args, kwargs = mock.mock_calls[0]
+    assert args[1] == {"genreConstraint": {"allGenreIds": ["Drama"]}}
+    assert kwargs["sort"] == {"sortBy": "POPULARITY", "sortOrder": "ASC"}
+    assert kwargs["limit"] == 250
+
+
+def test_search_advanced_reports_cache_hit(tmp_path, monkeypatch):
+    """A cache hit is reflected in the response."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_search_ids", AsyncMock(return_value=(["tt0000001"], True))
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/search/advanced", json={"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}}
+    )
+    assert response.status_code == 200
+    assert response.json()["cached"] is True
+
+
+def test_search_advanced_requires_constraints(tmp_path, monkeypatch):
+    """A missing or empty constraints object is a 400."""
+    import main
+
+    client = TestClient(main.app)
+    assert client.post("/search/advanced", json={}).status_code == 400
+    assert client.post("/search/advanced", json={"constraints": {}}).status_code == 400
+    assert client.post("/search/advanced", json={"constraints": "x"}).status_code == 400
+
+
+def test_search_advanced_rejects_bad_limit(tmp_path, monkeypatch):
+    """A non-positive-integer limit is a 400."""
+    import main
+
+    client = TestClient(main.app)
+    body = {"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}, "limit": 0}
+    assert client.post("/search/advanced", json=body).status_code == 400
+    body["limit"] = "many"
+    assert client.post("/search/advanced", json=body).status_code == 400
+
+
+def test_search_advanced_surfaces_graphql_error(tmp_path, monkeypatch):
+    """A RuntimeError from the fetcher becomes a 502."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_search_ids", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/search/advanced", json={"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}}
+    )
+    assert response.status_code == 502
+    assert "boom" in response.json()["detail"]
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

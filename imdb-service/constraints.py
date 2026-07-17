@@ -42,6 +42,7 @@ CONSTRAINT_CACHE_TTL_DAYS: dict[str, int] = {
     "popularity": 1,
     "list": 1,
     "character": 7,
+    "search": 1,
 }
 
 
@@ -206,6 +207,128 @@ async def fetch_constraint_ids(
             page += 1
 
     return ids
+
+
+def _advanced_search_query() -> str:
+    """Return the GraphQL query for a full advanced search (constraints + sort)."""
+    return (
+        "query($constraints: AdvancedTitleSearchConstraints!, $sort: AdvancedTitleSearchSort,"
+        " $first: Int!, $after: String) {"
+        "  advancedTitleSearch(first: $first, after: $after, constraints: $constraints, sort: $sort) {"
+        "    total"
+        "    edges { node { title { id } } }"
+        "    pageInfo { hasNextPage endCursor }"
+        "  }"
+        "}"
+    )
+
+
+async def fetch_search_ids(
+    search_constraints: dict[str, Any],
+    *,
+    sort: Optional[dict[str, Any]] = None,
+    limit: Optional[int] = None,
+    graphql_url: str = GRAPHQL_URL,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int = DEFAULT_MAX_PAGES,
+) -> list[str]:
+    """Run a single paginated ``advancedTitleSearch`` and return ordered title IDs.
+
+    Unlike :func:`fetch_constraint_ids`, this preserves IMDb's result ordering
+    (via ``sort``) and stops once ``limit`` IDs have been collected.  The whole
+    query is sent as one combined constraints object so no cross-constraint
+    intersection is needed.
+    """
+    query = _advanced_search_query()
+    ids: list[str] = []
+    cursor: Optional[str] = None
+    page = 0
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=30.0,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
+            "content-type": "application/json",
+        },
+    ) as client:
+        while page < max_pages:
+            remaining = None if limit is None else max(0, limit - len(ids))
+            if remaining == 0:
+                break
+            first = page_size if remaining is None else min(page_size, remaining)
+            variables: dict[str, Any] = {"constraints": search_constraints, "first": first}
+            if sort:
+                variables["sort"] = sort
+            if cursor:
+                variables["after"] = cursor
+
+            response = await client.post(graphql_url, json={"query": query, "variables": variables})
+            response.raise_for_status()
+            data = response.json()
+
+            if "errors" in data:
+                error_message = data["errors"][0].get("message", "unknown error")
+                raise RuntimeError(f"IMDb GraphQL advanced search failed: {error_message}")
+
+            search_data = (data.get("data") or {}).get("advancedTitleSearch") or {}
+            for edge in search_data.get("edges", []):
+                title_id = ((edge.get("node") or {}).get("title") or {}).get("id")
+                if title_id:
+                    ids.append(title_id)
+
+            if limit is not None and len(ids) >= limit:
+                ids = ids[:limit]
+                break
+
+            page_info = search_data.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
+            page += 1
+
+    return ids
+
+
+async def get_search_ids(
+    db_path: Path,
+    search_constraints: dict[str, Any],
+    *,
+    sort: Optional[dict[str, Any]] = None,
+    limit: Optional[int] = None,
+    ignore_cache: bool = False,
+    ttl_days: Optional[int] = None,
+    graphql_url: str = GRAPHQL_URL,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int = DEFAULT_MAX_PAGES,
+) -> tuple[list[str], bool]:
+    """Return ordered search IDs, using the cache unless ignored or stale.
+
+    Returns ``(ids, cache_hit)``.
+    """
+    cache_params = {"constraints": search_constraints, "sort": sort, "limit": limit}
+    cached, expired = (
+        (None, False)
+        if ignore_cache
+        else await load_constraint_cache(db_path, "search", cache_params)
+    )
+    if cached is not None and not expired:
+        return cached, True
+
+    ids = await fetch_search_ids(
+        search_constraints,
+        sort=sort,
+        limit=limit,
+        graphql_url=graphql_url,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
+    await save_constraint_cache(
+        db_path, "search", cache_params, ids, ttl_days=ttl_days if ttl_days is not None else 1
+    )
+    return ids, False
 
 
 async def get_constraint_ids(

@@ -2046,6 +2046,8 @@ async def search(
     content_rating_not: Optional[str] = Query(None, alias="content_rating.not"),  # noqa: B008
     company: Optional[str] = Query(None, alias="company"),  # noqa: B008
     company_not: Optional[str] = Query(None, alias="company.not"),  # noqa: B008
+    event: Optional[str] = Query(None, alias="event"),  # noqa: B008
+    event_winning: Optional[str] = Query(None, alias="event.winning"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2275,6 +2277,34 @@ async def search(
                 {"creditedCompanyConstraint": {"excludeCompanyIds": values}},
             )
             await _add_id_filter(ids, include=False)
+
+    if event:
+        values = [v.strip() for v in event.split(",") if v.strip()]
+        if values:
+            nominations = [{"eventId": event_id} for event_id in values]
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "event",
+                {"awardConstraint": {"anyEventNominations": nominations}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if event_winning:
+        values = [v.strip() for v in event_winning.split(",") if v.strip()]
+        if values:
+            nominations = [
+                {"eventId": event_id, "winnerFilter": "WINNER_ONLY"} for event_id in values
+            ]
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "event",
+                {"awardConstraint": {"anyEventNominations": nominations}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

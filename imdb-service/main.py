@@ -2042,6 +2042,8 @@ async def search(
     keyword: Optional[str] = Query(None, alias="keyword"),  # noqa: B008
     keyword_any: Optional[str] = Query(None, alias="keyword.any"),  # noqa: B008
     keyword_not: Optional[str] = Query(None, alias="keyword.not"),  # noqa: B008
+    content_rating: Optional[str] = Query(None, alias="content_rating"),  # noqa: B008
+    content_rating_not: Optional[str] = Query(None, alias="content_rating.not"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2205,6 +2207,48 @@ async def search(
         if values:
             ids = await constraints.get_constraint_ids(
                 DB_PATH, "keyword", {"keywordConstraint": {"excludeKeywords": values}}
+            )
+            await _add_id_filter(ids, include=False)
+
+    def _parse_certificate_ratings(raw: str) -> list[dict[str, str]]:
+        """Parse ``region:rating`` pairs into GraphQL certificate objects.
+
+        A value without a ``:`` separator defaults to the ``US`` region.
+        """
+        pairs: list[dict[str, str]] = []
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if ":" in token:
+                region, rating = token.split(":", 1)
+                region = region.strip().upper()
+                rating = rating.strip()
+            else:
+                region, rating = "US", token
+            if rating:
+                pairs.append({"region": region, "rating": rating})
+        return pairs
+
+    if content_rating:
+        ratings = _parse_certificate_ratings(content_rating)
+        if ratings:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "content_rating",
+                {"certificateConstraint": {"anyRegionCertificateRatings": ratings}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if content_rating_not:
+        ratings = _parse_certificate_ratings(content_rating_not)
+        if ratings:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "content_rating",
+                {"certificateConstraint": {"excludeRegionCertificateRatings": ratings}},
             )
             await _add_id_filter(ids, include=False)
 

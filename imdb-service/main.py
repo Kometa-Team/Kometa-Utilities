@@ -2050,6 +2050,7 @@ async def search(
     event_winning: Optional[str] = Query(None, alias="event.winning"),  # noqa: B008
     interest: Optional[str] = Query(None, alias="interest"),  # noqa: B008
     interest_not: Optional[str] = Query(None, alias="interest.not"),  # noqa: B008
+    topic: Optional[str] = Query(None, alias="topic"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2329,6 +2330,18 @@ async def search(
                 {"interestConstraint": {"excludeInterestIds": values}},
             )
             await _add_id_filter(ids, include=False)
+
+    if topic:
+        values = [v.strip().upper() for v in topic.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "topic",
+                {"withTitleDataConstraint": {"anyDataAvailable": values}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

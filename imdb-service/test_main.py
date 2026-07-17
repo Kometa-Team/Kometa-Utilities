@@ -2969,6 +2969,98 @@ def test_search_imdb_top_filters_to_chart(tmp_path, monkeypatch):
     assert "tt0000002" not in data["results"]
 
 
+def test_search_with_keyword_all(tmp_path, monkeypatch):
+    """keyword=... intersects the SQLite result set with the cached keyword IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_constraint_ids", AsyncMock(return_value=["tt0000001", "tt0000003"])
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword=prison")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000003" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+
+def test_search_with_keyword_any(tmp_path, monkeypatch):
+    """keyword.any=... unions multiple keyword values before intersecting."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints,
+        "get_constraint_ids",
+        AsyncMock(return_value=["tt0000001", "tt0000002"]),
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword.any=prison,escape")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" in data["results"]
+    assert "tt0000003" not in data["results"]
+
+
+def test_search_with_keyword_not(tmp_path, monkeypatch):
+    """keyword.not=... excludes titles that match any of the given keywords."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_constraint_ids", AsyncMock(return_value=["tt0000001"])
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword.not=prison")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+
+def test_search_with_keyword_and_type(tmp_path, monkeypatch):
+    """Keyword constraints compose with existing SQLite filters."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints,
+        "get_constraint_ids",
+        AsyncMock(return_value=["tt0000001", "tt0000003"]),
+    )
+    client = TestClient(main.app)
+    response = client.get("/search?keyword=prison&type=movie")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000003" not in data["results"]
+
+
+def test_search_with_keyword_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the GraphQL constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?keyword=nonexistent")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

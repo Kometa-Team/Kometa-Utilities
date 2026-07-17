@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlsplit
 
 import aiosqlite
 import charts
+import constraints
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -2038,6 +2039,9 @@ async def search(
     cast_not: Optional[str] = Query(None, alias="cast.not"),  # noqa: B008
     series: Optional[str] = Query(None, alias="series"),  # noqa: B008
     series_not: Optional[str] = Query(None, alias="series.not"),  # noqa: B008
+    keyword: Optional[str] = Query(None, alias="keyword"),  # noqa: B008
+    keyword_any: Optional[str] = Query(None, alias="keyword.any"),  # noqa: B008
+    keyword_not: Optional[str] = Query(None, alias="keyword.not"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2166,6 +2170,43 @@ async def search(
         series,
         series_not,
     )
+
+    async def _add_id_filter(ids: list[str], include: bool = True) -> None:
+        """Append a tconst IN / NOT IN condition."""
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        op = "IN" if include else "NOT IN"
+        conditions.append(f"tb.tconst {op} ({placeholders})")
+        params.extend(ids)
+
+    if keyword:
+        values = [v.strip() for v in keyword.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH, "keyword", {"keywordConstraint": {"allKeywords": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if keyword_any:
+        values = [v.strip() for v in keyword_any.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH, "keyword", {"keywordConstraint": {"anyKeywords": values}}
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if keyword_not:
+        values = [v.strip() for v in keyword_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH, "keyword", {"keywordConstraint": {"excludeKeywords": values}}
+            )
+            await _add_id_filter(ids, include=False)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

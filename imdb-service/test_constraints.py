@@ -96,6 +96,23 @@ async def test_fetch_constraint_ids_respects_max_pages(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fetch_constraint_ids_stops_when_cursor_missing(tmp_path):
+    """Fetching stops if the API claims more pages but provides no cursor."""
+    page = _make_graphql_response(["tt0111161"], has_next_page=True, end_cursor=None)
+    mock_client = _mock_async_httpx_client(
+        [MagicMock(json=lambda: page, raise_for_status=MagicMock())]
+    )
+
+    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+        ids = await constraints.fetch_constraint_ids(
+            {"keywordConstraint": {"anyKeywords": ["prison"]}}, page_size=1
+        )
+
+    assert ids == ["tt0111161"]
+    assert mock_client.post.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_fetch_constraint_ids_raises_on_graphql_error(tmp_path):
     """A GraphQL error in the response body is surfaced as RuntimeError."""
     response = {"errors": [{"message": "Bad constraint"}]}

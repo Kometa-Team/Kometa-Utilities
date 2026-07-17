@@ -3416,6 +3416,66 @@ def test_search_topic_returns_empty_when_no_matches(tmp_path, monkeypatch):
     assert response.json() == {"results": [], "total": 0}
 
 
+@pytest.mark.parametrize(
+    "param,cache_type,constraint_key,field",
+    [
+        (
+            "alternate_version",
+            "alternate_version",
+            "alternateVersionMatchingConstraint",
+            "allAlternateVersionTextTerms",
+        ),
+        (
+            "crazy_credit",
+            "crazy_credit",
+            "crazyCreditMatchingConstraint",
+            "allCrazyCreditTextTerms",
+        ),
+        ("goof", "goof", "goofMatchingConstraint", "allGoofTextTerms"),
+        ("plot", "plot", "plotMatchingConstraint", "allPlotTextTerms"),
+        ("quote", "quote", "quoteMatchingConstraint", "allQuoteTextTerms"),
+        ("soundtrack", "soundtrack", "soundtrackMatchingConstraint", "allSoundtrackTextTerms"),
+        ("trivia", "trivia", "triviaMatchingConstraint", "allTriviaTextTerms"),
+        ("location", "location", "filmingLocationConstraint", "allLocations"),
+    ],
+)
+def test_search_text_match_constraints(
+    tmp_path, monkeypatch, param, cache_type, constraint_key, field
+):
+    """Each free-text matching constraint maps to its GraphQL all-terms field."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get(f"/search?{param}=hello,world")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == cache_type
+    assert args[2] == {constraint_key: {field: ["hello", "world"]}}
+
+
+def test_search_text_match_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If a text-match constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?plot=spaceship")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

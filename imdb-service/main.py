@@ -2051,6 +2051,14 @@ async def search(
     interest: Optional[str] = Query(None, alias="interest"),  # noqa: B008
     interest_not: Optional[str] = Query(None, alias="interest.not"),  # noqa: B008
     topic: Optional[str] = Query(None, alias="topic"),  # noqa: B008
+    alternate_version: Optional[str] = Query(None, alias="alternate_version"),  # noqa: B008
+    crazy_credit: Optional[str] = Query(None, alias="crazy_credit"),  # noqa: B008
+    goof: Optional[str] = Query(None, alias="goof"),  # noqa: B008
+    plot: Optional[str] = Query(None, alias="plot"),  # noqa: B008
+    quote: Optional[str] = Query(None, alias="quote"),  # noqa: B008
+    soundtrack: Optional[str] = Query(None, alias="soundtrack"),  # noqa: B008
+    trivia: Optional[str] = Query(None, alias="trivia"),  # noqa: B008
+    location: Optional[str] = Query(None, alias="location"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2342,6 +2350,38 @@ async def search(
             if not ids:
                 return {"results": [], "total": 0}
             await _add_id_filter(ids, include=True)
+
+    # Free-text "matching" constraints: each maps to a GraphQL constraint whose
+    # ``all<X>TextTerms`` (or ``allLocations``) field must all match.
+    text_match_constraints: list[tuple[Optional[str], str, str, str]] = [
+        (
+            alternate_version,
+            "alternate_version",
+            "alternateVersionMatchingConstraint",
+            "allAlternateVersionTextTerms",
+        ),  # noqa: E501
+        (crazy_credit, "crazy_credit", "crazyCreditMatchingConstraint", "allCrazyCreditTextTerms"),
+        (goof, "goof", "goofMatchingConstraint", "allGoofTextTerms"),
+        (plot, "plot", "plotMatchingConstraint", "allPlotTextTerms"),
+        (quote, "quote", "quoteMatchingConstraint", "allQuoteTextTerms"),
+        (soundtrack, "soundtrack", "soundtrackMatchingConstraint", "allSoundtrackTextTerms"),
+        (trivia, "trivia", "triviaMatchingConstraint", "allTriviaTextTerms"),
+        (location, "location", "filmingLocationConstraint", "allLocations"),
+    ]
+    for raw, cache_type, constraint_key, field in text_match_constraints:
+        if not raw:
+            continue
+        terms = [v.strip() for v in raw.split(",") if v.strip()]
+        if not terms:
+            continue
+        ids = await constraints.get_constraint_ids(
+            DB_PATH,
+            cache_type,
+            {constraint_key: {field: terms}},
+        )
+        if not ids:
+            return {"results": [], "total": 0}
+        await _add_id_filter(ids, include=True)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 

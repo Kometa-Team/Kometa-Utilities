@@ -2044,6 +2044,8 @@ async def search(
     keyword_not: Optional[str] = Query(None, alias="keyword.not"),  # noqa: B008
     content_rating: Optional[str] = Query(None, alias="content_rating"),  # noqa: B008
     content_rating_not: Optional[str] = Query(None, alias="content_rating.not"),  # noqa: B008
+    company: Optional[str] = Query(None, alias="company"),  # noqa: B008
+    company_not: Optional[str] = Query(None, alias="company.not"),  # noqa: B008
 ) -> Dict[str, Any]:
     """Return a filtered list of IMDb IDs matching the given criteria."""
     if imdb_top is not None and imdb_bottom is not None:
@@ -2249,6 +2251,28 @@ async def search(
                 DB_PATH,
                 "content_rating",
                 {"certificateConstraint": {"excludeRegionCertificateRatings": ratings}},
+            )
+            await _add_id_filter(ids, include=False)
+
+    if company:
+        values = [v.strip() for v in company.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "company",
+                {"creditedCompanyConstraint": {"anyCompanyIds": values}},
+            )
+            if not ids:
+                return {"results": [], "total": 0}
+            await _add_id_filter(ids, include=True)
+
+    if company_not:
+        values = [v.strip() for v in company_not.split(",") if v.strip()]
+        if values:
+            ids = await constraints.get_constraint_ids(
+                DB_PATH,
+                "company",
+                {"creditedCompanyConstraint": {"excludeCompanyIds": values}},
             )
             await _add_id_filter(ids, include=False)
 

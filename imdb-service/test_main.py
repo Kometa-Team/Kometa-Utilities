@@ -3143,6 +3143,78 @@ def test_search_content_rating_returns_empty_when_no_matches(tmp_path, monkeypat
     assert response.json() == {"results": [], "total": 0}
 
 
+def test_search_with_company(tmp_path, monkeypatch):
+    """company=... intersects results with the credited-company constraint IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001", "tt0000003"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?company=co0023400")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" in data["results"]
+    assert "tt0000002" not in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[1] == "company"
+    assert args[2] == {"creditedCompanyConstraint": {"anyCompanyIds": ["co0023400"]}}
+
+
+def test_search_company_multiple_ids(tmp_path, monkeypatch):
+    """company=... accepts a comma-separated list of company IDs."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?company=co0023400,co0098765")
+    assert response.status_code == 200
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"creditedCompanyConstraint": {"anyCompanyIds": ["co0023400", "co0098765"]}}
+
+
+def test_search_company_not_excludes(tmp_path, monkeypatch):
+    """company.not=... excludes titles from the given companies."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    mock = AsyncMock(return_value=["tt0000001"])
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", mock)
+    client = TestClient(main.app)
+    response = client.get("/search?company.not=co0023400")
+    assert response.status_code == 200
+    data = response.json()
+    assert "tt0000001" not in data["results"]
+    assert "tt0000002" in data["results"]
+
+    _, args, _ = mock.mock_calls[0]
+    assert args[2] == {"creditedCompanyConstraint": {"excludeCompanyIds": ["co0023400"]}}
+
+
+def test_search_company_returns_empty_when_no_matches(tmp_path, monkeypatch):
+    """If the company constraint returns no IDs, the search returns empty."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main.constraints, "get_constraint_ids", AsyncMock(return_value=[]))
+    client = TestClient(main.app)
+    response = client.get("/search?company=co0023400")
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "total": 0}
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

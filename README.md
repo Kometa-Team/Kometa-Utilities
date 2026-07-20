@@ -1,8 +1,13 @@
 # Kometa Utilities
 
-A single repo for Kometa support utilities.
+Kometa Utilities is a collection of backend services designed to support the Kometa ecosystem. It provides secure OAuth authentication flows for third-party platforms (Plex, Trakt, MyAnimeList, and SIMKL) alongside robust API proxying and metadata caching services (IMDb, AniDB, and SIMKL). By handling authentication and rate-limited data scraping centrally, these utilities ensure fast, reliable, and compliant data access for Kometa users.
 
-One repo, one deployment.
+## what's here?
+
+A suite of support services for Kometa, including:
+* OAuth Proxies: Secure authentication handling for Plex, Trakt, MyAnimeList, and SIMKL.
+* Metadata & Chart Caching: Automated background scraping and API caching for IMDb (including parental guides and daily charts), AniDB, and SIMKL.
+* Community Infrastructure: Integrated hosting for Kometa's analytics, feature requests, translation management, and file sharing.
 
 ## Docker Workflow
 

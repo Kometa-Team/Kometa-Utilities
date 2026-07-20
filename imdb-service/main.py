@@ -1874,41 +1874,35 @@ async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
     return updated_at
 
 
+
 async def _get_parental_cache_stats() -> Dict[str, Any]:
-    """Return cached parental-guide item counts for the stats endpoint."""
+    """Return cached parental-guide item counts broken down by severity for the stats endpoint."""
     await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        cursor = await db.execute(
-            """
-            SELECT
-                COUNT(*) AS items_cached,
-                SUM(CASE WHEN nudity IS NOT NULL AND nudity != '' THEN 1 ELSE 0 END) AS nudity,
-                SUM(CASE WHEN violence IS NOT NULL AND violence != '' THEN 1 ELSE 0 END) AS violence,
-                SUM(CASE WHEN profanity IS NOT NULL AND profanity != '' THEN 1 ELSE 0 END) AS profanity,
-                SUM(CASE WHEN alcohol IS NOT NULL AND alcohol != '' THEN 1 ELSE 0 END) AS alcohol,
-                SUM(CASE WHEN frightening IS NOT NULL AND frightening != '' THEN 1 ELSE 0 END) AS frightening
-            FROM imdb_parental
-            """
-        )
-        row = await cursor.fetchone()
-
-    if row is None:
-        return {
-            "items_cached": 0,
-            "flag_counts": {column: 0 for column in PARENTAL_DB_COLUMNS.values()},
-        }
-
-    return {
-        "items_cached": row[0] or 0,
-        "flag_counts": {
-            "nudity": row[1] or 0,
-            "violence": row[2] or 0,
-            "profanity": row[3] or 0,
-            "alcohol": row[4] or 0,
-            "frightening": row[5] or 0,
-        },
+    stats = {
+        "items_cached": 0,
+        "severities": ["None", "Mild", "Moderate", "Severe"],
+        "breakdown": {}
     }
+    categories = ["nudity", "violence", "profanity", "alcohol", "frightening"]
+    
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        # Get total items
+        cursor = await db.execute("SELECT COUNT(*) FROM imdb_parental")
+        row = await cursor.fetchone()
+        if row:
+            stats["items_cached"] = row[0]
+            
+        for cat in categories:
+            cursor = await db.execute(f"SELECT {cat}, COUNT(*) FROM imdb_parental GROUP BY {cat}")
+            rows = await cursor.fetchall()
+            for severity, count in rows:
+                if not severity: severity = 'Unknown'
+                if severity not in stats["breakdown"]:
+                    stats["breakdown"][severity] = {c: 0 for c in categories}
+                stats["breakdown"][severity][cat] = count
+                
+    return stats
 
 
 async def _load_parental_fetch_success_counts() -> None:
@@ -3092,16 +3086,42 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}).join('');
     }}
 
+
     function renderParental(pc) {{
         const el = document.getElementById('parental');
-        if (!pc) {{ el.innerHTML = '<li>No data</li>'; return; }}
-        const items = [`<li>items_cached: <span class="count">${{fmt(pc.items_cached)}}</span></li>`];
-        if (pc.flag_counts && typeof pc.flag_counts === 'object') {{
-            Object.entries(pc.flag_counts).forEach(([k, v]) => {{
-                items.push(`<li>${{k}}: <span class="count">${{fmt(v)}}</span></li>`);
-            }});
+        if (!pc || !pc.breakdown) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        
+        const categories = ["nudity", "violence", "profanity", "alcohol", "frightening"];
+        let html = `<li style="column-span: all; margin-bottom: 8px;">items_cached: <span class="count">${{fmt(pc.items_cached)}}</span></li>`;
+        
+        html += `<table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: right;">
+            <thead>
+                <tr style="color: #8a94a6; border-bottom: 1px solid #2a323d;">
+                    <th style="text-align: left; padding: 4px;">Severity</th>
+                    <th style="padding: 4px;">Nudity</th>
+                    <th style="padding: 4px;">Violence</th>
+                    <th style="padding: 4px;">Profanity</th>
+                    <th style="padding: 4px;">Alcohol</th>
+                    <th style="padding: 4px;">Frightening</th>
+                </tr>
+            </thead>
+            <tbody>`;
+            
+        const severities = ["None", "Mild", "Moderate", "Severe", "Unknown"];
+        for (const sev of severities) {{
+            if (!pc.breakdown[sev]) continue;
+            html += `<tr><td style="text-align: left; padding: 4px; color: #8a94a6;">${{sev}}</td>`;
+            for (const cat of categories) {{
+                const count = pc.breakdown[sev][cat] || 0;
+                html += `<td style="padding: 4px;" class="count">${{fmt(count)}}</td>`;
+            }}
+            html += `</tr>`;
         }}
-        el.innerHTML = items.join('');
+        html += `</tbody></table>`;
+        
+        // Remove the default ul styling for this specific container since we used a table
+        el.style.columns = '1';
+        el.innerHTML = html;
     }}
 
     async function lookupParental() {{
@@ -3663,5 +3683,5 @@ async def upload_csv(file: UploadFile = File(...)):
             count += 1
         await db.commit()
     
-    return RedirectResponse(url="/dashboard", status_code=303)
+    return RedirectResponse(url=f"{ROOT_PATH}/dashboard", status_code=303)
 

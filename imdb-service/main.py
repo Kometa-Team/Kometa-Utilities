@@ -24,7 +24,7 @@ import constraints
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
-from importer import ALLOWED_TABLES, SCHEMA_SQL, TABLE_TO_STEM
+from importer import ALLOWED_TABLES, SCHEMA_SQL, CACHE_SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))

@@ -91,8 +91,25 @@ CREATE TABLE IF NOT EXISTS import_meta (
 );
 """
 
-"""
 
+
+CACHE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS imdb_parental (
+    imdb_id TEXT PRIMARY KEY,
+    nudity TEXT,
+    violence TEXT,
+    profanity TEXT,
+    alcohol TEXT,
+    frightening TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS imdb_keywords (
+    imdb_id TEXT PRIMARY KEY,
+    keywords TEXT,  -- JSON object: {"prison": [31, 32], ...}
+    expiration_date TEXT
+);
+"""
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all dataset tables and indexes in the given connection."""

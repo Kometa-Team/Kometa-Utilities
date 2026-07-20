@@ -1930,6 +1930,16 @@ async def _get_keyword_cache_stats() -> Dict[str, Any]:
 
 
 
+
+async def _get_constraint_cache_stats() -> Dict[str, Any]:
+    """Return the total number of cached constraint queries."""
+    await constraints._ensure_constraint_cache_table(CACHE_DB_PATH)
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM imdb_constraint_cache")
+        row = await cursor.fetchone()
+        return {"items_cached": row[0] if row else 0}
+
+
 async def _load_parental_fetch_success_counts() -> None:
     """Load persisted parental fetch success counts from import_meta."""
     if not _db_is_ready():
@@ -3022,7 +3032,10 @@ async def dashboard(request: Request) -> HTMLResponse:
         <h2>Parental Cache</h2>
         <ul id="parental"><li>Loading…</li></ul>
 
-        <h2>Keyword Cache</h2>
+        
+        <h2>Constraint Cache</h2>
+        <ul id="constraints"><li>Loading…</li></ul>
+<h2>Keyword Cache</h2>
         <ul id="keywords"><li>Loading…</li></ul>
 
 
@@ -3156,7 +3169,15 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 
 
-    function renderKeywords(kc) {{
+
+    function renderConstraints(cc) {
+        const el = document.getElementById('constraints');
+        if (!cc) { el.innerHTML = '<li>No data</li>'; return; }
+        el.innerHTML = `<li>queries_cached: <span class="count">${fmt(cc.items_cached)}</span></li>`;
+    }
+
+    function renderKeywords(kc) {
+{
         const el = document.getElementById('keywords');
         if (!kc) {{ el.innerHTML = '<li>No data</li>'; return; }}
         el.innerHTML = `<li>items_cached: <span class="count">${{fmt(kc.items_cached)}}</span></li>`;
@@ -3225,8 +3246,11 @@ async def dashboard(request: Request) -> HTMLResponse:
         renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated);
         renderCharts(d.charts_cached, d.chart_progress, d.charts_refreshed);
 
+
         renderParental(d.parental_cache);
         renderKeywords(d.keyword_cache);
+        renderConstraints(d.constraint_cache);
+
         renderPrefetch(d.parental_prefetch);
 
         renderFetchMethods(d.parental_fetch_success_counts);
@@ -3271,6 +3295,7 @@ async def get_stats() -> Dict[str, Any]:
     try:
         parental_cache = await _get_parental_cache_stats()
         keyword_cache = await _get_keyword_cache_stats()
+        constraint_cache = await _get_constraint_cache_stats()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'row_counts'")
             row = await cursor.fetchone()
@@ -3289,6 +3314,7 @@ async def get_stats() -> Dict[str, Any]:
             "table_updated": table_updated,
             "parental_cache": parental_cache,
             "keyword_cache": keyword_cache,
+            "constraint_cache": constraint_cache,
             "parental_prefetch": {
                 "enabled": PARENTAL_PREFETCH_ENABLED,
                 "count_today": parental_prefetch_count_today,

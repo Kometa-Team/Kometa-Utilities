@@ -1973,11 +1973,10 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
     await _ensure_cache_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(f"ATTACH DATABASE '{CACHE_DB_PATH}' AS cache")
-        db.row_factory = aiosqlite.Row
         # The parental cache now lives in a separate DB file; attach it so we can
         # still exclude already-cached titles in a single query.
         await db.execute("ATTACH DATABASE ? AS cache", (str(CACHE_DB_PATH),))
+        db.row_factory = aiosqlite.Row
         order_sql = "tr.numVotes DESC"
         if PARENTAL_PREFETCH_ORDER == "weighted_random":
             # Randomize within the top pool; log(votes) keeps megahits from

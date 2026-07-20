@@ -2862,6 +2862,12 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 
     <div class="endpoint">
+
+    <div class="endpoint">
+        <strong>GET /interests/{{imdb_id}}</strong> - IMDb interests (genres, themes, constraints)<br>
+        <code>curl "{base}/interests/tt0111161"</code>
+    </div>
+
         <strong>GET /keywords/{{imdb_id}}</strong> - Cached IMDb keywords with interest/vote scores<br>
         <code>curl "{base}/keywords/tt0111161"</code>
     </div>
@@ -3170,14 +3176,13 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 
 
-    function renderConstraints(cc) {
+    function renderConstraints(cc) {{
         const el = document.getElementById('constraints');
-        if (!cc) { el.innerHTML = '<li>No data</li>'; return; }
-        el.innerHTML = `<li>queries_cached: <span class="count">${fmt(cc.items_cached)}</span></li>`;
-    }
+        if (!cc) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        el.innerHTML = `<li>queries_cached: <span class="count">${{fmt(cc.items_cached)}}</span></li>`;
+    }}
 
-    function renderKeywords(kc) {
-{
+    function renderKeywords(kc) {{
         const el = document.getElementById('keywords');
         if (!kc) {{ el.innerHTML = '<li>No data</li>'; return; }}
         el.innerHTML = `<li>items_cached: <span class="count">${{fmt(kc.items_cached)}}</span></li>`;
@@ -3551,6 +3556,68 @@ async def get_parental_guide(
         "ttl_days": PARENTAL_GUIDE_TTL_DAYS,
         "parental_guide": parental,
     }
+
+
+
+async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
+    """Fetch all interests for a title via IMDb GraphQL."""
+    query = '''
+    query {
+      title(id: "%s") {
+        interests(first: 50) {
+            edges { node { id primaryText { text } } }
+        }
+      }
+    }
+    ''' % imdb_id
+    
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
+                "content-type": "application/json",
+            },
+        ) as client:
+            response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+            response.raise_for_status()
+            data = response.json()
+            
+            if "errors" in data:
+                error_message = data["errors"][0].get("message", "unknown error")
+                if "not found" in error_message.lower() or "does not exist" in error_message.lower():
+                    raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
+                raise HTTPException(status_code=502, detail=f"IMDb GraphQL interests request failed: {error_message}")
+                
+            interests_list = []
+            title = (data.get("data") or {}).get("title") or {}
+            interests_data = title.get("interests") or {}
+            edges = interests_data.get("edges", [])
+            for edge in edges:
+                node = edge.get("node") or {}
+                i_id = node.get("id")
+                text = (node.get("primaryText") or {}).get("text")
+                if i_id and text:
+                    interests_list.append({"id": i_id, "text": text})
+            return interests_list
+            
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"IMDb GraphQL interests request failed: {e}")
+
+@app.get("/interests/{imdb_id}")
+async def get_interests(imdb_id: str) -> Dict[str, Any]:
+    """Return IMDb interests for a title.
+    
+    This endpoint always fetches fresh data from IMDb because interests are
+    inexpensive to fetch via GraphQL and do not have a corresponding cache table.
+    """
+    if not _db_is_ready():
+        raise HTTPException(status_code=503, detail="Service initializing")
+    imdb_id = _validate_imdb_id(imdb_id)
+    
+    interests = await _fetch_interests_via_graphql(imdb_id)
+    return {"imdb_id": imdb_id, "interests": interests}
 
 
 @app.get("/keywords/{imdb_id}")

@@ -495,6 +495,13 @@ async def _ensure_db_schema() -> None:
             keywords TEXT,
             expiration_date TEXT
         )''')
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS imdb_interests (
+            imdb_id TEXT PRIMARY KEY,
+            interests TEXT,
+            expiration_date TEXT
+        )''')
+
         await db.commit()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1931,6 +1938,16 @@ async def _get_keyword_cache_stats() -> Dict[str, Any]:
 
 
 
+
+async def _get_interest_cache_stats() -> Dict[str, Any]:
+    """Return the total number of cached interest records for the stats endpoint."""
+    await _ensure_cache_db_schema()
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM imdb_interests")
+        row = await cursor.fetchone()
+        return {"items_cached": row[0] if row else 0}
+
+
 async def _get_constraint_cache_stats() -> Dict[str, Any]:
     """Return the total number of cached constraint queries."""
     await constraints._ensure_constraint_cache_table(CACHE_DB_PATH)
@@ -3041,6 +3058,9 @@ async def dashboard(request: Request) -> HTMLResponse:
         
         <h2>Constraint Cache</h2>
         <ul id="constraints"><li>Loading…</li></ul>
+
+        <h2>Interest Cache</h2>
+        <ul id="interests"><li>Loading…</li></ul>
 <h2>Keyword Cache</h2>
         <ul id="keywords"><li>Loading…</li></ul>
 
@@ -3048,7 +3068,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
         <h2>Manual Cache Seeding</h2>
         <div class="card">
-            <div style="font-size: 13px; color: #8a94a6; margin-bottom: 12px;">Upload a CSV to seed the Parental Guide or Keyword cache.</div>
+            <div style="font-size: 13px; color: #8a94a6; margin-bottom: 12px;">Upload a CSV to seed the Parental Guide, Keyword, or Interest cache.</div>
             <form action="{base}/upload-csv" method="post" enctype="multipart/form-data" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
                 <input type="file" name="file" accept=".csv" required style="font-size: 13px;">
                 <button type="submit">Upload CSV</button>
@@ -3182,6 +3202,13 @@ async def dashboard(request: Request) -> HTMLResponse:
         el.innerHTML = `<li>queries_cached: <span class="count">${{fmt(cc.items_cached)}}</span></li>`;
     }}
 
+
+    function renderInterests(ic) {{
+        const el = document.getElementById('interests');
+        if (!ic) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        el.innerHTML = `<li>items_cached: <span class="count">${{fmt(ic.items_cached)}}</span></li>`;
+    }}
+
     function renderKeywords(kc) {{
         const el = document.getElementById('keywords');
         if (!kc) {{ el.innerHTML = '<li>No data</li>'; return; }}
@@ -3252,8 +3279,11 @@ async def dashboard(request: Request) -> HTMLResponse:
         renderCharts(d.charts_cached, d.chart_progress, d.charts_refreshed);
 
 
+
         renderParental(d.parental_cache);
+        renderInterests(d.interest_cache);
         renderKeywords(d.keyword_cache);
+
         renderConstraints(d.constraint_cache);
 
         renderPrefetch(d.parental_prefetch);
@@ -3300,6 +3330,7 @@ async def get_stats() -> Dict[str, Any]:
     try:
         parental_cache = await _get_parental_cache_stats()
         keyword_cache = await _get_keyword_cache_stats()
+        interest_cache = await _get_interest_cache_stats()
         constraint_cache = await _get_constraint_cache_stats()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'row_counts'")
@@ -3319,6 +3350,7 @@ async def get_stats() -> Dict[str, Any]:
             "table_updated": table_updated,
             "parental_cache": parental_cache,
             "keyword_cache": keyword_cache,
+            "interest_cache": interest_cache,
             "constraint_cache": constraint_cache,
             "parental_prefetch": {
                 "enabled": PARENTAL_PREFETCH_ENABLED,
@@ -3559,6 +3591,71 @@ async def get_parental_guide(
 
 
 
+
+async def _query_interests_cache(
+    imdb_id: str,
+) -> tuple[Optional[list[Dict[str, str]]], Optional[bool]]:
+    """Read cached interest data and expiry flag."""
+    await _ensure_cache_db_schema()
+
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT interests, expiration_date FROM imdb_interests WHERE imdb_id = ?", (imdb_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None, None
+            
+        try:
+            interests = json.loads(row["interests"])
+        except json.JSONDecodeError:
+            return None, None
+            
+        expiration_date = row["expiration_date"]
+        expired = True
+        if expiration_date:
+            expiration_dt = datetime.fromisoformat(expiration_date)
+            if expiration_dt.tzinfo is None:
+                expiration_dt = expiration_dt.replace(tzinfo=timezone.utc)
+            expired = datetime.now(timezone.utc) > expiration_dt
+            
+        return interests, expired
+
+
+async def _update_interests_cache(imdb_id: str, interests: list[Dict[str, str]]) -> None:
+    """Upsert cached interest data for a title."""
+    await _ensure_cache_db_schema()
+
+    # Determine TTL based on title age, same as parental guide
+    ttl_days = KEYWORDS_TTL_DAYS
+    async with aiosqlite.connect(DB_PATH) as core_db:
+        core_cursor = await core_db.execute("SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,))
+        year_row = await core_cursor.fetchone()
+        if year_row and year_row[0]:
+            try:
+                release_year = int(year_row[0])
+                current_year = datetime.now(timezone.utc).year
+                if current_year - release_year >= 10:
+                    ttl_days = 99999
+            except ValueError:
+                pass
+
+    expiration_date = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        await db.execute(
+            '''
+            INSERT INTO imdb_interests(imdb_id, interests, expiration_date)
+            VALUES(?, ?, ?)
+            ON CONFLICT(imdb_id) DO UPDATE SET
+                interests = excluded.interests,
+                expiration_date = excluded.expiration_date
+            ''',
+            (imdb_id, json.dumps(interests), expiration_date),
+        )
+        await db.commit()
+
+
 async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
     """Fetch all interests for a title via IMDb GraphQL."""
     query = '''
@@ -3605,19 +3702,25 @@ async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"IMDb GraphQL interests request failed: {e}")
 
+
 @app.get("/interests/{imdb_id}")
-async def get_interests(imdb_id: str) -> Dict[str, Any]:
-    """Return IMDb interests for a title.
-    
-    This endpoint always fetches fresh data from IMDb because interests are
-    inexpensive to fetch via GraphQL and do not have a corresponding cache table.
-    """
+async def get_interests(
+    imdb_id: str,
+    ignore_cache: bool = False,
+) -> Dict[str, Any]:
+    """Return cached IMDb interests for a title, refreshing when stale."""
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
     imdb_id = _validate_imdb_id(imdb_id)
     
+    cached, expired = (None, None) if ignore_cache else await _query_interests_cache(imdb_id)
+    if cached is not None and expired is False:
+        return {"imdb_id": imdb_id, "interests": cached}
+        
     interests = await _fetch_interests_via_graphql(imdb_id)
+    await _update_interests_cache(imdb_id, interests)
     return {"imdb_id": imdb_id, "interests": interests}
+
 
 
 @app.get("/keywords/{imdb_id}")
@@ -3754,11 +3857,14 @@ async def upload_csv(file: UploadFile = File(...)):
     if "imdb_id" not in fieldnames:
         raise HTTPException(status_code=400, detail="CSV must contain an 'imdb_id' column")
         
+
     is_parental = all(k in fieldnames for k in ["nudity", "violence", "profanity", "alcohol", "frightening"])
     is_keyword = "keywords" in fieldnames
+    is_interest = "interests" in fieldnames
     
-    if not is_parental and not is_keyword:
-        raise HTTPException(status_code=400, detail="CSV must contain either parental categories or a keywords column")
+    if not is_parental and not is_keyword and not is_interest:
+        raise HTTPException(status_code=400, detail="CSV must contain either parental categories, a keywords column, or an interests column")
+
         
     await _ensure_db_schema()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -3816,6 +3922,28 @@ async def upload_csv(file: UploadFile = File(...)):
                         expiration_date = excluded.expiration_date
                     ''',
                     (imdb_id, json.dumps(parsed_kw), expire_iso)
+                )
+
+            elif is_interest:
+                # Expecting strings like "in0000008:Drama|in0000222:Hindi"
+                raw_int = row.get("interests", "")
+                parsed_int = []
+                for int_segment in raw_int.split("|"):
+                    if not int_segment:
+                        continue
+                    parts = int_segment.split(":")
+                    if len(parts) >= 2:
+                        parsed_int.append({"id": parts[0], "text": parts[1]})
+                
+                await db.execute(
+                    '''
+                    INSERT INTO imdb_interests(imdb_id, interests, expiration_date)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(imdb_id) DO UPDATE SET
+                        interests = excluded.interests,
+                        expiration_date = excluded.expiration_date
+                    ''',
+                    (imdb_id, json.dumps(parsed_int), expire_iso)
                 )
             count += 1
         await db.commit()

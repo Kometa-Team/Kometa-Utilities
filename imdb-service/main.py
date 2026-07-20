@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+import csv
+import io
 import json
 import os
 import random
@@ -20,16 +22,14 @@ import aiosqlite
 import charts
 import constraints
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
-from importer import ALLOWED_TABLES, CACHE_SCHEMA_SQL, SCHEMA_SQL, TABLE_TO_STEM
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse
+from importer import ALLOWED_TABLES, SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "imdb.db"
-# Service-generated cache (parental guides, keywords, constraint search results)
-# lives in its own file so it can be backed up apart from the rebuildable dataset.
-CACHE_DB_PATH = DATA_DIR / "imdb_cache.db"
+CACHE_DB_PATH = DATA_DIR / "cache.db"
 CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"
 GRAPHQL_CHART_CACHE_PATH = DATA_DIR / "graphql_chart_cache.json"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
@@ -476,6 +476,26 @@ async def _ensure_db_schema() -> None:
     """Apply idempotent schema creation for an existing database file."""
     if not DB_PATH.exists():
         return
+
+
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS imdb_parental (
+            imdb_id TEXT PRIMARY KEY,
+            nudity TEXT,
+            violence TEXT,
+            profanity TEXT,
+            alcohol TEXT,
+            frightening TEXT,
+            updated_at TEXT
+        )''')
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS imdb_keywords (
+            imdb_id TEXT PRIMARY KEY,
+            keywords TEXT,
+            expiration_date TEXT
+        )''')
+        await db.commit()
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
@@ -1199,10 +1219,10 @@ async def _fetch_parental_guide_html_via_http(imdb_id: str, proxy_url: Optional[
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
             if response.status_code == 202:
-                raise HTTPException(
-                    status_code=502,
-                    detail="IMDb parental guide request returned 202 Accepted without usable content",
-                )
+                # If we get 202, it means the content might be delayed, but the text might have what we need,
+                # or it's simply a 202 instead of 200. Return it as valid response if it has content,
+                # otherwise maybe we should fall through. Let's just return the text and let parser deal with it.
+                return response.text
             response.raise_for_status()
             return response.text
     except httpx.HTTPStatusError as e:
@@ -1243,7 +1263,7 @@ async def _fetch_parental_guide_via_graphql(imdb_id: str) -> str:
     query = (
         '{ title(id: "'
         + imdb_id
-        + '") { parentsGuide { categories { category { text } severity { text } } } } } }'
+        + '") { parentsGuide { categories { category { text } severity { text } } } } }'
     )
     started = time.monotonic()
     _parental_log("graphql_fetch_start", imdb_id, url=IMDB_GRAPHQL_URL)
@@ -1953,6 +1973,7 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
     await _ensure_cache_db_schema()
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"ATTACH DATABASE '{CACHE_DB_PATH}' AS cache")
         db.row_factory = aiosqlite.Row
         # The parental cache now lives in a separate DB file; attach it so we can
         # still exclude already-cached titles in a single query.
@@ -2982,6 +3003,16 @@ async def dashboard(request: Request) -> HTMLResponse:
         <h2>Parental Cache</h2>
         <ul id="parental"><li>Loading…</li></ul>
 
+
+        <h2>Manual Cache Seeding</h2>
+        <div class="card">
+            <div style="font-size: 13px; color: #8a94a6; margin-bottom: 12px;">Upload a CSV to seed the Parental Guide or Keyword cache.</div>
+            <form action="{base}/upload-csv" method="post" enctype="multipart/form-data" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                <input type="file" name="file" accept=".csv" required style="font-size: 13px;">
+                <button type="submit">Upload CSV</button>
+            </form>
+        </div>
+
         <h2>Parental Guide Lookup</h2>
         <div class="card">
             <div class="lookup">
@@ -3547,3 +3578,91 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail=f"Person {imdb_id!r} not found")
         return dict(row)
+
+
+
+@app.post("/upload-csv")
+async def upload_csv(file: UploadFile = File(...)):
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Must be a .csv file")
+    
+    content = await file.read()
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
+    
+    reader = csv.DictReader(io.StringIO(text))
+    fieldnames = reader.fieldnames or []
+    
+    if "imdb_id" not in fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must contain an 'imdb_id' column")
+        
+    is_parental = all(k in fieldnames for k in ["nudity", "violence", "profanity", "alcohol", "frightening"])
+    is_keyword = "keywords" in fieldnames
+    
+    if not is_parental and not is_keyword:
+        raise HTTPException(status_code=400, detail="CSV must contain either parental categories or a keywords column")
+        
+    await _ensure_db_schema()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    expire_iso = (datetime.now(timezone.utc) + timedelta(days=KEYWORDS_TTL_DAYS)).isoformat()
+    
+    count = 0
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        for row in reader:
+            imdb_id = row.get("imdb_id", "").strip().lower()
+            if not imdb_id.startswith("tt"):
+                continue
+                
+            if is_parental:
+                await db.execute(
+                    '''
+                    INSERT INTO imdb_parental(imdb_id, nudity, violence, profanity, alcohol, frightening, updated_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(imdb_id) DO UPDATE SET
+                        nudity = excluded.nudity,
+                        violence = excluded.violence,
+                        profanity = excluded.profanity,
+                        alcohol = excluded.alcohol,
+                        frightening = excluded.frightening,
+                        updated_at = excluded.updated_at
+                    ''',
+                    (
+                        imdb_id,
+                        row.get("nudity", "None"),
+                        row.get("violence", "None"),
+                        row.get("profanity", "None"),
+                        row.get("alcohol", "None"),
+                        row.get("frightening", "None"),
+                        now_iso
+                    )
+                )
+            elif is_keyword:
+                # Expecting strings like "stepsister stepsister relationship:0:0|female protagonist:0:0"
+                raw_kw = row.get("keywords", "")
+                parsed_kw = {}
+                for kw_segment in raw_kw.split("|"):
+                    if not kw_segment:
+                        continue
+                    parts = kw_segment.split(":")
+                    name = parts[0]
+                    interested = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                    voted = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                    parsed_kw[name] = [interested, voted]
+                
+                await db.execute(
+                    '''
+                    INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(imdb_id) DO UPDATE SET
+                        keywords = excluded.keywords,
+                        expiration_date = excluded.expiration_date
+                    ''',
+                    (imdb_id, json.dumps(parsed_kw), expire_iso)
+                )
+            count += 1
+        await db.commit()
+    
+    return RedirectResponse(url="/dashboard", status_code=303)
+

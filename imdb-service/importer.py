@@ -91,26 +91,6 @@ CREATE TABLE IF NOT EXISTS import_meta (
 );
 """
 
-# Schema for service-generated cache tables.  These live in a separate database
-# file (``imdb_cache.db``) so they can be backed up independently of the large,
-# fully-rebuildable IMDb dataset in ``imdb.db``.  The ``imdb_constraint_cache``
-# table is created on demand by ``constraints.py``.
-CACHE_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS imdb_parental (
-    imdb_id TEXT PRIMARY KEY,
-    nudity TEXT,
-    violence TEXT,
-    profanity TEXT,
-    alcohol TEXT,
-    frightening TEXT,
-    updated_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS imdb_keywords (
-    imdb_id TEXT PRIMARY KEY,
-    keywords TEXT,  -- JSON object: {"prison": [31, 32], ...}
-    expiration_date TEXT
-);
 """
 
 

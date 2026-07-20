@@ -34,3 +34,4 @@ services:
     build:
       context: ./imdb-service
       dockerfile: Dockerfile
+    command: bash -c "pip install python-multipart && uvicorn main:app --host 0.0.0.0 --port 8000"

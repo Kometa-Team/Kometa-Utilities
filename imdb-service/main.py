@@ -3140,14 +3140,15 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
 
-    function renderKeywords(kc) {
-        const el = document.getElementById('keywords');
-        if (!kc) { el.innerHTML = '<li>No data</li>'; return; }
-        el.innerHTML = `<li>items_cached: <span class="count">${fmt(kc.items_cached)}</span></li>`;
-    }
 
-    async function lookupParental() {
-{
+    function renderKeywords(kc) {{
+        const el = document.getElementById('keywords');
+        if (!kc) {{ el.innerHTML = '<li>No data</li>'; return; }}
+        el.innerHTML = `<li>items_cached: <span class="count">${{fmt(kc.items_cached)}}</span></li>`;
+    }}
+
+    async function lookupParental() {{
+
         const input = document.getElementById('parental-id');
         const resultEl = document.getElementById('parental-result');
         let imdbId = input.value.trim();

@@ -374,9 +374,32 @@ def load_chart_cache(cache_path: Path) -> bool:
         return False
 
 
+
 def _cache_is_fresh(cache_path: Path, db_path: Path) -> bool:
-    """Return True if the cache file exists and is newer than the DB file."""
+    """Return True if the cache file exists and its modification time is newer than the DB's last_refresh."""
     if not cache_path.exists():
+        return False
+    
+    try:
+        import sqlite3
+        from datetime import datetime, timezone
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'last_refresh'")
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return False
+            
+        last_refresh_dt = datetime.fromisoformat(row[0])
+        if last_refresh_dt.tzinfo is None:
+            last_refresh_dt = last_refresh_dt.replace(tzinfo=timezone.utc)
+            
+        cache_mtime = cache_path.stat().st_mtime
+        cache_dt = datetime.fromtimestamp(cache_mtime, tz=timezone.utc)
+        
+        return cache_dt >= last_refresh_dt
+    except Exception:
         return False
     try:
         return cache_path.stat().st_mtime >= db_path.stat().st_mtime

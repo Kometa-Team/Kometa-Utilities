@@ -1667,14 +1667,29 @@ async def _query_parental_cache(
         if not row:
             return None, None, None
         updated_at = row["updated_at"]
+
         expired = True
         if updated_at:
             updated_dt = datetime.fromisoformat(updated_at)
             if updated_dt.tzinfo is None:
                 updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-            expired = datetime.now(timezone.utc) - updated_dt > timedelta(
-                days=PARENTAL_GUIDE_TTL_DAYS
-            )
+            
+            # Check the title's release year to determine if we should ever expire this
+            ttl_days = PARENTAL_GUIDE_TTL_DAYS
+            async with aiosqlite.connect(DB_PATH) as core_db:
+                core_cursor = await core_db.execute("SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,))
+                year_row = await core_cursor.fetchone()
+                if year_row and year_row[0]:
+                    try:
+                        release_year = int(year_row[0])
+                        current_year = datetime.now(timezone.utc).year
+                        if current_year - release_year >= 10:
+                            # Titles 10+ years old are considered static and never expire
+                            ttl_days = 99999
+                    except ValueError:
+                        pass
+                        
+            expired = datetime.now(timezone.utc) - updated_dt > timedelta(days=ttl_days)
         return (
             _normalize_parental_payload(
                 {

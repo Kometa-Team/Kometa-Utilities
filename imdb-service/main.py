@@ -669,7 +669,7 @@ async def _run_import_pipeline() -> None:
         if stem in STEM_TO_TABLE
     }
 
-def _on_table_start(table: str) -> None:
+    def _on_table_start(table: str) -> None:
         print(f"📦 Starting import of {table}...")
         import_progress[table] = {"status": "importing", "rows": 0}
 
@@ -759,7 +759,7 @@ async def _refresh_single_table(stem: str) -> None:
         _set_phase("importing")
         import_progress = {table: {"status": "pending", "rows": 0}}
 
-def _on_table_start(t: str) -> None:
+        def _on_table_start(t: str) -> None:
             print(f"📦 Starting import of {t}...")
             import_progress[t] = {"status": "importing", "rows": 0}
 
@@ -3275,6 +3275,18 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
     async function load() {{
+const urlParams = new URLSearchParams(window.location.search);
+        const msg = urlParams.get('msg');
+        if (msg) {{
+            const msgEl = document.createElement('div');
+            msgEl.style.cssText = 'background: #2d4a2d; color: #7fd97f; padding: 12px 16px; border-radius: 8px; margin-bottom: 24px; font-size: 14px; font-weight: 500;';
+            msgEl.textContent = msg;
+            document.querySelector('header').insertAdjacentElement('afterend', msgEl);
+            
+            // Clean up the URL so it doesn't persist on refresh
+            window.history.replaceState({{}}, document.title, window.location.pathname);
+        }}
+        
         const r = await fetch(BASE + '/stats');
         const d = await r.json();
         const phaseEl = document.getElementById('phase');
@@ -3865,25 +3877,38 @@ async def upload_csv(file: UploadFile = File(...)):
     if "imdb_id" not in fieldnames:
         raise HTTPException(status_code=400, detail="CSV must contain an 'imdb_id' column")
         
-
     is_parental = all(k in fieldnames for k in ["nudity", "violence", "profanity", "alcohol", "frightening"])
     is_keyword = "keywords" in fieldnames
     is_interest = "interests" in fieldnames
     
     if not is_parental and not is_keyword and not is_interest:
         raise HTTPException(status_code=400, detail="CSV must contain either parental categories, a keywords column, or an interests column")
-
         
     await _ensure_db_schema()
     now_iso = datetime.now(timezone.utc).isoformat()
     expire_iso = (datetime.now(timezone.utc) + timedelta(days=KEYWORDS_TTL_DAYS)).isoformat()
     
-    count = 0
+    table_name = "imdb_parental" if is_parental else "imdb_keywords" if is_keyword else "imdb_interests"
+    
+    inserted_count = 0
+    updated_count = 0
+    ignored_count = 0
+    
     async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        cursor = await db.execute(f"SELECT imdb_id FROM {table_name}")
+        existing_ids = {row[0] for row in await cursor.fetchall()}
+        
         for row in reader:
             imdb_id = row.get("imdb_id", "").strip().lower()
             if not imdb_id.startswith("tt"):
+                ignored_count += 1
                 continue
+                
+            if imdb_id in existing_ids:
+                updated_count += 1
+            else:
+                inserted_count += 1
+                existing_ids.add(imdb_id)
                 
             if is_parental:
                 await db.execute(
@@ -3909,7 +3934,6 @@ async def upload_csv(file: UploadFile = File(...)):
                     )
                 )
             elif is_keyword:
-                # Expecting strings like "stepsister stepsister relationship:0:0|female protagonist:0:0"
                 raw_kw = row.get("keywords", "")
                 parsed_kw = {}
                 for kw_segment in raw_kw.split("|"):
@@ -3931,9 +3955,7 @@ async def upload_csv(file: UploadFile = File(...)):
                     ''',
                     (imdb_id, json.dumps(parsed_kw), expire_iso)
                 )
-
             elif is_interest:
-                # Expecting strings like "in0000008:Drama|in0000222:Hindi"
                 raw_int = row.get("interests", "")
                 parsed_int = []
                 for int_segment in raw_int.split("|"):
@@ -3953,8 +3975,11 @@ async def upload_csv(file: UploadFile = File(...)):
                     ''',
                     (imdb_id, json.dumps(parsed_int), expire_iso)
                 )
-            count += 1
         await db.commit()
     
-    return RedirectResponse(url=f"{ROOT_PATH}/dashboard", status_code=303)
+    print(f"📥 CSV Upload complete for {table_name}: {inserted_count} new records inserted, {updated_count} existing records updated, {ignored_count} rows ignored.")
+    
+    import urllib.parse
+    msg = f"Successfully processed {inserted_count + updated_count} rows ({inserted_count} new items added, {updated_count} updated)."
+    return RedirectResponse(url=f"{ROOT_PATH}/dashboard?msg={urllib.parse.quote(msg)}", status_code=303)
 

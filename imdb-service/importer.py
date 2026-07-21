@@ -94,6 +94,12 @@ CREATE TABLE IF NOT EXISTS import_meta (
 
 
 CACHE_SCHEMA_SQL = """
+
+CREATE TABLE IF NOT EXISTS import_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE TABLE IF NOT EXISTS imdb_parental (
     imdb_id TEXT PRIMARY KEY,
     nudity TEXT,
@@ -530,7 +536,7 @@ def run_direct_import(
             min_rows = (
                 min_rows_override if min_rows_override is not None else MIN_ROWS.get(table, 0)
             )
-            print(f"Direct-importing {stem} -> {table}...")
+
             if on_table_start:
                 on_table_start(table)
             _delete_table(conn, table)
@@ -541,7 +547,7 @@ def run_direct_import(
             table_updated[table] = datetime.now(timezone.utc).isoformat()
             if on_table_done:
                 on_table_done(table, count)
-            print(f"   {count:,} rows")
+
 
         conn.execute(
             "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",

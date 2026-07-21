@@ -669,13 +669,17 @@ async def _run_import_pipeline() -> None:
         if stem in STEM_TO_TABLE
     }
 
-    def _on_table_start(table: str) -> None:
+def _on_table_start(table: str) -> None:
+        print(f"📦 Starting import of {table}...")
         import_progress[table] = {"status": "importing", "rows": 0}
 
     def _on_table_progress(table: str, count: int) -> None:
+        if count > 0 and count % 1000000 == 0:
+            print(f"   ⏳ {table}: {count:,} rows inserted...")
         import_progress[table] = {"status": "importing", "rows": count}
 
     def _on_table_done(table: str, count: int) -> None:
+        print(f"✅ Finished {table}: {count:,} rows total")
         import_progress[table] = {"status": "done", "rows": count}
 
     await asyncio.to_thread(
@@ -755,13 +759,17 @@ async def _refresh_single_table(stem: str) -> None:
         _set_phase("importing")
         import_progress = {table: {"status": "pending", "rows": 0}}
 
-        def _on_table_start(t: str) -> None:
+def _on_table_start(t: str) -> None:
+            print(f"📦 Starting import of {t}...")
             import_progress[t] = {"status": "importing", "rows": 0}
 
         def _on_table_progress(t: str, count: int) -> None:
+            if count > 0 and count % 1000000 == 0:
+                print(f"   ⏳ {t}: {count:,} rows inserted...")
             import_progress[t] = {"status": "importing", "rows": count}
 
         def _on_table_done(t: str, count: int) -> None:
+            print(f"✅ Finished {t}: {count:,} rows total")
             import_progress[t] = {"status": "done", "rows": count}
 
         await asyncio.to_thread(

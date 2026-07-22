@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import aiosqlite
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 LISTS_DIR = DATA_DIR / "lists"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
+LOGO_PATH = Path(__file__).resolve().parent / "Simkl_logo.svg"
 
 BASE_URL = "https://data.simkl.in"
 
@@ -376,6 +377,16 @@ async def find_item(item_type: str, filters: Dict[str, Optional[str]]) -> JSONRe
 # ---------------------------------------------------------------------------
 # Root / info
 # ---------------------------------------------------------------------------
+@app.get("/logo.svg", include_in_schema=False)
+async def logo() -> FileResponse:
+    """Return the Simkl service logo."""
+    return FileResponse(
+        LOGO_PATH,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request) -> HTMLResponse:
     """HTML info page."""
@@ -384,10 +395,12 @@ async def root(request: Request) -> HTMLResponse:
         base += ROOT_PATH
     html = f"""<!DOCTYPE html>
 <html><head><title>SIMKL Service</title>
+<link rel="icon" href="{base}/logo.svg?v=5d5f50ea" type="image/svg+xml">
 <style>body{{font-family:system-ui,sans-serif;max-width:800px;margin:50px auto;padding:20px;color:#333}}
-h1{{color:#1a73e8}}.ep{{background:#f8f9fa;padding:12px;margin:8px 0;border-left:4px solid #1a73e8;border-radius:4px}}
+h1{{color:#1a73e8;display:flex;align-items:center;gap:12px}}.service-logo{{width:52px;height:52px;flex:0 0 auto}}
+.ep{{background:#f8f9fa;padding:12px;margin:8px 0;border-left:4px solid #1a73e8;border-radius:4px}}
 code{{background:#f4f4f4;padding:2px 6px;border-radius:3px;font-family:monospace}}</style></head>
-<body><h1>📡 SIMKL Service</h1>
+<body><h1><img class="service-logo" src="{base}/logo.svg?v=5d5f50ea" alt="">SIMKL Service</h1>
 <p>Caching proxy for SIMKL trending and DVD release lists.</p>
 <h2>Endpoints</h2>
 <div class="ep"><strong>GET /stats</strong> — cache status &amp; item counts</div>

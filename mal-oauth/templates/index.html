@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MyAnimeList OAuth - Kometa</title>
+    <link rel="icon" href="{{ root_path }}/logo.svg" type="image/svg+xml">
     <style>
         /* --- MAL brand tokens --- */
         :root {
@@ -177,13 +178,7 @@
 </head>
 <body>
     <div class="container">
-        <!-- MAL logo: blue rounded square with white "MAL" text -->
-        <svg class="mal-logo" viewBox="0 0 52 52" xmlns="http://www.w3.org/2000/svg">
-            <rect width="52" height="52" rx="10" fill="#2E51A2"/>
-            <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
-                  font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif"
-                  font-weight="800" font-size="15" fill="#ffffff" letter-spacing="0.5">MAL</text>
-        </svg>
+        <img class="mal-logo" src="{{ root_path }}/logo.svg" alt="">
 
         <div class="header">
             <h1>MyAnimeList OAuth</h1>

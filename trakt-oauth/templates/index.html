@@ -194,11 +194,13 @@
             <div class="instructions">
                 <strong>To connect to Trakt.tv you must create a Trakt application:</strong>
                 <ol>
-                    <li><a href="https://trakt.tv/oauth/applications/new" target="_blank" rel="noopener noreferrer">Click here to create a Trakt API application.</a></li>
+                    <li><a href="https://app.trakt.tv/settings/apps/api" target="_blank" rel="noopener noreferrer">Click here to create a Trakt API application.</a></li>
+                    <li>Click the "+" in the upper right.</li>
                     <li>Enter a <code>Name</code> for the application.</li>
                     <li>Enter <code>{{ redirect_uri }}</code> for <code>Redirect uri</code>.</li>
-                    <li>Click the <code>SAVE APP</code> button.</li>
-                    <li>Record the <code>Client ID</code> and <code>Client Secret</code>; you only need do that once.</li>
+                    <li>You can leave "Description" and "JavaScript (CORS) origins" blank.</li>
+                    <li>Click the `Create` button.</li>
+                    <li>Record the <code>Client ID</code> and <code>Client Secret</code>; you only need go through this process once.</li>
                 </ol>
                 <strong>Now, to authenticate to Trakt.tv:</strong>
                 <ol>

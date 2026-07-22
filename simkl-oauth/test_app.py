@@ -26,6 +26,15 @@ def test_health_endpoint(client, path) -> None:
 def test_index_page_renders(client) -> None:
     response = client.get("/")
     assert response.status_code == 200
+    assert b'/logo.svg' in response.data
+
+
+def test_logo(client) -> None:
+    response = client.get("/logo.svg")
+    assert response.status_code == 200
+    assert response.mimetype == "image/svg+xml"
+    assert response.headers["Cache-Control"] == "public, max-age=86400"
+    assert b"<title>Simkl</title>" in response.data
 
 
 def test_index_page_contains_auth_url(client) -> None:

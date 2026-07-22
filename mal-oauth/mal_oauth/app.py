@@ -6,15 +6,18 @@ obtaining access tokens.
 
 import os
 import secrets
+from pathlib import Path
 
 import requests  # type: ignore[import-untyped]
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, send_file
 
 app = Flask(__name__, template_folder="../templates")
 app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-in-production")
 
 # MAL API Configuration
 MAL_API_URL = "https://myanimelist.net/v1/oauth2"
+ROOT_PATH = os.getenv("ROOT_PATH", "")
+LOGO_PATH = Path(__file__).resolve().parent.parent / "MyAnimeList_Logo.svg"
 
 
 def generate_pkce_pair():
@@ -54,7 +57,15 @@ def exchange_code_for_token(client_id, client_secret, code, code_verifier):
 def index():
     """Render the main page."""
     code_verifier = generate_pkce_pair()
-    return render_template("index.html", code_verifier=code_verifier)
+    return render_template("index.html", code_verifier=code_verifier, root_path=ROOT_PATH)
+
+
+@app.route("/logo.svg")
+def logo():
+    """Return the MyAnimeList logo."""
+    response = send_file(LOGO_PATH, mimetype="image/svg+xml", max_age=86400)
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 
 @app.route("/api/exchange-code", methods=["POST"])

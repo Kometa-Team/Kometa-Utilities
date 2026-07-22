@@ -1357,6 +1357,17 @@ def test_endpoints_returns_html(tmp_path, monkeypatch):
     assert "box_office" in response.text
 
 
+def test_logo_returns_svg():
+    import main
+
+    client = TestClient(main.app)
+    response = client.get("/logo.svg")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert response.headers["cache-control"] == "public, max-age=86400"
+    assert response.text.startswith("<svg")
+
+
 def _seed_full_test_db(db_path):
     """Seed a test DB with a complete set of test data for endpoint tests."""
     conn = sqlite3.connect(db_path)
@@ -4174,7 +4185,7 @@ def test_dashboard_respects_root_path(monkeypatch):
     client = TestClient(main.app)
     response = client.get("/dashboard")
     assert response.status_code == 200
-    assert "/imdb-service/" in response.text
+    assert '/imdb-service/logo.svg' in response.text
 
 
 def test_import_disk_space_preflight_rejects_low_capacity(tmp_path, monkeypatch):

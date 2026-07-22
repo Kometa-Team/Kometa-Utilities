@@ -26,11 +26,12 @@ import http_clients
 import httpx
 import singleflight
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from importer import ALLOWED_TABLES, SCHEMA_SQL, CACHE_SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+LOGO_PATH = Path(__file__).resolve().parent / "IMDb_Logo_Square.svg"
 DB_PATH = DATA_DIR / "imdb.db"
 CACHE_DB_PATH = DATA_DIR / "cache.db"
 CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"
@@ -3004,6 +3005,16 @@ def _add_join_filters(
             params.append(s.strip())
 
 
+@app.get("/logo.svg", include_in_schema=False)
+async def logo() -> FileResponse:
+    """Return the IMDb service logo."""
+    return FileResponse(
+        LOGO_PATH,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/endpoints", response_class=HTMLResponse)
 async def endpoints(request: Request) -> HTMLResponse:
     """Return HTML landing page with links to available endpoints."""
@@ -3015,6 +3026,7 @@ async def endpoints(request: Request) -> HTMLResponse:
 <html>
 <head>
     <title>IMDB Service</title>
+    <link rel="icon" href="{base}/logo.svg" type="image/svg+xml">
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -3024,7 +3036,8 @@ async def endpoints(request: Request) -> HTMLResponse:
             line-height: 1.6;
             color: #333;
         }}
-        h1 {{ color: #2c3e50; }}
+        h1 {{ color: #2c3e50; display: flex; align-items: center; gap: 12px; }}
+        .service-logo {{ width: 48px; height: 48px; flex: 0 0 auto; }}
         code {{
             background: #f4f4f4;
             padding: 2px 6px;
@@ -3043,7 +3056,7 @@ async def endpoints(request: Request) -> HTMLResponse:
     </style>
 </head>
 <body>
-    <h1>🎬 IMDB Service</h1>
+    <h1><img class="service-logo" src="{base}/logo.svg" alt="">IMDB Service</h1>
     <p>A caching service for IMDB public dataset metadata with daily updates and pre-computed charts.</p>
 
     <h2>API Endpoints</h2>
@@ -3175,6 +3188,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 <head>
     <meta charset="utf-8">
     <title>IMDB Service Dashboard</title>
+    <link rel="icon" href="{base}/logo.svg" type="image/svg+xml">
     <style>
         * {{ box-sizing: border-box; }}
         body {{
@@ -3183,10 +3197,12 @@ async def dashboard(request: Request) -> HTMLResponse:
         }}
         .wrap {{ max-width: 1100px; margin: 0 auto; }}
         header {{
-            display: flex; align-items: baseline; justify-content: space-between;
+            display: flex; align-items: center; justify-content: space-between;
             flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
         }}
-        h1 {{ margin: 0; font-size: 24px; color: #f5c518; }}
+        h1 {{ margin: 0; font-size: 24px; color: #f5c518;
+              display: flex; align-items: center; gap: 12px; }}
+        .service-logo {{ width: 44px; height: 44px; flex: 0 0 auto; }}
         a {{ color: #5ab0ff; text-decoration: none; }}
         a:hover {{ text-decoration: underline; }}
         .statusbar {{
@@ -3246,7 +3262,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 <body>
     <div class="wrap">
         <header>
-            <h1>🎬 IMDB Service Dashboard</h1>
+            <h1><img class="service-logo" src="{base}/logo.svg" alt="">IMDB Service Dashboard</h1>
             <a href="{base}/endpoints">View API Documentation →</a>
         </header>
 

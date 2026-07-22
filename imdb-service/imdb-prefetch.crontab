@@ -1,0 +1,6 @@
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+
+# Daily at 10:00 UTC, after the overnight backup and IMDb import window.
+0 10 * * * "$HOME/Kometa-Utilities/imdb-service/prefetch-default-searches.sh" >/dev/null 2>&1

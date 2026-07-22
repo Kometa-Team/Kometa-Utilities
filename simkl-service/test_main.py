@@ -491,3 +491,12 @@ def test_root_returns_html(test_client):
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "SIMKL Service" in resp.text
+    assert "/logo.svg" in resp.text
+
+
+def test_logo_returns_svg(test_client):
+    resp = test_client.get("/logo.svg")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/svg+xml"
+    assert resp.headers["cache-control"] == "public, max-age=86400"
+    assert b"<title>Simkl</title>" in resp.content

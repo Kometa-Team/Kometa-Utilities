@@ -12,12 +12,13 @@ import aiosqlite
 import httpx
 from common import extract_seed_data
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 # --- CONFIG ---
 XML_DIR = Path(os.getenv("XML_DIR", "/app/data"))
 DB_PATH = Path(os.getenv("DB_PATH", "/app/database/anidb.db"))
 SEED_DATA_DIR = Path(os.getenv("SEED_DATA_DIR", "/app/seed_data"))
+LOGO_PATH = Path(__file__).resolve().parent / "ANIDB.png"
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "200"))
 THROTTLE_SECONDS = int(os.getenv("THROTTLE_SECONDS", "4"))
 UPDATE_THRESHOLD = timedelta(days=int(os.getenv("UPDATE_THRESHOLD_DAYS", "14")))
@@ -413,6 +414,16 @@ async def health_ready() -> JSONResponse:
     return JSONResponse({"status": "ready"})
 
 
+@app.get("/logo.png", include_in_schema=False)
+async def logo() -> FileResponse:
+    """Return the AniDB service logo."""
+    return FileResponse(
+        LOGO_PATH,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/")
 async def root(request: Request):
     """Root endpoint with API information."""
@@ -428,6 +439,7 @@ async def root(request: Request):
     <html>
     <head>
         <title>AniDB Mirror Service</title>
+        <link rel="icon" href="{base_url}/logo.png" type="image/png">
         <style>
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -437,7 +449,8 @@ async def root(request: Request):
                 line-height: 1.6;
                 color: #333;
             }}
-            h1 {{ color: #2c3e50; }}
+            h1 {{ color: #2c3e50; display: flex; align-items: center; gap: 12px; }}
+            .service-logo {{ width: 64px; height: 64px; object-fit: contain; flex: 0 0 auto; }}
             code {{
                 background: #f4f4f4;
                 padding: 2px 6px;
@@ -456,7 +469,7 @@ async def root(request: Request):
         </style>
     </head>
     <body>
-        <h1>🎬 AniDB Mirror Service</h1>
+        <h1><img class="service-logo" src="{base_url}/logo.png" alt="">AniDB Mirror Service</h1>
         <p>A caching service for AniDB anime metadata with rate limiting and background updates.</p>
 
         <h2>API Endpoints</h2>
@@ -540,6 +553,7 @@ async def list_tags():
         <html>
         <head>
             <title>AniDB Tags - AniDB Mirror Service</title>
+            <link rel="icon" href="{ROOT_PATH}/logo.png" type="image/png">
             <style>
                 body {{
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -549,7 +563,8 @@ async def list_tags():
                     line-height: 1.6;
                     color: #333;
                 }}
-                h1 {{ color: #2c3e50; }}
+                h1 {{ color: #2c3e50; display: flex; align-items: center; gap: 12px; }}
+                .service-logo {{ width: 48px; height: 48px; object-fit: contain; flex: 0 0 auto; }}
                 table {{
                     width: 100%;
                     border-collapse: collapse;
@@ -583,8 +598,8 @@ async def list_tags():
             </style>
         </head>
         <body>
-            <h1>🏷️ All Tags</h1>
-            <p><a href="/">← Back to Home</a></p>
+            <h1><img class="service-logo" src="{ROOT_PATH}/logo.png" alt="">All Tags</h1>
+            <p><a href="{ROOT_PATH}/">← Back to Home</a></p>
 
             <div class="stats">
                 <strong>Total unique tags:</strong> {len(tags)}

@@ -653,6 +653,15 @@ def test_root_endpoint(test_client):
     assert "/anime/{aid}" in response.text
     assert "/stats" in response.text
     assert "/search/tags" in response.text
+    assert "/logo.png" in response.text
+
+
+def test_logo_endpoint(test_client):
+    response = test_client.get("/logo.png")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "public, max-age=86400"
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 @pytest.mark.asyncio

@@ -5,11 +5,12 @@ access tokens for use with Kometa.
 """
 
 import os
+from pathlib import Path
 from urllib.parse import urlencode
 
 import requests  # type: ignore[import-untyped]
 from dotenv import load_dotenv
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_file
 
 load_dotenv()
 
@@ -37,6 +38,7 @@ REDIRECT_URI: str = _REDIRECT_URI
 SIMKL_AUTH_URL = "https://simkl.com/oauth/authorize"
 SIMKL_TOKEN_URL = "https://api.simkl.com/oauth/token"  # nosec B105
 ROOT_PATH = os.getenv("ROOT_PATH", "")
+LOGO_PATH = Path(__file__).resolve().parent.parent / "Simkl_logo.svg"
 
 SIMKL_API_PARAMS = {"client_id": CLIENT_ID, "app-name": "kometa", "app-version": "1.0"}
 SIMKL_HEADERS = {"Content-Type": "application/json", "User-Agent": "Kometa-Utilities/1.0"}
@@ -90,6 +92,14 @@ def index():
     """Render the main page."""
     auth_url = f"{SIMKL_AUTH_URL}?{urlencode({'response_type': 'code', 'redirect_uri': REDIRECT_URI, **SIMKL_API_PARAMS})}"
     return render_template("index.html", state="default", auth_url=auth_url)
+
+
+@app.route("/logo.svg")
+def logo():
+    """Return the Simkl logo."""
+    response = send_file(LOGO_PATH, mimetype="image/svg+xml", max_age=86400)
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 
 @app.route("/callback")

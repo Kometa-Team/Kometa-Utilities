@@ -9,16 +9,15 @@ A simple Flask web application for authenticating with Trakt and obtaining acces
 - Automatic configuration generation for Kometa
 - Copy-to-clipboard functionality
 - Secure token exchange
+- Single-use, ten-minute callback validation
 
 ## Usage
 
 1. Visit the application
-2. Enter your Trakt Client ID and Client Secret
-3. Click "Get Authorization URL" to generate the authentication link
-4. Click "Open URL" and authorize on Trakt's website
-5. Copy the PIN code provided by Trakt
-6. Paste the PIN and click "Submit"
-7. Copy the generated configuration into your Kometa config.yml
+2. Register the displayed callback URI in your Trakt application
+3. Enter your Trakt Client ID and Client Secret
+4. Click "Continue to Trakt" and approve access
+5. Copy the generated configuration into your Kometa `config.yml`
 
 ## Running Locally
 
@@ -33,7 +32,9 @@ Visit `http://localhost:8080`
 ### Docker
 ```bash
 docker build -t trakt-oauth .
-docker run -p 8080:8080 trakt-oauth
+docker run -p 8080:5000 \
+  -e TRAKT_REDIRECT_URI=http://localhost:8080/callback \
+  trakt-oauth
 ```
 
 ## Environment Variables
@@ -42,10 +43,14 @@ docker run -p 8080:8080 trakt-oauth
 - `HOST` - Host to bind to (default: 127.0.0.1)
 - `DEBUG` - Enable debug mode (default: False)
 - `SECRET_KEY` - Flask secret key (default: dev-key-change-in-production)
+- `TRAKT_REDIRECT_URI` - Exact callback URI registered in the Trakt application (default: `http://localhost:8080/callback`)
 
 ## Deployment
 
 This service is designed to be deployed behind a reverse proxy like Caddy.
+Pending authorization state is held in process memory for ten minutes. Run one
+Gunicorn worker, as configured in the included Dockerfile, unless this state is
+moved to a shared store.
 
 ### With Caddy
 ```caddy

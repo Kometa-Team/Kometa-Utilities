@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS title_ratings (
     averageRating REAL,
     numVotes INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_tr_votes ON title_ratings(numVotes DESC);
 
 CREATE TABLE IF NOT EXISTS title_akas (
     tconst TEXT NOT NULL,
@@ -114,6 +115,20 @@ CREATE TABLE IF NOT EXISTS imdb_keywords (
     imdb_id TEXT PRIMARY KEY,
     keywords TEXT,  -- JSON object: {"prison": [31, 32], ...}
     expiration_date TEXT
+);
+
+CREATE TABLE IF NOT EXISTS imdb_interests (
+    imdb_id TEXT PRIMARY KEY,
+    interests TEXT,
+    expiration_date TEXT
+);
+
+CREATE TABLE IF NOT EXISTS imdb_constraint_cache (
+    constraint_type TEXT NOT NULL,
+    constraint_key TEXT NOT NULL,
+    tconsts TEXT NOT NULL,
+    expiration_date TEXT NOT NULL,
+    PRIMARY KEY (constraint_type, constraint_key)
 );
 """
 
@@ -333,12 +348,17 @@ async def _download_one(
     manifest: dict[str, Any],
     on_start: Optional[Callable[[str], None]] = None,
     on_done: Optional[Callable[[str], None]] = None,
+    allow_missing_imported: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Refresh a single dataset file if metadata changed or the local gzip is incomplete."""
     now_iso = datetime.now(timezone.utc).isoformat()
     previous = manifest.get(stem, {})
     file_complete = await asyncio.to_thread(_gzip_is_complete, dest)
-    if file_complete and not _dataset_due(manifest, stem):
+    if file_complete and previous.get("pending_import"):
+        print(f"📦 Reusing {filename} for pending import")
+        return True, previous
+    imported_without_file = allow_missing_imported and bool(previous.get("last_imported"))
+    if (file_complete or imported_without_file) and not _dataset_due(manifest, stem):
         print(f"⏭️  Skipping {filename} (not due for refresh)")
         updated = {
             **previous,
@@ -348,7 +368,7 @@ async def _download_one(
 
     remote_metadata = await _fetch_remote_metadata(client, filename)
     metadata_changed = _metadata_changed(previous, remote_metadata)
-    if file_complete and not metadata_changed:
+    if (file_complete or imported_without_file) and not metadata_changed:
         print(f"⏭️  Skipping {filename} (remote metadata unchanged)")
         updated = {
             **previous,
@@ -373,6 +393,7 @@ async def _download_one(
         **remote_metadata,
         "last_checked": now_iso,
         "last_downloaded": now_iso,
+        "pending_import": True,
     }
 
 
@@ -381,6 +402,7 @@ async def download_datasets(
     on_file_start: Optional[Callable[[str], None]] = None,
     on_file_done: Optional[Callable[[str], None]] = None,
     stems: Optional[list[str]] = None,
+    allow_missing_imported: bool = False,
 ) -> tuple[dict[str, Path], list[str]]:
     """
     Download IMDB dataset files concurrently to data_dir.
@@ -389,7 +411,7 @@ async def download_datasets(
 
     Returns a tuple of:
       - dict mapping stem → local Path
-      - list of stems whose local files changed this run
+      - list of stems that require import
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     targets = {
@@ -401,7 +423,14 @@ async def download_datasets(
     async with httpx.AsyncClient(timeout=600.0) as client:
         tasks = [
             _download_one(
-                client, stem, filename, paths[stem], manifest, on_file_start, on_file_done
+                client,
+                stem,
+                filename,
+                paths[stem],
+                manifest,
+                on_file_start,
+                on_file_done,
+                allow_missing_imported,
             )
             for stem, filename in targets.items()
         ]
@@ -416,6 +445,30 @@ async def download_datasets(
     _save_manifest(data_dir, manifest)
 
     return paths, changed_stems
+
+
+def finalize_imported_datasets(
+    data_dir: Path,
+    paths: dict[str, Path],
+    stems: list[str],
+    delete_files: bool = True,
+) -> None:
+    """Record committed imports and optionally remove their source gzip files."""
+    manifest = _load_manifest(data_dir)
+    imported_at = datetime.now(timezone.utc).isoformat()
+    for stem in stems:
+        entry = {**manifest.get(stem, {}), "last_imported": imported_at}
+        entry.pop("pending_import", None)
+        manifest[stem] = entry
+    _save_manifest(data_dir, manifest)
+
+    if not delete_files:
+        return
+    for stem in stems:
+        path = paths.get(stem)
+        if path is not None and path.exists():
+            path.unlink()
+            print(f"🧹 Removed imported dataset file {path.name}")
 
 
 # Maps dataset stem → table name

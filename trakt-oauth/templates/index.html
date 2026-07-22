@@ -194,12 +194,16 @@
             <div class="instructions">
                 <strong>How it works:</strong>
                 <ol>
+                    <li>Register the callback URI below in your Trakt application</li>
                     <li>Enter your Trakt Client ID and Client Secret</li>
-                    <li>Click "Get Authorization URL" to generate the auth link</li>
-                    <li>Visit the Trakt website and authorize</li>
-                    <li>Copy the PIN code from Trakt</li>
-                    <li>Paste it below and submit</li>
+                    <li>Continue to Trakt and approve access</li>
+                    <li>Trakt will return here and generate your Kometa configuration</li>
                 </ol>
+            </div>
+
+            <div class="form-group">
+                <label for="redirectUri">Callback URI registered with Trakt</label>
+                <input type="text" id="redirectUri" value="{{ redirect_uri }}" readonly>
             </div>
 
             <div class="form-group">
@@ -212,24 +216,7 @@
                 <input type="password" id="clientSecret" placeholder="Enter your Client Secret" required>
             </div>
 
-            <button class="button primary" onclick="generateAuthUrl()" id="generateBtn">Get Authorization URL</button>
-
-            <div id="authUrlSection" style="display: none;">
-                <div class="form-group">
-                    <label>Authorization URL</label>
-                    <div class="auth-url-row">
-                        <input type="text" id="authUrl" readonly>
-                        <button class="button secondary" onclick="openAuthUrl()">Open URL</button>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label for="pinCode">PIN Code (from Trakt)</label>
-                    <input type="text" id="pinCode" placeholder="Enter the PIN from Trakt" required>
-                </div>
-
-                <button class="button primary" onclick="submitAuth()" id="submitBtn">Submit</button>
-            </div>
+            <button class="button primary" onclick="startAuthorization()" id="startBtn">Continue to Trakt</button>
         </div>
 
         <div id="resultSection" class="result-section">
@@ -250,6 +237,8 @@
     <script>
         // Detect if we're running behind a proxy with a subdirectory
         const basePath = window.location.pathname.startsWith('/trakt-oauth') ? '/trakt-oauth' : '';
+        const callbackResult = {{ callback_result | tojson }};
+        const callbackError = {{ callback_error | tojson }};
 
         function showStatus(message, type = 'info') {
             const statusEl = document.getElementById('status');
@@ -263,43 +252,21 @@
             statusEl.style.display = 'none';
         }
 
-        function generateAuthUrl() {
-            const clientId = document.getElementById('clientId').value.trim();
-
-            if (!clientId) {
-                showStatus('Please enter your Client ID', 'error');
-                return;
-            }
-
-            const redirectUri = 'urn:ietf:wg:oauth:2.0:oob';
-            const authUrl = `https://trakt.tv/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}`;
-
-            document.getElementById('authUrl').value = authUrl;
-            document.getElementById('authUrlSection').style.display = 'block';
-            showStatus('Authorization URL generated. Click "Open URL" to authenticate.', 'success');
-        }
-
-        function openAuthUrl() {
-            const authUrl = document.getElementById('authUrl').value;
-            window.open(authUrl, '_blank');
-        }
-
-        async function submitAuth() {
+        async function startAuthorization() {
             const clientId = document.getElementById('clientId').value.trim();
             const clientSecret = document.getElementById('clientSecret').value.trim();
-            const pinCode = document.getElementById('pinCode').value.trim();
 
-            if (!clientId || !clientSecret || !pinCode) {
-                showStatus('Please fill in all fields', 'error');
+            if (!clientId || !clientSecret) {
+                showStatus('Please enter your Client ID and Client Secret', 'error');
                 return;
             }
 
-            const submitBtn = document.getElementById('submitBtn');
-            submitBtn.disabled = true;
-            showStatus('Exchanging code for token...', 'info');
+            const startBtn = document.getElementById('startBtn');
+            startBtn.disabled = true;
+            showStatus('Preparing secure authorization...', 'info');
 
             try {
-                const response = await fetch(`${basePath}/api/exchange-code`, {
+                const response = await fetch(`${basePath}/api/start`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -307,27 +274,18 @@
                     body: JSON.stringify({
                         client_id: clientId,
                         client_secret: clientSecret,
-                        code: pinCode,
-                        redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
                     }),
                 });
-
-                const responseText = await response.text();
-                let data;
-                try {
-                    data = JSON.parse(responseText);
-                } catch (parseError) {
-                    throw new Error(`Invalid JSON response: ${responseText.substring(0, 100)}`);
-                }
+                const data = await response.json();
 
                 if (!response.ok) {
                     throw new Error(data.error || `HTTP ${response.status}`);
                 }
 
-                displayConfig(clientId, clientSecret, data);
+                window.location.assign(data.authorization_url);
             } catch (error) {
                 showStatus('Error: ' + error.message, 'error');
-                submitBtn.disabled = false;
+                startBtn.disabled = false;
             }
         }
 
@@ -352,7 +310,7 @@
         function copyConfig() {
             const configText = document.getElementById('configOutput').textContent;
             navigator.clipboard.writeText(configText).then(() => {
-                showStatus('✓ Configuration copied to clipboard!', 'success');
+                showStatus('Configuration copied to clipboard!', 'success');
                 setTimeout(hideStatus, 3000);
             }).catch(() => {
                 showStatus('Error copying configuration', 'error');
@@ -362,13 +320,23 @@
         function resetForm() {
             document.getElementById('clientId').value = '';
             document.getElementById('clientSecret').value = '';
-            document.getElementById('pinCode').value = '';
-            document.getElementById('authUrl').value = '';
-            document.getElementById('authUrlSection').style.display = 'none';
             document.getElementById('authForm').style.display = 'block';
             document.getElementById('resultSection').style.display = 'none';
-            document.getElementById('submitBtn').disabled = false;
+            document.getElementById('startBtn').disabled = false;
+            window.history.replaceState({}, '', `${basePath}/`);
             hideStatus();
+        }
+
+        if (callbackResult) {
+            window.history.replaceState({}, '', `${basePath}/`);
+            displayConfig(
+                callbackResult.client_id,
+                callbackResult.client_secret,
+                callbackResult.token_data,
+            );
+        } else if (callbackError) {
+            window.history.replaceState({}, '', `${basePath}/`);
+            showStatus(callbackError, 'error');
         }
     </script>
 </body>

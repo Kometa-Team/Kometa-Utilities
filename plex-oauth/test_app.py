@@ -9,8 +9,9 @@ def client():
         yield client
 
 
-def test_health_endpoint(client) -> None:
-    response = client.get("/api/health")
+@pytest.mark.parametrize("path", ["/api/health", "/health/live", "/health/ready"])
+def test_health_endpoint(client, path) -> None:
+    response = client.get(path)
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
 

@@ -28,6 +28,7 @@ database.db
 database.db-journal
 data/
 *.xml
+!clickhouse-logs.xml
 
 # --- Seed Data ---
 # Keep the directory structure but ignore large zip files

@@ -1,0 +1,12 @@
+[Unit]
+Description=Encrypted Kometa Utilities backup
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Kometa-Utilities
+EnvironmentFile=-%h/.config/kometa-utilities-backup.env
+ExecStart=%h/Kometa-Utilities/backups/backup.sh
+Nice=10
+IOSchedulingClass=idle

@@ -1,5 +1,6 @@
 """Tests for the GraphQL constraint cache/fetcher module."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -172,6 +173,42 @@ async def test_get_constraint_ids_returns_cached_value_when_fresh(tmp_path):
 
     assert ids == ["tt0111161"]
     mock_client_class.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_constraint_ids_returns_cached_empty_value(tmp_path):
+    """A fresh empty result is a cache hit rather than a repeated fetch."""
+    db_path = tmp_path / "imdb.db"
+    params = {"keywordConstraint": {"anyKeywords": ["no-match"]}}
+    await constraints.save_constraint_cache(db_path, "keyword", params, [])
+
+    with patch("constraints.fetch_constraint_ids", new_callable=AsyncMock) as fetch:
+        ids = await constraints.get_constraint_ids(db_path, "keyword", params)
+
+    assert ids == []
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_constraint_ids_coalesces_concurrent_misses(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    params = {"keywordConstraint": {"anyKeywords": ["prison"]}}
+    calls = 0
+
+    async def fake_fetch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return ["tt0111161"]
+
+    monkeypatch.setattr(constraints, "fetch_constraint_ids", fake_fetch)
+    first, second = await asyncio.gather(
+        constraints.get_constraint_ids(db_path, "keyword", params),
+        constraints.get_constraint_ids(db_path, "keyword", params),
+    )
+
+    assert first == second == ["tt0111161"]
+    assert calls == 1
 
 
 @pytest.mark.asyncio

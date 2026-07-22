@@ -34,6 +34,15 @@ def test_client():
         yield client
 
 
+def test_health_endpoints(test_client):
+    live = test_client.get("/health/live")
+    ready = test_client.get("/health/ready")
+    assert live.status_code == 200
+    assert live.json() == {"status": "ok"}
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready"}
+
+
 @pytest.fixture(scope="function")
 async def clean_test_env():
     """Clean up test environment before and after tests."""

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted Kometa Utilities backup
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+Unit=kometa-utilities-backup.service
+
+[Install]
+WantedBy=timers.target

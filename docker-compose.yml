@@ -1,3 +1,9 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 services:
 
   transfer:
@@ -29,19 +35,28 @@ services:
       - --virustotal-key
       - ${VIRUSTOTAL_KEY:-changeme-generate-random-key}
     restart: unless-stopped
+    logging: *default-logging
 
   anidb-mirror:
     image: ghcr.io/kometa-team/anidb-mirror:latest
     container_name: anidb-mirror
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ./anidb-service/.env
     environment:
       - UVICORN_WORKERS=1  # Reduce for low-memory systems
+      - DB_PATH=/app/database/anidb.db
     volumes:
       - anidb-data:/app/data
       - anidb-db:/app/database
       - ./anidb-service/seed_data:/app/seed_data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -53,10 +68,17 @@ services:
     image: ghcr.io/kometa-team/plex-oauth:latest
     container_name: plex-oauth
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ./plex-oauth/.env
     environment:
       - ROOT_PATH=/plex-oauth
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -68,9 +90,17 @@ services:
     image: ghcr.io/kometa-team/trakt-oauth:latest
     container_name: trakt-oauth
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - ROOT_PATH=/trakt-oauth
       - SECRET_KEY=${TRAKT_SECRET_KEY:-changeme-generate-random-key}
+      - TRAKT_REDIRECT_URI=https://utilities.kometa.wiki/trakt-oauth/callback
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -82,9 +112,16 @@ services:
     image: ghcr.io/kometa-team/mal-oauth:latest
     container_name: mal-oauth
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - ROOT_PATH=/mal-oauth
       - SECRET_KEY=${MAL_SECRET_KEY:-changeme-generate-random-key}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -96,11 +133,18 @@ services:
     image: ghcr.io/kometa-team/simkl-oauth:latest
     container_name: simkl-oauth
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - ROOT_PATH=/simkl-oauth
       - CLIENT_ID=${SIMKL_CLIENT_ID:?SIMKL_CLIENT_ID must be set in .env}
       - CLIENT_SECRET=${SIMKL_CLIENT_SECRET:?SIMKL_CLIENT_SECRET must be set in .env}
       - REDIRECT_URI=${SIMKL_REDIRECT_URI:?SIMKL_REDIRECT_URI must be set in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -112,10 +156,17 @@ services:
     image: ghcr.io/kometa-team/simkl-service:latest
     container_name: simkl-service
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - ROOT_PATH=/simkl-service
     volumes:
       - simkl-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -125,6 +176,7 @@ services:
 
   fider-db:
     restart: always
+    logging: *default-logging
     container_name: fider-db
     image: postgres:17
     env_file:
@@ -136,9 +188,19 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+          pids: 128
+        reservations:
+          memory: 128M
 
   features-fider:
     restart: always
+    logging: *default-logging
     container_name: features-fider
     image: getfider/fider:stable
     env_file:
@@ -146,17 +208,40 @@ services:
     depends_on:
       fider-db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "./fider ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+          pids: 128
+        reservations:
+          memory: 128M
 
   imdb-service:
     image: ghcr.io/kometa-team/imdb-service:latest
     container_name: imdb-service
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - ROOT_PATH=/imdb-service
       - REFRESH_HOUR=3
       - DATA_DIR=/app/data
       - TMP_DIR=/app/data
       - MIN_VOTES_CHART=25000
+      - IMDB_ADMIN_TOKEN=${IMDB_ADMIN_TOKEN:-}
+      - MIN_FREE_DISK_GB=${MIN_FREE_DISK_GB:-30}
+      - DELETE_DATASET_FILES_AFTER_IMPORT=${DELETE_DATASET_FILES_AFTER_IMPORT:-true}
+      - PARENTAL_FAILURE_RETENTION_DAYS=${PARENTAL_FAILURE_RETENTION_DAYS:-14}
+      - PARENTAL_FAILURE_MAX_MB=${PARENTAL_FAILURE_MAX_MB:-250}
+      - PARENTAL_FAILURE_CLEANUP_HOURS=${PARENTAL_FAILURE_CLEANUP_HOURS:-24}
+      - CACHE_STATS_TTL_SECONDS=${CACHE_STATS_TTL_SECONDS:-5}
+      - IMDB_UPSTREAM_CONCURRENCY=${IMDB_UPSTREAM_CONCURRENCY:-8}
 
       - PARENTAL_PROXY_ENABLED=${PARENTAL_PROXY_ENABLED:-false}
       - PARENTAL_PROXY_URLS=${PARENTAL_PROXY_URLS:-}
@@ -178,10 +263,18 @@ services:
 
     volumes:
       - imdb-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5m
     deploy:
       resources:
         limits:
+          cpus: "2.00"
           memory: 1G
+          pids: 512
         reservations:
           memory: 512M
 
@@ -189,6 +282,7 @@ services:
     image: caddy:latest
     container_name: caddy
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - .env
     ports:
@@ -200,6 +294,20 @@ services:
       - ./maintenance.html:/var/www/html/maintenance.html
       - caddy_data:/data
       - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+        reservations:
+          memory: 64M
 
   plausible_db:
     # Plausible v2.1.1 was tested against PostgreSQL versions 15 and 16
@@ -207,6 +315,7 @@ services:
     image: postgres:14-alpine
     container_name: plausible_db
     restart: always
+    logging: *default-logging
     volumes:
       - db-data:/var/lib/postgresql/data
     environment:
@@ -214,18 +323,30 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       start_period: 1m
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+          pids: 256
+        reservations:
+          memory: 128M
 
   plausible_events_db:
 #    image: clickhouse/clickhouse-server:24.3.3.102-alpine
     image: clickhouse/clickhouse-server:24.12-alpine
     container_name: plausible_events_db
     restart: always
+    logging: *default-logging
     volumes:
 #      - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
 #      - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro
       - event-data:/var/lib/clickhouse
       - event-logs:/var/log/clickhouse-server
-      - ./clickhouse/logs.xml:/etc/clickhouse-server/config.d/logs.xml:ro
+      - ./clickhouse-logs.xml:/etc/clickhouse-server/config.d/logs.xml:ro
       # This makes ClickHouse bind to IPv4 only, since Docker doesn't enable IPv6 in bridge networks by default.
       # Fixes "Listen [::]:9000 failed: Address family for hostname not supported" warnings.
       - ../plausible/clickhouse/ipv4-only.xml:/etc/clickhouse-server/config.d/ipv4-only.xml:ro
@@ -246,12 +367,24 @@ services:
           "wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1",
         ]
       start_period: 1m
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 2G
+          pids: 1536
+        reservations:
+          memory: 512M
 
   plausible:
     image: ghcr.io/plausible/community-edition:v3.2.0
     user: "999:65533"
     container_name: plausible
     restart: always
+    logging: *default-logging
     command: sh -c "/entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
     depends_on:
       plausible_db:
@@ -268,6 +401,20 @@ services:
       - 8002:8000
     env_file:
       - ../plausible/plausible-conf.env
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 1m
+    deploy:
+      resources:
+        limits:
+          cpus: "1.50"
+          memory: 1G
+          pids: 256
+        reservations:
+          memory: 256M
 
   cache:
     image: valkey/valkey:9.0.3
@@ -275,7 +422,22 @@ services:
     - redis-data:/data
     command: [valkey-server, --save, '60', '1', --loglevel, warning]
     restart: always
+    logging: *default-logging
     read_only: true
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+        reservations:
+          memory: 64M
 
   database:
     image: postgres:18-alpine
@@ -284,12 +446,29 @@ services:
     env_file:
     - ../weblate/environment
     restart: always
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+          pids: 256
+        reservations:
+          memory: 128M
 
   weblate:
     image: weblate/weblate
     depends_on:
-    - cache
-    - database
+      cache:
+        condition: service_healthy
+      database:
+        condition: service_healthy
     ports:
       - 8987:8080
     volumes:
@@ -298,10 +477,25 @@ services:
     env_file:
     - ../weblate/environment
     restart: always
+    logging: *default-logging
     read_only: true
     tmpfs:
       - /run
       - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "/app/bin/health_check"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5m
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 3G
+          pids: 256
+        reservations:
+          memory: 1536M
 
 volumes:
   anidb-data:

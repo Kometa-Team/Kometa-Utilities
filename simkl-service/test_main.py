@@ -435,11 +435,18 @@ def test_anime_find_no_params(test_client, populated_db):
 # ---------------------------------------------------------------------------
 
 
-def test_health(test_client):
-    """GET /api/health returns 200."""
-    resp = test_client.get("/api/health")
+@pytest.mark.parametrize("path", ["/api/health", "/health/live"])
+def test_health(test_client, path):
+    """Liveness endpoints return 200."""
+    resp = test_client.get(path)
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_health_ready(test_client):
+    resp = test_client.get("/health/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ready"}
 
 
 def test_stats_structure(test_client):

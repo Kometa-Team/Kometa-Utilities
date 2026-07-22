@@ -568,6 +568,31 @@ async def stats() -> JSONResponse:
 
 
 @app.get("/api/health")
+@app.get("/health/live")
 async def health() -> JSONResponse:
-    """Health check endpoint."""
+    """Return process liveness without checking storage or SIMKL."""
     return JSONResponse({"status": "ok"})
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    """Return readiness when local storage and the refresh worker are available."""
+    if refresh_queue is None or worker_task is None or worker_task.done():
+        return JSONResponse(
+            {"status": "not_ready", "reason": "service_initializing"}, status_code=503
+        )
+    try:
+        async with aiosqlite.connect(DATA_DIR / "simkl.db") as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'items'"
+            )
+            if await cursor.fetchone() is None:
+                return JSONResponse(
+                    {"status": "not_ready", "reason": "database_initializing"},
+                    status_code=503,
+                )
+    except Exception:
+        return JSONResponse(
+            {"status": "not_ready", "reason": "database_unavailable"}, status_code=503
+        )
+    return JSONResponse({"status": "ready"})

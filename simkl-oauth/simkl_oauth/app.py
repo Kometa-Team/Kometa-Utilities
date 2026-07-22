@@ -127,6 +127,8 @@ def callback():
 
 
 @app.route("/api/health", methods=["GET"])
+@app.route("/health/live", methods=["GET"])
+@app.route("/health/ready", methods=["GET"])
 def health():
     """Health check endpoint."""
     return {"status": "ok"}

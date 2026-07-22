@@ -9,6 +9,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -21,9 +22,11 @@ from urllib.parse import unquote, urlsplit
 import aiosqlite
 import charts
 import constraints
+import http_clients
 import httpx
+import singleflight
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from importer import ALLOWED_TABLES, SCHEMA_SQL, CACHE_SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
@@ -33,6 +36,12 @@ CACHE_DB_PATH = DATA_DIR / "cache.db"
 CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"
 GRAPHQL_CHART_CACHE_PATH = DATA_DIR / "graphql_chart_cache.json"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
+IMDB_ADMIN_TOKEN = os.getenv("IMDB_ADMIN_TOKEN", "")
+MIN_FREE_DISK_GB = int(os.getenv("MIN_FREE_DISK_GB", "30"))
+DELETE_DATASET_FILES_AFTER_IMPORT = (
+    os.getenv("DELETE_DATASET_FILES_AFTER_IMPORT", "true").lower() == "true"
+)
+CACHE_STATS_TTL_SECONDS = float(os.getenv("CACHE_STATS_TTL_SECONDS", "5"))
 REFRESH_HOUR = int(os.getenv("REFRESH_HOUR", "3"))
 MIN_VOTES_CHART = int(os.getenv("MIN_VOTES_CHART", "25000"))
 PARENTAL_GUIDE_TTL_DAYS = int(os.getenv("PARENTAL_GUIDE_TTL_DAYS", "90"))
@@ -75,6 +84,9 @@ PARENTAL_GUIDE_LOGGING_ENABLED = (
 PARENTAL_BROWSER_SCREENSHOT_DIR = Path(
     os.getenv("PARENTAL_BROWSER_SCREENSHOT_DIR", str(DATA_DIR / "parental-failures"))
 )
+PARENTAL_FAILURE_RETENTION_DAYS = int(os.getenv("PARENTAL_FAILURE_RETENTION_DAYS", "14"))
+PARENTAL_FAILURE_MAX_MB = int(os.getenv("PARENTAL_FAILURE_MAX_MB", "250"))
+PARENTAL_FAILURE_CLEANUP_HOURS = int(os.getenv("PARENTAL_FAILURE_CLEANUP_HOURS", "24"))
 
 # --- Parental prefetch config ---
 PARENTAL_PREFETCH_ENABLED = os.getenv("PARENTAL_PREFETCH_ENABLED", "true").lower() == "true"
@@ -102,6 +114,11 @@ parental_browser_lock: Optional[asyncio.Lock] = None
 parental_browser_semaphore: Optional[asyncio.Semaphore] = None
 parental_decodo_browser_session_id: Optional[str] = None
 parental_prefetch_task: Optional[asyncio.Task] = None
+artifact_cleanup_task: Optional[asyncio.Task] = None
+cache_stats_snapshot: Optional[Dict[str, Any]] = None
+cache_stats_path: Optional[Path] = None
+cache_stats_expires_at: float = 0.0
+cache_stats_lock: Optional[asyncio.Lock] = None
 parental_prefetch_count_today: int = 0
 parental_prefetch_date: Optional[date] = None
 parental_prefetch_last_id: Optional[str] = None
@@ -253,6 +270,69 @@ async def _save_parental_failure_artifacts(
             attempt=attempt,
             error=type(e).__name__,
         )
+
+
+def _cleanup_parental_failure_artifacts(now: Optional[datetime] = None) -> Dict[str, int]:
+    """Remove old service-owned browser artifacts and enforce a total size cap."""
+    if not PARENTAL_BROWSER_SCREENSHOT_DIR.exists():
+        return {"files": 0, "bytes": 0}
+
+    current = now or datetime.now(timezone.utc)
+    cutoff = current.timestamp() - PARENTAL_FAILURE_RETENTION_DAYS * 86400
+    pattern = re.compile(
+        r"^tt\d+-attempt\d+-.+-\d{8}T\d{6}Z\.(?:png|html|json)$"
+    )
+    candidates: list[tuple[Path, os.stat_result]] = []
+    for path in PARENTAL_BROWSER_SCREENSHOT_DIR.iterdir():
+        if path.is_file() and pattern.fullmatch(path.name):
+            candidates.append((path, path.stat()))
+
+    removed_files = 0
+    removed_bytes = 0
+    retained: list[tuple[Path, os.stat_result]] = []
+    for path, stat_result in candidates:
+        if stat_result.st_mtime <= cutoff:
+            try:
+                path.unlink()
+                removed_files += 1
+                removed_bytes += stat_result.st_size
+            except OSError as e:
+                print(f"⚠️  Could not remove parental failure artifact {path.name}: {e}")
+                retained.append((path, stat_result))
+        else:
+            retained.append((path, stat_result))
+
+    max_bytes = PARENTAL_FAILURE_MAX_MB * 1024**2
+    retained_size = sum(stat_result.st_size for _, stat_result in retained)
+    for path, stat_result in sorted(retained, key=lambda item: item[1].st_mtime):
+        if retained_size <= max_bytes:
+            break
+        try:
+            path.unlink()
+            retained_size -= stat_result.st_size
+            removed_files += 1
+            removed_bytes += stat_result.st_size
+        except OSError as e:
+            print(f"⚠️  Could not remove parental failure artifact {path.name}: {e}")
+
+    return {"files": removed_files, "bytes": removed_bytes}
+
+
+async def _artifact_cleanup_worker() -> None:
+    """Periodically enforce browser failure artifact retention."""
+    while True:
+        try:
+            removed = await asyncio.to_thread(_cleanup_parental_failure_artifacts)
+            if removed["files"]:
+                print(
+                    f"🧹 Removed {removed['files']} parental failure artifact(s) "
+                    f"({removed['bytes'] / 1024**2:.1f} MiB)"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"⚠️  Parental failure artifact cleanup failed: {e}")
+        await asyncio.sleep(max(1, PARENTAL_FAILURE_CLEANUP_HOURS) * 3600)
 
 
 def _proxy_candidates(exclude: Optional[set[str]] = None) -> list[str]:
@@ -568,7 +648,7 @@ async def _migrate_cache_tables() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown: load DB state, rebuild charts, start scheduler."""
-    global last_refresh, refresh_worker_task, parental_prefetch_task
+    global last_refresh, refresh_worker_task, parental_prefetch_task, artifact_cleanup_task
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("🔧 Initializing IMDB Service...")
@@ -578,6 +658,8 @@ async def lifespan(app: FastAPI):
         await _migrate_cache_tables()
     except Exception as e:
         print(f"⚠️  Could not initialize cache DB: {e}")
+
+    artifact_cleanup_task = asyncio.create_task(_artifact_cleanup_worker())
 
     if DB_PATH.exists():
         try:
@@ -627,15 +709,29 @@ async def lifespan(app: FastAPI):
             await parental_prefetch_task
         except asyncio.CancelledError:
             pass
+    if artifact_cleanup_task:
+        artifact_cleanup_task.cancel()
+        try:
+            await artifact_cleanup_task
+        except asyncio.CancelledError:
+            pass
+    await http_clients.close_clients()
     await _close_parental_browser_contexts()
 
 
 async def _run_import_pipeline() -> None:
     """Download datasets and import into the live DB, then rebuild charts."""
     global last_refresh, download_progress, import_progress, chart_progress
-    from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
+    from importer import (
+        DATASET_FILES,
+        STEM_TO_TABLE,
+        download_datasets,
+        finalize_imported_datasets,
+        run_direct_import,
+    )
 
     print("🔄 Starting daily refresh...")
+    _ensure_import_disk_space()
 
     # --- Download phase ---
     _set_phase("downloading")
@@ -655,11 +751,18 @@ async def _run_import_pipeline() -> None:
                 download_progress[stem] = "done"
                 break
 
-    gz_paths, changed_stems = await download_datasets(DATA_DIR, _on_file_start, _on_file_done)
+    gz_paths, changed_stems = await download_datasets(
+        DATA_DIR,
+        _on_file_start,
+        _on_file_done,
+        allow_missing_imported=DB_PATH.exists(),
+    )
     if not changed_stems and DB_PATH.exists():
         _set_phase("idle")
         print("✅ Refresh skipped: no dataset changes detected")
         return
+
+    _ensure_import_disk_space()
 
     # --- Import phase ---
     _set_phase("importing")
@@ -687,10 +790,17 @@ async def _run_import_pipeline() -> None:
         gz_paths,
         DB_PATH,
         changed_stems,
-        0,
+        None,
         _on_table_start,
         _on_table_done,
         _on_table_progress,
+    )
+    await asyncio.to_thread(
+        finalize_imported_datasets,
+        DATA_DIR,
+        gz_paths,
+        changed_stems,
+        DELETE_DATASET_FILES_AFTER_IMPORT,
     )
 
     try:
@@ -729,9 +839,16 @@ async def _run_import_pipeline() -> None:
 async def _refresh_single_table(stem: str) -> None:
     """Download and re-import a single dataset, then rebuild charts."""
     global last_refresh, download_progress, import_progress, chart_progress
-    from importer import DATASET_FILES, STEM_TO_TABLE, download_datasets, run_direct_import
+    from importer import (
+        DATASET_FILES,
+        STEM_TO_TABLE,
+        download_datasets,
+        finalize_imported_datasets,
+        run_direct_import,
+    )
 
     async with _refresh_lock:
+        _ensure_import_disk_space()
         table = STEM_TO_TABLE[stem]
         print(f"🔄 Manual refresh for {stem}...")
 
@@ -753,8 +870,17 @@ async def _refresh_single_table(stem: str) -> None:
                     break
 
         gz_paths, _changed = await download_datasets(
-            DATA_DIR, _on_file_start, _on_file_done, stems=[stem]
+            DATA_DIR,
+            _on_file_start,
+            _on_file_done,
+            stems=[stem],
+            allow_missing_imported=DB_PATH.exists(),
         )
+        if not _changed:
+            _set_phase("idle")
+            print(f"✅ Manual refresh for {stem} skipped: dataset unchanged")
+            return
+        _ensure_import_disk_space()
 
         _set_phase("importing")
         import_progress = {table: {"status": "pending", "rows": 0}}
@@ -777,10 +903,17 @@ async def _refresh_single_table(stem: str) -> None:
             gz_paths,
             DB_PATH,
             [stem],
-            0,
+            None,
             _on_table_start,
             _on_table_done,
             _on_table_progress,
+        )
+        await asyncio.to_thread(
+            finalize_imported_datasets,
+            DATA_DIR,
+            gz_paths,
+            _changed,
+            DELETE_DATASET_FILES_AFTER_IMPORT,
         )
 
         try:
@@ -895,8 +1028,81 @@ app = FastAPI(
 )
 
 
+@app.get("/health/live")
+async def health_live() -> Dict[str, str]:
+    """Return process liveness without touching storage or upstream services."""
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    """Return readiness when the committed dataset and cache schemas are readable."""
+    if not DB_PATH.exists() or not CACHE_DB_PATH.exists():
+        return JSONResponse(
+            {"status": "not_ready", "reason": "dataset_initializing"}, status_code=503
+        )
+    try:
+        required_core = set(ALLOWED_TABLES) | {"import_meta"}
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            core_tables = {row[0] for row in await cursor.fetchall()}
+            cursor = await db.execute(
+                "SELECT value FROM import_meta WHERE key = 'last_refresh'"
+            )
+            last_completed_refresh = await cursor.fetchone()
+        required_cache = {
+            "imdb_parental",
+            "imdb_keywords",
+            "imdb_interests",
+            "imdb_constraint_cache",
+        }
+        async with aiosqlite.connect(CACHE_DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            cache_tables = {row[0] for row in await cursor.fetchall()}
+        if not required_core.issubset(core_tables) or not last_completed_refresh:
+            return JSONResponse(
+                {"status": "not_ready", "reason": "dataset_initializing"}, status_code=503
+            )
+        if not required_cache.issubset(cache_tables):
+            return JSONResponse(
+                {"status": "not_ready", "reason": "cache_initializing"}, status_code=503
+            )
+    except Exception:
+        return JSONResponse(
+            {"status": "not_ready", "reason": "database_unavailable"}, status_code=503
+        )
+    return JSONResponse({"status": "ready"})
+
+
+def _require_admin(request: Request) -> None:
+    """Require the configured token for operational endpoints."""
+    if not IMDB_ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="IMDb admin token is not configured")
+    token = request.headers.get("X-Admin-Token", "")
+    if not token or not secrets.compare_digest(token, IMDB_ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid IMDb admin token")
+
+
 def _db_is_ready() -> bool:
     return DB_PATH.exists()
+
+
+def _ensure_import_disk_space() -> None:
+    """Ensure imports have room for downloads and a database-sized WAL."""
+    usage = shutil.disk_usage(DATA_DIR)
+    db_size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    required = max(MIN_FREE_DISK_GB * 1024**3, db_size)
+    if usage.free < required:
+        free_gb = usage.free / 1024**3
+        required_gb = required / 1024**3
+        raise RuntimeError(
+            f"Insufficient disk space for IMDb import: {free_gb:.1f} GiB free, "
+            f"{required_gb:.1f} GiB required"
+        )
 
 
 SORT_COLUMN_MAP: Dict[str, str] = {
@@ -1212,34 +1418,22 @@ async def _wait_for_parental_page_ready(page: Any) -> None:
 async def _fetch_parental_guide_html_via_http(imdb_id: str, proxy_url: Optional[str] = None) -> str:
     """Fetch the IMDb parental guide page for a title via direct HTTP."""
     url = f"{IMDB_WEB_BASE_URL}/title/{imdb_id}/parentalguide"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
     started = time.monotonic()
     _parental_log("http_fetch_start", imdb_id, proxy=_proxy_log_label(proxy_url), url=url)
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=30.0,
-            headers=headers,
-            proxy=proxy_url,
-        ) as client:
-            response = await client.get(url)
-            _parental_log(
-                "http_fetch_response",
-                imdb_id,
-                proxy=_proxy_log_label(proxy_url),
-                status_code=response.status_code,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
-            )
-            if response.status_code == 202:
-                # If we get 202, it means the content might be delayed, but the text might have what we need,
-                # or it's simply a 202 instead of 200. Return it as valid response if it has content,
-                # otherwise maybe we should fall through. Let's just return the text and let parser deal with it.
-                return response.text
-            response.raise_for_status()
+        client = http_clients.get_web_client(proxy_url)
+        response = await client.get(url)
+        _parental_log(
+            "http_fetch_response",
+            imdb_id,
+            proxy=_proxy_log_label(proxy_url),
+            status_code=response.status_code,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        if response.status_code == 202:
             return response.text
+        response.raise_for_status()
+        return response.text
     except httpx.HTTPStatusError as e:
         _parental_log(
             "http_fetch_error_status",
@@ -1283,17 +1477,10 @@ async def _fetch_parental_guide_via_graphql(imdb_id: str) -> str:
     started = time.monotonic()
     _parental_log("graphql_fetch_start", imdb_id, url=IMDB_GRAPHQL_URL)
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=30.0,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
-                "content-type": "application/json",
-            },
-        ) as client:
-            response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
-            response.raise_for_status()
-            data = response.json()
+        client = http_clients.get_graphql_client()
+        response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+        response.raise_for_status()
+        data = response.json()
     except httpx.HTTPStatusError as e:
         _parental_log(
             "graphql_fetch_error_status",
@@ -1793,53 +1980,46 @@ async def _fetch_keywords_via_graphql(imdb_id: str) -> Dict[str, list[int]]:
     page = 0
 
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=30.0,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
-                "content-type": "application/json",
-            },
-        ) as client:
-            while page < KEYWORDS_MAX_PAGES:
-                query = _build_keywords_query(imdb_id, cursor)
-                response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
-                response.raise_for_status()
-                data = response.json()
+        client = http_clients.get_graphql_client()
+        while page < KEYWORDS_MAX_PAGES:
+            query = _build_keywords_query(imdb_id, cursor)
+            response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+            response.raise_for_status()
+            data = response.json()
 
-                if "errors" in data:
-                    error_message = data["errors"][0].get("message", "unknown error")
-                    if (
-                        "not found" in error_message.lower()
-                        or "does not exist" in error_message.lower()
-                    ):
-                        raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"IMDb GraphQL keywords request failed: {error_message}",
-                    )
+            if "errors" in data:
+                error_message = data["errors"][0].get("message", "unknown error")
+                if (
+                    "not found" in error_message.lower()
+                    or "does not exist" in error_message.lower()
+                ):
+                    raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"IMDb GraphQL keywords request failed: {error_message}",
+                )
 
-                title = (data.get("data") or {}).get("title") or {}
-                keywords_data = title.get("keywords") or {}
-                edges = keywords_data.get("edges", [])
-                for edge in edges:
-                    node = edge.get("node") or {}
-                    keyword = (node.get("keyword") or {}).get("text") or {}
-                    name = keyword.get("text", "").lower()
-                    score = node.get("interestScore") or {}
-                    if name:
-                        keywords[name] = [
-                            score.get("usersInterested", 0),
-                            score.get("usersVoted", 0),
-                        ]
+            title = (data.get("data") or {}).get("title") or {}
+            keywords_data = title.get("keywords") or {}
+            edges = keywords_data.get("edges", [])
+            for edge in edges:
+                node = edge.get("node") or {}
+                keyword = (node.get("keyword") or {}).get("text") or {}
+                name = keyword.get("text", "").lower()
+                score = node.get("interestScore") or {}
+                if name:
+                    keywords[name] = [
+                        score.get("usersInterested", 0),
+                        score.get("usersVoted", 0),
+                    ]
 
-                page_info = keywords_data.get("pageInfo") or {}
-                if not page_info.get("hasNextPage"):
-                    break
-                cursor = page_info.get("endCursor")
-                if not cursor:
-                    break
-                page += 1
+            page_info = keywords_data.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
+            page += 1
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=502,
@@ -1870,6 +2050,19 @@ async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -
             (imdb_id, json.dumps(keywords), expiration_date),
         )
         await db.commit()
+
+
+async def _refresh_keywords_cache(imdb_id: str) -> Dict[str, list[int]]:
+    """Fetch and cache keywords once for concurrent requests for the same title."""
+
+    async def refresh() -> Dict[str, list[int]]:
+        keywords = await _fetch_keywords_via_graphql(imdb_id)
+        await _update_keywords_cache(imdb_id, keywords)
+        return keywords
+
+    return await singleflight.run_singleflight(
+        ("keywords", str(CACHE_DB_PATH), imdb_id), refresh
+    )
 
 
 async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
@@ -1904,65 +2097,94 @@ async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
     return updated_at
 
 
+async def _refresh_parental_cache(imdb_id: str) -> tuple[Dict[str, str], str]:
+    """Fetch, parse, and cache parental data once per title."""
 
-async def _get_parental_cache_stats() -> Dict[str, Any]:
-    """Return cached parental-guide item counts broken down by severity for the stats endpoint."""
-    await _ensure_cache_db_schema()
+    async def refresh() -> tuple[Dict[str, str], str]:
+        html_text = await _fetch_parental_guide_html(imdb_id)
+        parental = _parse_parental_guide_html(html_text)
+        cached_at = await _update_parental_cache(imdb_id, parental)
+        return parental, cached_at
 
-    stats = {
-        "items_cached": 0,
-        "severities": ["None", "Mild", "Moderate", "Severe"],
-        "breakdown": {}
+    return await singleflight.run_singleflight(
+        ("parental", str(CACHE_DB_PATH), imdb_id), refresh
+    )
+
+
+
+async def _load_cache_stats() -> Dict[str, Any]:
+    """Load all cache-table aggregates with one database round trip."""
+    categories = ("nudity", "violence", "profanity", "alcohol", "frightening")
+    severities = ("None", "Mild", "Moderate", "Severe", "Unknown")
+    expressions = ["COUNT(*) AS parental_items"]
+    for category in categories:
+        for severity in severities:
+            alias = f"{category}_{severity.lower()}"
+            expressions.append(
+                "SUM(CASE WHEN "
+                f"COALESCE(NULLIF({category}, ''), 'Unknown') = '{severity}' "
+                f"THEN 1 ELSE 0 END) AS {alias}"
+            )
+    expressions.extend(
+        (
+            "(SELECT COUNT(*) FROM imdb_keywords) AS keyword_items",
+            "(SELECT COUNT(*) FROM imdb_interests) AS interest_items",
+            "(SELECT COUNT(*) FROM imdb_constraint_cache) AS constraint_items",
+        )
+    )
+
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"SELECT {', '.join(expressions)} FROM imdb_parental"  # nosec B608
+        )
+        row = await cursor.fetchone()
+
+    breakdown: Dict[str, Dict[str, int]] = {}
+    for severity in severities:
+        values = {
+            category: int(row[f"{category}_{severity.lower()}"] or 0)
+            for category in categories
+        }
+        if any(values.values()):
+            breakdown[severity] = values
+
+    return {
+        "parental_cache": {
+            "items_cached": int(row["parental_items"] or 0),
+            "severities": list(severities[:-1]),
+            "breakdown": breakdown,
+        },
+        "keyword_cache": {"items_cached": int(row["keyword_items"] or 0)},
+        "interest_cache": {"items_cached": int(row["interest_items"] or 0)},
+        "constraint_cache": {"items_cached": int(row["constraint_items"] or 0)},
     }
-    categories = ["nudity", "violence", "profanity", "alcohol", "frightening"]
-    
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        # Get total items
-        cursor = await db.execute("SELECT COUNT(*) FROM imdb_parental")
-        row = await cursor.fetchone()
-        if row:
-            stats["items_cached"] = row[0]
-            
-        for cat in categories:
-            cursor = await db.execute(f"SELECT {cat}, COUNT(*) FROM imdb_parental GROUP BY {cat}")
-            rows = await cursor.fetchall()
-            for severity, count in rows:
-                if not severity: severity = 'Unknown'
-                if severity not in stats["breakdown"]:
-                    stats["breakdown"][severity] = {c: 0 for c in categories}
-                stats["breakdown"][severity][cat] = count
-                
-    return stats
 
 
-async def _get_keyword_cache_stats() -> Dict[str, Any]:
-    """Return the total number of cached keyword records for the stats endpoint."""
-    await _ensure_cache_db_schema()
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM imdb_keywords")
-        row = await cursor.fetchone()
-        return {"items_cached": row[0] if row else 0}
+async def _get_cached_cache_stats() -> Dict[str, Any]:
+    """Cache expensive cache-table aggregates while keeping progress data live."""
+    global cache_stats_snapshot, cache_stats_path, cache_stats_expires_at, cache_stats_lock
+    now = time.monotonic()
+    if (
+        cache_stats_snapshot is not None
+        and cache_stats_path == CACHE_DB_PATH
+        and now < cache_stats_expires_at
+    ):
+        return cache_stats_snapshot
 
-
-
-
-
-async def _get_interest_cache_stats() -> Dict[str, Any]:
-    """Return the total number of cached interest records for the stats endpoint."""
-    await _ensure_cache_db_schema()
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM imdb_interests")
-        row = await cursor.fetchone()
-        return {"items_cached": row[0] if row else 0}
-
-
-async def _get_constraint_cache_stats() -> Dict[str, Any]:
-    """Return the total number of cached constraint queries."""
-    await constraints._ensure_constraint_cache_table(CACHE_DB_PATH)
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        cursor = await db.execute("SELECT COUNT(*) FROM imdb_constraint_cache")
-        row = await cursor.fetchone()
-        return {"items_cached": row[0] if row else 0}
+    if cache_stats_lock is None:
+        cache_stats_lock = asyncio.Lock()
+    async with cache_stats_lock:
+        now = time.monotonic()
+        if (
+            cache_stats_snapshot is None
+            or cache_stats_path != CACHE_DB_PATH
+            or now >= cache_stats_expires_at
+        ):
+            cache_stats_snapshot = await _load_cache_stats()
+            cache_stats_path = CACHE_DB_PATH
+            cache_stats_expires_at = now + max(0, CACHE_STATS_TTL_SECONDS)
+        return cache_stats_snapshot
 
 
 async def _load_parental_fetch_success_counts() -> None:
@@ -2017,9 +2239,9 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
 
     Ordering strategies:
       - "votes_desc": raw popularity (most votes first).
-      - "weighted_random": draw from the top N uncached titles weighted by
-        log(numVotes). Favors popular titles while spreading load across the
-        candidate pool.
+      - "weighted_random": draw from the top N most-voted uncached titles,
+        weighted by votes. Favors popular titles while spreading load across
+        the bounded candidate pool.
     """
     if not _db_is_ready():
         return None
@@ -2031,21 +2253,16 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
         # still exclude already-cached titles in a single query.
         await db.execute("ATTACH DATABASE ? AS cache", (str(CACHE_DB_PATH),))
         db.row_factory = aiosqlite.Row
-        order_sql = "tr.numVotes DESC"
-        if PARENTAL_PREFETCH_ORDER == "weighted_random":
-            # Randomize within the top pool; log(votes) keeps megahits from
-            # completely dominating the draw.
-            order_sql = "(log(tr.numVotes) * abs(random())) DESC"
         cursor = await db.execute(
-            f"""
+            """
             SELECT tb.tconst, tr.numVotes
             FROM title_basics tb
             JOIN title_ratings tr ON tb.tconst = tr.tconst
             LEFT JOIN cache.imdb_parental ip ON tb.tconst = ip.imdb_id
             WHERE tr.numVotes >= ? AND ip.imdb_id IS NULL
-            ORDER BY {order_sql}
+            ORDER BY tr.numVotes DESC
             LIMIT ?
-            """,  # nosec B608 - order_sql is an internal constant, not user input
+            """,
             (PARENTAL_PREFETCH_MIN_VOTES, PARENTAL_PREFETCH_CANDIDATE_POOL),
         )
         rows: list[Any] = list(await cursor.fetchall())
@@ -2081,9 +2298,7 @@ async def _prefetch_parental_guide(imdb_id: str) -> bool:
     parental_prefetch_last_id = imdb_id
     parental_prefetch_last_at = datetime.now(timezone.utc).isoformat()
     try:
-        html_text = await _fetch_parental_guide_html(imdb_id)
-        parental = _parse_parental_guide_html(html_text)
-        await _update_parental_cache(imdb_id, parental)
+        parental, _ = await _refresh_parental_cache(imdb_id)
         parental_prefetch_last_status = "success"
         _parental_log(
             "prefetch_success",
@@ -2222,7 +2437,7 @@ async def search(
     imdb_top: Optional[int] = None,
     imdb_bottom: Optional[int] = None,
     sort_by: str = "rating.desc",
-    limit: int = Query(default=100, le=1000),  # noqa: B008
+    limit: int = Query(default=100, ge=1, le=1000),  # noqa: B008
     language: Optional[str] = Query(None, alias="language"),  # noqa: B008
     language_any: Optional[str] = Query(None, alias="language.any"),  # noqa: B008
     language_not: Optional[str] = Query(None, alias="language.not"),  # noqa: B008
@@ -2920,8 +3135,9 @@ async def endpoints(request: Request) -> HTMLResponse:
 
 
 @app.post("/refresh/{table}")
-async def refresh_table(table: str) -> Dict[str, str]:
+async def refresh_table(table: str, request: Request) -> Dict[str, str]:
     """Trigger a manual re-download and re-import of a single table's dataset."""
+    _require_admin(request)
     if table not in ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table!r}")
     if _refresh_lock.locked() or current_phase != "idle":
@@ -3051,6 +3267,11 @@ async def dashboard(request: Request) -> HTMLResponse:
                 <span class="label">Last Activity</span>
                 <span id="last-activity">–</span>
             </div>
+            <div class="status-item">
+                <label class="label" for="admin-token">Admin token</label>
+                <input type="password" id="admin-token" autocomplete="off" placeholder="Required for changes"
+                       style="background: #0f1419; color: #e6e6e6; border: 1px solid #2a323d; padding: 5px 8px; border-radius: 6px;">
+            </div>
         </div>
 
         <h2>Tables</h2>
@@ -3077,7 +3298,7 @@ async def dashboard(request: Request) -> HTMLResponse:
         <h2>Manual Cache Seeding</h2>
         <div class="card">
             <div style="font-size: 13px; color: #8a94a6; margin-bottom: 12px;">Upload a CSV to seed the Parental Guide, Keyword, or Interest cache.</div>
-            <form action="{base}/upload-csv" method="post" enctype="multipart/form-data" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+            <form id="csv-upload" onsubmit="uploadCsv(event)" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
                 <input type="file" name="file" accept=".csv" required style="font-size: 13px;">
                 <button type="submit">Upload CSV</button>
             </form>
@@ -3107,10 +3328,18 @@ async def dashboard(request: Request) -> HTMLResponse:
     function fmt(n) {{ return n == null ? '–' : Number(n).toLocaleString(); }}
     function fmtTime(t) {{ return t ? new Date(t).toLocaleString() : '–'; }}
 
-    function renderTables(counts, progress, updated) {{
+    function adminHeaders() {{
+        const token = document.getElementById('admin-token').value.trim();
+        if (!token) {{ alert('Enter the admin token first'); return null; }}
+        sessionStorage.setItem('imdbAdminToken', token);
+        return {{ 'X-Admin-Token': token }};
+    }}
+
+    function renderTables(counts, progress, updated, lastChecked) {{
         const grid = document.getElementById('tables');
         grid.innerHTML = '';
         updated = updated || {{}};
+        lastChecked = lastChecked || {{}};
         for (const [table, meta] of Object.entries(TABLE_META)) {{
             const rows = counts[table];
             const prog = (progress || {{}})[table];
@@ -3136,8 +3365,8 @@ async def dashboard(request: Request) -> HTMLResponse:
                     <div class="meta">
                         Source: ${{meta.file}}<br>
                         Refresh interval: ${{meta.refresh_days}} day(s)<br>
-                        Min rows: ${{fmt(meta.min_rows)}}<br>
-                        Updated: ${{fmtTime(updated[table])}}
+                        Last update: ${{fmtTime(updated[table])}}<br>
+                        Last check: ${{fmtTime(lastChecked[table])}}
                     </div>
                     <button onclick="refresh('${{table}}')" ${{busy ? 'disabled' : ''}}>↻ Refresh</button>
                     <div class="tbl-status">${{statusTxt}}</div>
@@ -3275,6 +3504,8 @@ async def dashboard(request: Request) -> HTMLResponse:
     }}
 
     async function load() {{
+        const tokenInput = document.getElementById('admin-token');
+        if (!tokenInput.value) tokenInput.value = sessionStorage.getItem('imdbAdminToken') || '';
 const urlParams = new URLSearchParams(window.location.search);
         const msg = urlParams.get('msg');
         if (msg) {{
@@ -3295,7 +3526,7 @@ const urlParams = new URLSearchParams(window.location.search);
         document.getElementById('svc-status').textContent = d.status || '–';
         document.getElementById('last-refresh').textContent = fmtTime(d.last_refresh);
         document.getElementById('last-activity').textContent = fmtTime(d.last_activity);
-        renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated);
+        renderTables(d.table_counts || {{}}, d.import_progress, d.table_updated, d.table_last_checked);
         renderCharts(d.charts_cached, d.chart_progress, d.charts_refreshed);
 
 
@@ -3314,16 +3545,33 @@ const urlParams = new URLSearchParams(window.location.search);
             if (!polling) polling = setInterval(load, 2000);
         }} else if (polling) {{
             clearInterval(polling); polling = null;
-            renderTables(d.table_counts || {{}}, null, d.table_updated);
+            renderTables(d.table_counts || {{}}, null, d.table_updated, d.table_last_checked);
         }}
     }}
 
     async function refresh(table) {{
-        const r = await fetch(BASE + '/refresh/' + table, {{ method: 'POST' }});
+        const headers = adminHeaders();
+        if (!headers) return;
+        const r = await fetch(BASE + '/refresh/' + table, {{ method: 'POST', headers }});
+        if (r.status === 401) {{ sessionStorage.removeItem('imdbAdminToken'); alert('Invalid admin token'); return; }}
         if (r.status === 409) {{ alert('A refresh is already in progress'); return; }}
         if (!r.ok) {{ alert('Refresh failed: ' + r.status); return; }}
         if (!polling) polling = setInterval(load, 2000);
         load();
+    }}
+
+    async function uploadCsv(event) {{
+        event.preventDefault();
+        const headers = adminHeaders();
+        if (!headers) return;
+        const r = await fetch(BASE + '/upload-csv', {{
+            method: 'POST',
+            headers,
+            body: new FormData(event.currentTarget),
+        }});
+        if (r.status === 401) {{ sessionStorage.removeItem('imdbAdminToken'); alert('Invalid admin token'); return; }}
+        if (!r.ok) {{ alert('Upload failed: ' + r.status); return; }}
+        window.location.assign(r.url);
     }}
 
     load();
@@ -3348,10 +3596,7 @@ async def get_stats() -> Dict[str, Any]:
         }
 
     try:
-        parental_cache = await _get_parental_cache_stats()
-        keyword_cache = await _get_keyword_cache_stats()
-        interest_cache = await _get_interest_cache_stats()
-        constraint_cache = await _get_constraint_cache_stats()
+        cache_stats = await _get_cached_cache_stats()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'row_counts'")
             row = await cursor.fetchone()
@@ -3361,6 +3606,19 @@ async def get_stats() -> Dict[str, Any]:
             row = await cursor.fetchone()
             table_updated: Dict[str, Any] = json.loads(row[0]) if row and row[0] else {}
 
+        manifest_path = DATA_DIR / "dataset_manifest.json"
+        manifest: dict = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = {}
+        table_last_checked: dict[str, str] = {}
+        for table, stem in TABLE_TO_STEM.items():
+            entry = manifest.get(stem, {})
+            if entry.get("last_checked"):
+                table_last_checked[table] = entry["last_checked"]
+
         return {
             "status": "online",
             "phase": current_phase,
@@ -3368,10 +3626,8 @@ async def get_stats() -> Dict[str, Any]:
             "last_activity": last_activity,
             "table_counts": counts,
             "table_updated": table_updated,
-            "parental_cache": parental_cache,
-            "keyword_cache": keyword_cache,
-            "interest_cache": interest_cache,
-            "constraint_cache": constraint_cache,
+            "table_last_checked": table_last_checked,
+            **cache_stats,
             "parental_prefetch": {
                 "enabled": PARENTAL_PREFETCH_ENABLED,
                 "count_today": parental_prefetch_count_today,
@@ -3596,9 +3852,7 @@ async def get_parental_guide(
     else:
         _parental_log("endpoint_cache_miss", imdb_id)
 
-    html_text = await _fetch_parental_guide_html(imdb_id)
-    parental = _parse_parental_guide_html(html_text)
-    cached_at = await _update_parental_cache(imdb_id, parental)
+    parental, cached_at = await _refresh_parental_cache(imdb_id)
     _parental_log("endpoint_cache_updated", imdb_id, categories=",".join(sorted(parental.keys())))
     return {
         "imdb_id": imdb_id,
@@ -3676,6 +3930,19 @@ async def _update_interests_cache(imdb_id: str, interests: list[Dict[str, str]])
         await db.commit()
 
 
+async def _refresh_interests_cache(imdb_id: str) -> list[Dict[str, str]]:
+    """Fetch and cache interests once for concurrent requests for the same title."""
+
+    async def refresh() -> list[Dict[str, str]]:
+        interests = await _fetch_interests_via_graphql(imdb_id)
+        await _update_interests_cache(imdb_id, interests)
+        return interests
+
+    return await singleflight.run_singleflight(
+        ("interests", str(CACHE_DB_PATH), imdb_id), refresh
+    )
+
+
 async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
     """Fetch all interests for a title via IMDb GraphQL."""
     query = '''
@@ -3687,38 +3954,34 @@ async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
       }
     }
     ''' % imdb_id
-    
+
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=30.0,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
-                "content-type": "application/json",
-            },
-        ) as client:
-            response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
-            response.raise_for_status()
-            data = response.json()
-            
-            if "errors" in data:
-                error_message = data["errors"][0].get("message", "unknown error")
-                if "not found" in error_message.lower() or "does not exist" in error_message.lower():
-                    raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
-                raise HTTPException(status_code=502, detail=f"IMDb GraphQL interests request failed: {error_message}")
-                
-            interests_list = []
-            title = (data.get("data") or {}).get("title") or {}
-            interests_data = title.get("interests") or {}
-            edges = interests_data.get("edges", [])
-            for edge in edges:
-                node = edge.get("node") or {}
-                i_id = node.get("id")
-                text = (node.get("primaryText") or {}).get("text")
-                if i_id and text:
-                    interests_list.append({"id": i_id, "text": text})
-            return interests_list
-            
+        client = http_clients.get_graphql_client()
+        response = await client.post(IMDB_GRAPHQL_URL, json={"query": query})
+        response.raise_for_status()
+        data = response.json()
+
+        if "errors" in data:
+            error_message = data["errors"][0].get("message", "unknown error")
+            if "not found" in error_message.lower() or "does not exist" in error_message.lower():
+                raise HTTPException(status_code=404, detail=f"Title {imdb_id!r} not found")
+            raise HTTPException(
+                status_code=502,
+                detail=f"IMDb GraphQL interests request failed: {error_message}",
+            )
+
+        interests_list = []
+        title = (data.get("data") or {}).get("title") or {}
+        interests_data = title.get("interests") or {}
+        edges = interests_data.get("edges", [])
+        for edge in edges:
+            node = edge.get("node") or {}
+            i_id = node.get("id")
+            text = (node.get("primaryText") or {}).get("text")
+            if i_id and text:
+                interests_list.append({"id": i_id, "text": text})
+        return interests_list
+
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"IMDb GraphQL interests request failed: {e}")
 
@@ -3737,8 +4000,7 @@ async def get_interests(
     if cached is not None and expired is False:
         return {"imdb_id": imdb_id, "interests": cached}
         
-    interests = await _fetch_interests_via_graphql(imdb_id)
-    await _update_interests_cache(imdb_id, interests)
+    interests = await _refresh_interests_cache(imdb_id)
     return {"imdb_id": imdb_id, "interests": interests}
 
 
@@ -3754,11 +4016,10 @@ async def get_keywords(
     imdb_id = _validate_imdb_id(imdb_id)
 
     cached, expired = (None, None) if ignore_cache else await _query_keywords_cache(imdb_id)
-    if cached and expired is False:
+    if cached is not None and expired is False:
         return {"imdb_id": imdb_id, "keywords": cached}
 
-    keywords = await _fetch_keywords_via_graphql(imdb_id)
-    await _update_keywords_cache(imdb_id, keywords)
+    keywords = await _refresh_keywords_cache(imdb_id)
     return {"imdb_id": imdb_id, "keywords": keywords}
 
 
@@ -3861,7 +4122,8 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
 
 
 @app.post("/upload-csv")
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(request: Request, file: UploadFile = File(...)):
+    _require_admin(request)
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Must be a .csv file")
     
@@ -3982,4 +4244,3 @@ async def upload_csv(file: UploadFile = File(...)):
     import urllib.parse
     msg = f"Successfully processed {inserted_count + updated_count} rows ({inserted_count} new items added, {updated_count} updated)."
     return RedirectResponse(url=f"{ROOT_PATH}/dashboard?msg={urllib.parse.quote(msg)}", status_code=303)
-

@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import io
 import json
+import os
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,46 @@ def _make_tsv_gz(header: str, rows: list[str]) -> bytes:
     with gzip.GzipFile(fileobj=buf, mode="wb") as f:
         f.write(content.encode())
     return buf.getvalue()
+
+
+def test_parental_failure_artifact_cleanup_enforces_age_and_scope(tmp_path, monkeypatch):
+    import main
+
+    now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+    old_artifact = tmp_path / "tt1234567-attempt1-http-500-20260601T000000Z.html"
+    fresh_artifact = tmp_path / "tt1234567-attempt2-http-500-20260721T000000Z.json"
+    unrelated = tmp_path / "notes.json"
+    for path in (old_artifact, fresh_artifact, unrelated):
+        path.write_bytes(b"data")
+    old_timestamp = (now - timedelta(days=30)).timestamp()
+    os.utime(old_artifact, (old_timestamp, old_timestamp))
+
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_SCREENSHOT_DIR", tmp_path)
+    monkeypatch.setattr(main, "PARENTAL_FAILURE_RETENTION_DAYS", 14)
+    monkeypatch.setattr(main, "PARENTAL_FAILURE_MAX_MB", 250)
+    removed = main._cleanup_parental_failure_artifacts(now)
+
+    assert removed == {"files": 1, "bytes": 4}
+    assert not old_artifact.exists()
+    assert fresh_artifact.exists()
+    assert unrelated.exists()
+
+
+def test_parental_failure_artifact_cleanup_enforces_size_cap(tmp_path, monkeypatch):
+    import main
+
+    artifact = tmp_path / "tt1234567-attempt1-http-500-20260721T000000Z.png"
+    artifact.write_bytes(b"data")
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_SCREENSHOT_DIR", tmp_path)
+    monkeypatch.setattr(main, "PARENTAL_FAILURE_RETENTION_DAYS", 14)
+    monkeypatch.setattr(main, "PARENTAL_FAILURE_MAX_MB", 0)
+
+    removed = main._cleanup_parental_failure_artifacts(
+        datetime(2026, 7, 21, tzinfo=timezone.utc)
+    )
+
+    assert removed == {"files": 1, "bytes": 4}
+    assert not artifact.exists()
 
 
 def test_create_schema_creates_all_tables():
@@ -243,6 +284,90 @@ async def test_download_datasets_skips_unchanged_files(tmp_path):
 
     assert len(result) == 7
     assert changed_stems == []
+
+
+@pytest.mark.asyncio
+async def test_download_skips_missing_file_after_successful_import(tmp_path):
+    from importer import download_datasets
+
+    manifest = {
+        "title.ratings": {
+            "etag": '"same"',
+            "last_modified": "Fri, 04 Apr 2026 00:00:00 GMT",
+            "content_length": "26",
+            "last_checked": "2026-03-20T00:00:00+00:00",
+            "last_imported": "2026-03-20T01:00:00+00:00",
+        }
+    }
+    (tmp_path / "dataset_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    mock_client = AsyncMock()
+    mock_head_resp = MagicMock()
+    mock_head_resp.status_code = 200
+    mock_head_resp.raise_for_status = MagicMock()
+    mock_head_resp.headers = {
+        "etag": '"same"',
+        "last-modified": "Fri, 04 Apr 2026 00:00:00 GMT",
+        "content-length": "26",
+    }
+    mock_client.head = AsyncMock(return_value=mock_head_resp)
+    mock_client.stream = MagicMock(side_effect=AssertionError("download should not occur"))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("importer.httpx.AsyncClient", return_value=mock_client):
+        paths, changed_stems = await download_datasets(
+            tmp_path, stems=["title.ratings"], allow_missing_imported=True
+        )
+
+    assert changed_stems == []
+    assert not paths["title.ratings"].exists()
+
+
+def test_finalize_imported_datasets_marks_and_deletes_file(tmp_path):
+    from importer import finalize_imported_datasets
+
+    path = tmp_path / "title.ratings.tsv.gz"
+    path.write_bytes(b"imported")
+    (tmp_path / "dataset_manifest.json").write_text(
+        json.dumps({"title.ratings": {"etag": '"same"'}}), encoding="utf-8"
+    )
+
+    finalize_imported_datasets(tmp_path, {"title.ratings": path}, ["title.ratings"])
+
+    manifest = json.loads((tmp_path / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["title.ratings"]["last_imported"]
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_download_reuses_file_when_import_is_pending(tmp_path):
+    from importer import download_datasets
+
+    path = tmp_path / "title.ratings.tsv.gz"
+    path.write_bytes(_make_tsv_gz("tconst\taverageRating\tnumVotes", []))
+    (tmp_path / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "title.ratings": {
+                    "last_checked": datetime.now(timezone.utc).isoformat(),
+                    "pending_import": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    mock_client = AsyncMock()
+    mock_client.head = AsyncMock(side_effect=AssertionError("metadata check should not occur"))
+    mock_client.stream = MagicMock(side_effect=AssertionError("download should not occur"))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("importer.httpx.AsyncClient", return_value=mock_client):
+        _, changed_stems = await download_datasets(tmp_path, stems=["title.ratings"])
+
+    assert changed_stems == ["title.ratings"]
 
 
 def _make_all_gz_files(tmp_path):
@@ -947,6 +1072,43 @@ def test_stats_returns_initializing_when_no_db(tmp_path, monkeypatch):
     assert "parental_cache" not in data
 
 
+def test_health_live_does_not_require_database(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "missing.db")
+    response = TestClient(main.app).get("/health/live")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_health_ready_requires_completed_dataset(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "missing.db")
+    monkeypatch.setattr(main, "CACHE_DB_PATH", tmp_path / "missing-cache.db")
+    response = TestClient(main.app).get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["reason"] == "dataset_initializing"
+
+
+def test_health_ready_with_completed_dataset(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT OR REPLACE INTO import_meta(key, value) VALUES ('last_refresh', '2026-07-21T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    response = TestClient(main.app).get("/health/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
 def test_stats_returns_online_with_db(tmp_path, monkeypatch):
     db_path = tmp_path / "imdb.db"
     conn = sqlite3.connect(db_path)
@@ -1000,13 +1162,7 @@ def test_stats_returns_online_with_db(tmp_path, monkeypatch):
         assert data["table_updated"][table] == "2026-03-24T03:00:00+00:00"
     assert data["charts_refreshed"] == {"top_movies": "2026-07-16T12:00:00+00:00"}
     assert data["parental_cache"]["items_cached"] == 0
-    assert data["parental_cache"]["flag_counts"] == {
-        "nudity": 0,
-        "violence": 0,
-        "profanity": 0,
-        "alcohol": 0,
-        "frightening": 0,
-    }
+    assert data["parental_cache"]["breakdown"] == {}
     assert "charts_cached" in data
 
 
@@ -1080,16 +1236,35 @@ def test_stats_returns_parental_cache_item_details(tmp_path, monkeypatch):
     response = client.get("/stats")
     assert response.status_code == 200
     data = response.json()
-    assert data["parental_cache"] == {
-        "items_cached": 2,
-        "flag_counts": {
-            "nudity": 2,
-            "violence": 1,
-            "profanity": 2,
-            "alcohol": 1,
-            "frightening": 2,
-        },
+    assert data["parental_cache"]["items_cached"] == 2
+    assert data["parental_cache"]["breakdown"]["Mild"]["nudity"] == 1
+    assert data["parental_cache"]["breakdown"]["Moderate"]["violence"] == 1
+    assert data["parental_cache"]["breakdown"]["Severe"]["frightening"] == 1
+    assert data["parental_cache"]["breakdown"]["Unknown"]["violence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_stats_snapshot_is_reused(tmp_path, monkeypatch):
+    import main
+
+    expected = {
+        "parental_cache": {"items_cached": 1},
+        "keyword_cache": {"items_cached": 2},
+        "interest_cache": {"items_cached": 3},
+        "constraint_cache": {"items_cached": 4},
     }
+    loader = AsyncMock(return_value=expected)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", tmp_path / "cache.db")
+    monkeypatch.setattr(main, "CACHE_STATS_TTL_SECONDS", 5)
+    monkeypatch.setattr(main, "cache_stats_snapshot", None)
+    monkeypatch.setattr(main, "cache_stats_path", None)
+    monkeypatch.setattr(main, "cache_stats_expires_at", 0.0)
+    monkeypatch.setattr(main, "cache_stats_lock", None)
+    monkeypatch.setattr(main, "_load_cache_stats", loader)
+
+    assert await main._get_cached_cache_stats() == expected
+    assert await main._get_cached_cache_stats() == expected
+    loader.assert_awaited_once()
 
 
 def test_stats_returns_parental_fetch_success_counts(tmp_path, monkeypatch):
@@ -1840,6 +2015,35 @@ def test_keywords_endpoint_returns_cached_value_when_fresh(tmp_path, monkeypatch
     assert data == {"imdb_id": "tt0111161", "keywords": keywords}
 
 
+def test_keywords_endpoint_returns_cached_empty_value(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date) VALUES (?, ?, ?)",
+        (
+            "tt0111161",
+            "{}",
+            (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    refresh = AsyncMock()
+    monkeypatch.setattr(main, "_refresh_keywords_cache", refresh)
+
+    response = TestClient(main.app).get("/keywords/tt0111161")
+
+    assert response.status_code == 200
+    assert response.json()["keywords"] == {}
+    refresh.assert_not_awaited()
+
+
 def test_keywords_endpoint_fetches_and_caches_when_missing(tmp_path, monkeypatch):
     db_path = tmp_path / "imdb.db"
     _seed_full_test_db(db_path)
@@ -2099,6 +2303,33 @@ async def test_prefetch_candidate_returns_none_when_all_cached(tmp_path, monkeyp
     monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 25000)
     candidate = await main._get_parental_prefetch_candidate()
     assert candidate is None
+
+
+@pytest.mark.asyncio
+async def test_prefetch_weighted_random_uses_bounded_top_pool(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_prefetch_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CACHE_DB_PATH", db_path)
+    monkeypatch.setattr(main, "DATA_DIR", db_path.parent)
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_ORDER", "weighted_random")
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_MIN_VOTES", 0)
+    monkeypatch.setattr(main, "PARENTAL_PREFETCH_CANDIDATE_POOL", 1)
+
+    assert await main._get_parental_prefetch_candidate() == "tt0000001"
+
+
+def test_ratings_vote_index_exists(tmp_path):
+    db_path = tmp_path / "imdb.db"
+    _seed_prefetch_test_db(db_path)
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_tr_votes'"
+    ).fetchone()
+    conn.close()
+    assert row == ("idx_tr_votes",)
 
 
 @pytest.mark.asyncio
@@ -2771,6 +3002,15 @@ def test_search_limit(tmp_path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert len(data["results"]) <= 2
+
+
+def test_search_rejects_non_positive_limit(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "imdb.db")
+    client = TestClient(main.app)
+    assert client.get("/search?limit=0").status_code == 422
+    assert client.get("/search?limit=-1").status_code == 422
 
 
 def test_search_rejects_imdb_top_and_bottom_together(tmp_path, monkeypatch):
@@ -3937,26 +4177,55 @@ def test_dashboard_respects_root_path(monkeypatch):
     assert "/imdb-service/" in response.text
 
 
+def test_import_disk_space_preflight_rejects_low_capacity(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "imdb.db")
+    monkeypatch.setattr(main, "MIN_FREE_DISK_GB", 10**9)
+    with pytest.raises(RuntimeError, match="Insufficient disk space"):
+        main._ensure_import_disk_space()
+
+
 def test_refresh_unknown_table_returns_404(monkeypatch):
     import main
 
+    monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
     client = TestClient(main.app, raise_server_exceptions=False)
-    response = client.post("/refresh/not_a_table")
+    response = client.post(
+        "/refresh/not_a_table", headers={"X-Admin-Token": "test-admin-token"}
+    )
     assert response.status_code == 404
+
+
+def test_refresh_requires_admin_token(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
+    client = TestClient(main.app)
+    assert client.post("/refresh/title_basics").status_code == 401
+    response = client.post(
+        "/refresh/title_basics", headers={"X-Admin-Token": "wrong-token"}
+    )
+    assert response.status_code == 401
 
 
 def test_refresh_conflict_when_not_idle(monkeypatch):
     import main
 
+    monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setattr(main, "current_phase", "importing")
     client = TestClient(main.app, raise_server_exceptions=False)
-    response = client.post("/refresh/title_basics")
+    response = client.post(
+        "/refresh/title_basics", headers={"X-Admin-Token": "test-admin-token"}
+    )
     assert response.status_code == 409
 
 
 def test_refresh_starts_background_task(monkeypatch):
     import main
 
+    monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setattr(main, "current_phase", "idle")
 
     called = {}
@@ -3966,7 +4235,9 @@ def test_refresh_starts_background_task(monkeypatch):
 
     monkeypatch.setattr(main, "_refresh_single_table", fake_refresh)
     client = TestClient(main.app)
-    response = client.post("/refresh/title_ratings")
+    response = client.post(
+        "/refresh/title_ratings", headers={"X-Admin-Token": "test-admin-token"}
+    )
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"
@@ -3980,14 +4251,22 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     downloaded = {}
 
-    async def fake_download(data_dir, on_start=None, on_done=None, stems=None):
+    async def fake_download(
+        data_dir, on_start=None, on_done=None, stems=None, allow_missing_imported=False
+    ):
         downloaded["stems"] = stems
+        downloaded["allow_missing_imported"] = allow_missing_imported
         return {"title.ratings": tmp_path / "title.ratings.tsv.gz"}, ["title.ratings"]
 
     imported = {}
 
     def fake_run_direct_import(gz_paths, live_db, changed_stems, *args):
         imported["changed_stems"] = changed_stems
+
+    finalized = {}
+
+    def fake_finalize(data_dir, paths, stems, delete_files):
+        finalized["stems"] = stems
 
     rebuilt = {}
 
@@ -4000,6 +4279,8 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(importer, "download_datasets", fake_download)
     monkeypatch.setattr(importer, "run_direct_import", fake_run_direct_import)
+    monkeypatch.setattr(importer, "finalize_imported_datasets", fake_finalize)
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
     monkeypatch.setattr(main, "DB_PATH", db_path)
     monkeypatch.setattr(main.charts, "rebuild_all_charts", fake_rebuild)
     monkeypatch.setattr(main, "current_phase", "idle")
@@ -4007,7 +4288,9 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
     await main._refresh_single_table("title.ratings")
 
     assert downloaded["stems"] == ["title.ratings"]
+    assert downloaded["allow_missing_imported"] is False
     assert imported["changed_stems"] == ["title.ratings"]
+    assert finalized["stems"] == ["title.ratings"]
     assert rebuilt["done"] is True
     assert main.current_phase == "idle"
 

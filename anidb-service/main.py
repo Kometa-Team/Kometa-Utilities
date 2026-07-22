@@ -12,7 +12,7 @@ import aiosqlite
 import httpx
 from common import extract_seed_data
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 # --- CONFIG ---
 XML_DIR = Path(os.getenv("XML_DIR", "/app/data"))
@@ -376,6 +376,41 @@ app = FastAPI(
     redoc_url="/redoc" if ROOT_PATH else "/redoc",
     redirect_slashes=False,
 )
+
+
+@app.get("/health/live")
+async def health_live() -> Dict[str, str]:
+    """Return process liveness without checking storage or AniDB."""
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    """Return readiness when local storage and the fetch worker are available."""
+    if (
+        getattr(app.state, "starting_up", True)
+        or update_queue is None
+        or worker_task is None
+        or worker_task.done()
+    ):
+        return JSONResponse(
+            {"status": "not_ready", "reason": "service_initializing"}, status_code=503
+        )
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            tables = {row[0] for row in await cursor.fetchall()}
+        if not {"anime", "tags", "relations", "api_logs"}.issubset(tables):
+            return JSONResponse(
+                {"status": "not_ready", "reason": "database_initializing"}, status_code=503
+            )
+    except Exception:
+        return JSONResponse(
+            {"status": "not_ready", "reason": "database_unavailable"}, status_code=503
+        )
+    return JSONResponse({"status": "ready"})
 
 
 @app.get("/")

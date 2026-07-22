@@ -5,7 +5,7 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 
-COPY main.py importer.py charts.py constraints.py ./
+COPY main.py importer.py charts.py constraints.py singleflight.py http_clients.py ./
 
 RUN mkdir -p /app/data
 

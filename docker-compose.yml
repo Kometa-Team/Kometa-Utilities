@@ -7,13 +7,18 @@ x-default-logging: &default-logging
 services:
 
   transfer:
-    image: dutchcoders/transfer.sh:latest
+    image: kometa-utilities-transfer:local
+    build:
+      context: ./transfer-service
+      dockerfile: Dockerfile
     container_name: transfer
     ports:
       - "8080:8080"
     volumes:
       - transfer-data:/data
       - transfer-tmp:/tmp/transfer
+    secrets:
+      - virustotal_key
     command:
       - --listener
       - ":8080"
@@ -31,9 +36,6 @@ services:
       - "60"
 #      - --web-path
 #      - /web/
-      # Uncomment to enable VirusTotal:
-      - --virustotal-key
-      - ${VIRUSTOTAL_KEY:-changeme-generate-random-key}
     restart: unless-stopped
     logging: *default-logging
 
@@ -283,8 +285,6 @@ services:
     container_name: caddy
     restart: unless-stopped
     logging: *default-logging
-    env_file:
-      - .env
     ports:
       - "80:80"
       - "443:443"
@@ -496,6 +496,10 @@ services:
           pids: 256
         reservations:
           memory: 1536M
+
+secrets:
+  virustotal_key:
+    environment: VIRUSTOTAL_KEY
 
 volumes:
   anidb-data:

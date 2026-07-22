@@ -192,13 +192,20 @@
 
         <div id="authForm">
             <div class="instructions">
-                <strong>How it works:</strong>
+                <strong>To connect to Trakt.tv you must create a Trakt application:</strong>
                 <ol>
-                    <li>Register the callback URI below in your Trakt application</li>
-                    <li>Enter your Trakt Client ID and Client Secret</li>
-                    <li>Continue to Trakt and approve access</li>
-                    <li>Trakt will return here and generate your Kometa configuration</li>
+                    <li><a href="https://trakt.tv/oauth/applications/new" target="_blank" rel="noopener noreferrer">Click here to create a Trakt API application.</a></li>
+                    <li>Enter a <code>Name</code> for the application.</li>
+                    <li>Enter <code>{{ redirect_uri }}</code> for <code>Redirect uri</code>.</li>
+                    <li>Click the <code>SAVE APP</code> button.</li>
+                    <li>Record the <code>Client ID</code> and <code>Client Secret</code>; you only need do that once.</li>
                 </ol>
+                <strong>Now, to authenticate to Trakt.tv:</strong>
+                <ol>
+                    <li>Enter the <code>Client ID</code> and <code>Client Secret</code> into the fields below.</li>
+                    <li>Click the <code>Continue to Trakt</code> button.</li>
+                </ol>
+
             </div>
 
             <div class="form-group">

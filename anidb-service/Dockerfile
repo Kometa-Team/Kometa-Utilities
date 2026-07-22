@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY main.py .
 COPY common.py .
-COPY ANIDB.png .
+COPY static/ ./static/
 
 # Create directory for data (will be mapped to a volume)
 RUN mkdir -p /app/data

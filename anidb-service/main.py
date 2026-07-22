@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 XML_DIR = Path(os.getenv("XML_DIR", "/app/data"))
 DB_PATH = Path(os.getenv("DB_PATH", "/app/database/anidb.db"))
 SEED_DATA_DIR = Path(os.getenv("SEED_DATA_DIR", "/app/seed_data"))
-LOGO_PATH = Path(__file__).resolve().parent / "ANIDB.png"
+LOGO_PATH = Path(__file__).resolve().parent / "static" / "anidb-logo.png"
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "200"))
 THROTTLE_SECONDS = int(os.getenv("THROTTLE_SECONDS", "4"))
 UPDATE_THRESHOLD = timedelta(days=int(os.getenv("UPDATE_THRESHOLD_DAYS", "14")))

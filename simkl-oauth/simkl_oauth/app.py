@@ -38,7 +38,7 @@ REDIRECT_URI: str = _REDIRECT_URI
 SIMKL_AUTH_URL = "https://simkl.com/oauth/authorize"
 SIMKL_TOKEN_URL = "https://api.simkl.com/oauth/token"  # nosec B105
 ROOT_PATH = os.getenv("ROOT_PATH", "")
-LOGO_PATH = Path(__file__).resolve().parent.parent / "Simkl_logo.svg"
+LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "simkl-logo.svg"
 
 SIMKL_API_PARAMS = {"client_id": CLIENT_ID, "app-name": "kometa", "app-version": "1.0"}
 SIMKL_HEADERS = {"Content-Type": "application/json", "User-Agent": "Kometa-Utilities/1.0"}

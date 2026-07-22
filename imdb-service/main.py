@@ -31,7 +31,7 @@ from importer import ALLOWED_TABLES, SCHEMA_SQL, CACHE_SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
-LOGO_PATH = Path(__file__).resolve().parent / "IMDb_Logo_Square.svg"
+LOGO_PATH = Path(__file__).resolve().parent / "static" / "imdb-logo.svg"
 DB_PATH = DATA_DIR / "imdb.db"
 CACHE_DB_PATH = DATA_DIR / "cache.db"
 CHART_CACHE_PATH = DATA_DIR / "chart_cache.json"

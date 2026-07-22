@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 LISTS_DIR = DATA_DIR / "lists"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
-LOGO_PATH = Path(__file__).resolve().parent / "Simkl_logo.svg"
+LOGO_PATH = Path(__file__).resolve().parent / "static" / "simkl-logo.svg"
 
 BASE_URL = "https://data.simkl.in"
 

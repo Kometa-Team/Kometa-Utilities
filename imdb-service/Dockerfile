@@ -6,7 +6,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 COPY main.py importer.py charts.py constraints.py singleflight.py http_clients.py ./
-COPY IMDb_Logo_Square.svg ./
+COPY static/ ./static/
 
 RUN mkdir -p /app/data
 

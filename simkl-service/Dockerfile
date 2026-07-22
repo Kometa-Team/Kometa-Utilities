@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY main.py .
-COPY Simkl_logo.svg .
+COPY static/ ./static/
 
 # Create data directory (will be mapped to a volume)
 RUN mkdir -p /app/data

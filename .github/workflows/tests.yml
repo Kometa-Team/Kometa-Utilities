@@ -16,15 +16,15 @@ jobs:
         service: ["anidb-service", "plex-oauth", "trakt-oauth", "mal-oauth", "simkl-oauth", "simkl-service"]
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Cache pip packages
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('anidb-service/requirements-dev.txt', 'plex-oauth/requirements.txt', 'trakt-oauth/requirements.txt', 'mal-oauth/requirements.txt') }}
@@ -73,7 +73,7 @@ jobs:
 
     - name: Upload coverage to Codecov (anidb-service only)
       if: matrix.service == 'anidb-service'
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v7
       with:
         file: ./anidb-service/coverage.xml
         fail_ci_if_error: false
@@ -82,10 +82,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: "3.12"
 
@@ -95,7 +95,7 @@ jobs:
         pip install pre-commit
 
     - name: Cache pre-commit environments
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.cache/pre-commit
         key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}

@@ -292,6 +292,15 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ./index.html:/var/www/html/index.html
       - ./maintenance.html:/var/www/html/maintenance.html
+      - ./favicon.ico:/var/www/html/favicon.ico
+      # Static browser-only Trakt OAuth page (no backend involved)
+      - ./trakt-oauth/static:/var/www/html/trakt-oauth:ro
+      # Static browser-only MyAnimeList OAuth page (no backend involved)
+      - ./mal-oauth/static:/var/www/html/mal-oauth:ro
+      # Static browser-only Plex OAuth page (no backend involved)
+      - ./plex-oauth/static:/var/www/html/plex-oauth:ro
+      # Static browser-only SIMKL OAuth page (PIN flow, no backend involved)
+      - ./simkl-oauth/static:/var/www/html/simkl-oauth:ro
       - caddy_data:/data
       - caddy_config:/config
     healthcheck:

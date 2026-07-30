@@ -1,65 +1,51 @@
-# SIMKL OAuth - Kometa
+# SIMKL OAuth - Kometa (Static PIN Flow)
 
-A simple Flask web application for authenticating with SIMKL and obtaining access tokens for use with Kometa.
+A fully client-side SIMKL OAuth page using the PIN (device) flow.  
+The browser talks directly to `api.simkl.com` (CORS-enabled); the user token never touches this server.
 
-## Features
+## How It Works
 
-- Clean, modern UI with SIMKL branding
-- One-click OAuth 2.0 authorization flow
-- Automatic configuration generation for Kometa
-- Copy-to-clipboard functionality
+1. User clicks "Connect with SIMKL"
+2. Page requests a PIN code from SIMKL via `POST /oauth/pin`
+3. User opens `simkl.com/pin`, signs in, and enters the code
+4. Page polls `GET /oauth/pin/check/{code}` until SIMKL returns the `access_token`
+5. Configuration is displayed for copying into Kometa's `config.yml`
 
-## Usage
+## Configuration
 
-1. Visit the application
-2. Click "Connect with SIMKL"
-3. Authorize the Kometa app on SIMKL's website
-4. Copy the generated configuration into your Kometa config.yml
-
-## Running Locally
-
-### Python
+Only `SIMKL_CLIENT_ID` is needed (public identifier — already visible in the legacy site's authorize URL).  
+It is injected into `static/index.html` at build/deploy time from `.env`.
 
 ```bash
-export CLIENT_ID=your_simkl_client_id
-export CLIENT_SECRET=your_simkl_client_secret
-export REDIRECT_URI=http://localhost:8080/callback
-pip install -r requirements.txt
-python app.py
+SIMKL_CLIENT_ID=your_simkl_client_id
 ```
-
-Visit `http://localhost:8080`
-
-### Docker
-
-```bash
-docker build -t simkl-oauth .
-docker run -p 8080:5000 \
-  -e CLIENT_ID=your_client_id \
-  -e CLIENT_SECRET=your_client_secret \
-  -e REDIRECT_URI=http://localhost:8080/callback \
-  simkl-oauth
-```
-
-## Environment Variables
-
-- `CLIENT_ID` - SIMKL app client ID (required)
-- `CLIENT_SECRET` - SIMKL app client secret (required)
-- `REDIRECT_URI` - Callback URL registered in SIMKL app settings (required)
-- `ROOT_PATH` - Set to `/simkl-oauth` for path-based routing behind a reverse proxy
-- `PORT` - Port to run on (default: 8080)
-- `HOST` - Host to bind to (default: 127.0.0.1)
-- `DEBUG` - Enable debug mode (default: False)
 
 ## Deployment
 
-This service is designed to be deployed behind a reverse proxy like Caddy.
-
-### With Caddy
+The page is served as static content by Caddy:
 
 ```caddy
 handle /simkl-oauth* {
-    uri strip_prefix /simkl-oauth
-    reverse_proxy simkl-oauth:5000
+    root * /var/www/html
+    header Cache-Control "no-store"
+    header Referrer-Policy "no-referrer"
+    header X-Content-Type-Options "nosniff"
+    file_server
 }
 ```
+
+And mounted in docker-compose:
+
+```yaml
+- ./simkl-oauth/static:/var/www/html/simkl-oauth:ro
+```
+
+## Legacy Fallback
+
+The original Flask app (`simkl_oauth/app.py`) is retained for backwards compatibility but is no longer the primary route. It uses OAuth 2.0 authorization-code flow requiring `CLIENT_ID`, `CLIENT_SECRET`, and `REDIRECT_URI`.
+
+## Files
+
+- `static/index.html` — Static PIN-flow page (the active implementation)
+- `static/logo.svg` — SIMKL logo for landing page integration
+- `simkl_oauth/app.py` — Legacy Flask app (fallback only)

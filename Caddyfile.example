@@ -19,23 +19,9 @@ yourdomain.com {
     }
 
     # ========================================================================
-    # IMPORTANT: OAuth Callback Routes - Must bypass authentication
-    # ========================================================================
-    # If using basic auth, these callback routes MUST be defined BEFORE the
-    # basicauth directive. External services (Plex, MyAnimeList) cannot
-    # authenticate, so callbacks must be publicly accessible.
-    # ========================================================================
-
-    # Plex OAuth callback - NO AUTH
-    handle /plex-oauth/auth/callback* {
-        uri strip_prefix /plex-oauth
-        reverse_proxy plex-oauth:5000
-    }
-
-    # ========================================================================
     # Optional: Basic Authentication
     # ========================================================================
-    # Uncomment to require authentication for all routes (except callbacks above)
+    # Uncomment to require authentication for all routes
     # Generate password hash: caddy hash-password
     # basicauth * {
     #     username $2a$14$your_bcrypt_hash_here
@@ -52,34 +38,68 @@ yourdomain.com {
     }
 
     # Handle /plex-oauth path
-    # Flask app for Plex OAuth authentication
+    # Static browser-only Plex OAuth (PIN flow): the browser talks directly to
+    # plex.tv, which is CORS-enabled; the token never touches this server.
     handle /plex-oauth* {
-        uri strip_prefix /plex-oauth
-        reverse_proxy plex-oauth:5000
+        root * /var/www/html
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        header X-Content-Type-Options "nosniff"
+        file_server
     }
 
     # Handle /trakt-oauth path
-    # Flask app for Trakt OAuth authentication
+    # Static browser-only Trakt OAuth: credentials and tokens are exchanged
+    # directly between the user's browser and Trakt; nothing sensitive
+    # touches this server. Register https://yourdomain.com/trakt-oauth/callback
+    # as the Redirect uri in the Trakt application.
     handle /trakt-oauth* {
-        uri strip_prefix /trakt-oauth
-        reverse_proxy trakt-oauth:5000
+        root * /var/www/html
+        # Serve the SPA for the OAuth callback (query string is preserved)
+        @traktCallback path /trakt-oauth/callback
+        rewrite @traktCallback /trakt-oauth/index.html
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        header X-Content-Type-Options "nosniff"
+        file_server
+    }
+
+    # MAL token exchange proxy - same-origin passthrough to MyAnimeList.
+    # MAL's OAuth endpoints send no CORS headers, so the static page cannot
+    # fetch myanimelist.net directly from the browser; it POSTs here instead
+    # and Caddy forwards the form body untouched. Nothing is stored.
+    handle /mal-oauth/api/token* {
+        rewrite * /v1/oauth2/token
+        reverse_proxy https://myanimelist.net {
+            header_up Host myanimelist.net
+        }
     }
 
     # Handle /mal-oauth path
-    # Flask app for MyAnimeList OAuth authentication
+    # Static browser-only MyAnimeList OAuth: credentials and tokens are held
+    # only in the user's browser; the token exchange transits the same-origin
+    # proxy above. Register https://yourdomain.com/mal-oauth/callback as the
+    # App Redirect URL in the MAL application.
     handle /mal-oauth* {
-        uri strip_prefix /mal-oauth
-        reverse_proxy mal-oauth:5000
+        root * /var/www/html
+        # Serve the SPA for the OAuth callback (query string is preserved)
+        @malCallback path /mal-oauth/callback
+        rewrite @malCallback /mal-oauth/index.html
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        header X-Content-Type-Options "nosniff"
+        file_server
     }
 
     # Handle /simkl-oauth path
-    # Flask app for SIMKL OAuth authentication
-    # Note: /callback is browser-driven (not called by external servers),
-    # so no special basicauth bypass is needed — the user's browser session
-    # handles auth transparently.
+    # Static browser-only SIMKL OAuth (PIN flow): the browser talks directly to
+    # api.simkl.com, which is CORS-enabled; the token never touches this server.
     handle /simkl-oauth* {
-        uri strip_prefix /simkl-oauth
-        reverse_proxy simkl-oauth:5000
+        root * /var/www/html
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        header X-Content-Type-Options "nosniff"
+        file_server
     }
 
     # Handle /imdb-service path

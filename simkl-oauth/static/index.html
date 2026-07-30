@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Privacy: the SIMKL user token is only ever sent to SIMKL itself
+         (see CSP connect-src). -->
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://api.simkl.com; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <title>SIMKL OAuth - Kometa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /* --- SIMKL brand tokens --- */
+        :root {
+            --simkl-teal:       #1CE8B5;
+            --simkl-teal-dark:  #13B98E;
+            --simkl-teal-glow:  rgba(28, 232, 181, 0.18);
+            --bg-page:          #0d0d1a;
+            --bg-card:          #16161e;
+            --bg-inset:         #0a0a13;
+            --border-subtle:    rgba(255, 255, 255, 0.07);
+            --text-primary:     #f0f0f0;
+            --text-muted:       #888;
+            --text-dim:         #444;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: var(--bg-card);
+            border-radius: 12px;
+            border-top: 3px solid var(--simkl-teal);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+            padding: 40px;
+            max-width: 520px;
+            width: 100%;
+        }
+
+        .simkl-logo { display: block; width: 48px; height: 48px; margin: 0 auto 20px; }
+
+        .header { text-align: center; margin-bottom: 28px; }
+        .header h1 { font-size: 1.75rem; font-weight: 700; color: var(--simkl-teal); margin-bottom: 8px; letter-spacing: -0.2px; }
+        .header p { color: var(--text-muted); font-size: 0.95rem; }
+
+        .status {
+            margin: 18px 0;
+            padding: 12px 15px;
+            border-radius: 6px;
+            text-align: center;
+            display: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .status.info    { background: rgba(100,149,237,.1);  color: #88aee0; border: 1px solid rgba(100,149,237,.25); }
+        .status.success { background: rgba(28,232,181,.08);  color: #5fe3c0; border: 1px solid rgba(28,232,181,.25);  }
+        .status.error   { background: rgba(220,53,69,.12);   color: #f08090; border: 1px solid rgba(220,53,69,.3);   }
+
+        .button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 7px;
+            font-size: 0.95rem;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+            margin: 10px 0;
+        }
+        .button.primary { background: var(--simkl-teal); color: #0a0a13; }
+        .button.primary:hover { background: var(--simkl-teal-dark); transform: translateY(-1px); box-shadow: 0 5px 18px var(--simkl-teal-glow); }
+        .button.primary:disabled { background: #1f1f2a; color: var(--text-dim); cursor: not-allowed; transform: none; box-shadow: none; }
+        .button.secondary { background: rgba(255,255,255,.05); color: var(--text-muted); border: 1px solid var(--border-subtle); }
+        .button.secondary:hover { background: rgba(255,255,255,.09); color: var(--text-primary); }
+
+        .instructions {
+            background: rgba(28, 232, 181, 0.06);
+            border-left: 4px solid var(--simkl-teal);
+            padding: 14px 16px;
+            margin: 20px 0;
+            border-radius: 0 6px 6px 0;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .instructions strong { color: var(--text-primary); }
+        .instructions ol { margin-left: 20px; }
+        .instructions li { margin: 6px 0; color: var(--text-muted); }
+        .instructions a { color: var(--simkl-teal); }
+
+        .pin-display { background: var(--bg-inset); border: 1px solid var(--border-subtle); padding: 24px 20px; border-radius: 10px; margin: 20px 0; text-align: center; display: none; }
+        .pin-code { font-size: 2rem; font-weight: 700; color: var(--simkl-teal); font-family: "Courier New", monospace; margin: 10px 0; letter-spacing: 4px; }
+        .pin-instructions { font-size: 0.88rem; color: var(--text-muted); margin-top: 10px; line-height: 1.6; }
+        .pin-instructions a { color: var(--simkl-teal); text-decoration: underline; }
+
+        .result-section { display: none; margin-top: 20px; }
+        .result-section h3 { color: var(--text-primary); margin-bottom: 10px; font-size: 1rem; font-weight: 700; }
+        .result-section p { color: var(--text-muted); margin-bottom: 10px; font-size: 0.9rem; }
+
+        .config-output {
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            padding: 14px 16px;
+            border-radius: 7px;
+            margin: 10px 0;
+            font-family: "Courier New", monospace;
+            font-size: 0.85rem;
+            color: var(--simkl-teal);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.55;
+        }
+
+        .copy-btn {
+            background: var(--simkl-teal);
+            color: #0a0a13;
+            padding: 10px 22px;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 0.88rem;
+            font-weight: 700;
+            font-family: inherit;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+        .copy-btn:hover { background: var(--simkl-teal-dark); box-shadow: 0 4px 12px var(--simkl-teal-glow); }
+
+        .footer { text-align: center; margin-top: 28px; font-size: 0.82rem; color: var(--text-dim); line-height: 1.8; }
+        .footer a { color: var(--simkl-teal); text-decoration: none; opacity: 0.8; }
+        .footer a:hover { opacity: 1; }
+
+        @media (max-width: 600px) {
+            .container { padding: 26px 16px; }
+            .header h1 { font-size: 1.4rem; }
+            .pin-code { font-size: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- SIMKL logo mark -->
+        <svg class="simkl-logo" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-label="SIMKL">
+            <rect x="0" y="0" width="24" height="24" rx="3.84" ry="3.84" fill="#ffffff"/>
+            <path d="M3.84 0A3.832 3.832 0 0 0 0 3.84v16.32A3.832 3.832 0 0 0 3.84 24h16.32A3.832 3.832 0 0 0 24 20.16V3.84A3.832 3.832 0 0 0 20.16 0zm8.567 4.11c2.074 0 3.538 0.061 4.393 0.186 1.127 0.168 1.94 0.46 2.438 0.877 0.672 0.578 1.009 1.613 1.009 3.104 0 0.161 -0.004 0.417 -0.01 0.768h-4.234c-0.014 -0.358 -0.039 -0.607 -0.074 -0.746 -0.098 -0.41 -0.42 -0.64 -0.966 -0.692 -0.484 -0.043 -1.66 -0.066 -3.53 -0.066 -1.85 0 -2.946 0.056 -3.289 0.165 -0.385 0.133 -0.578 0.474 -0.578 1.024 0 0.528 0.203 0.851 0.61 0.969 0.343 0.095 1.887 0.187 4.633 0.275 2.487 0.073 4.073 0.165 4.76 0.275 0.693 0.11 1.244 0.275 1.654 0.495 0.41 0.22 0.737 0.532 0.983 0.936 0.37 0.595 0.557 1.552 0.557 2.873 0 1.475 -0.182 2.557 -0.546 3.247 -0.364 0.683 -0.96 1.149 -1.785 1.398 -0.812 0.25 -3.05 0.374 -6.71 0.374 -2.226 0 -3.832 -0.062 -4.82 -0.187 -1.204 -0.147 -2.068 -0.434 -2.593 -0.86 -0.567 -0.456 -0.903 -1.1 -1.008 -1.93a10.522 10.522 0 0 1 -0.085 -1.434v-0.789H7.44c-0.007 0.74 0.136 1.216 0.43 1.428 0.154 0.102 0.33 0.167 0.525 0.203 0.196 0.037 0.54 0.063 1.03 0.077a166.2 166.2 0 0 0 2.405 0.022c1.862 -0.007 2.94 -0.018 3.234 -0.033 0.553 -0.044 0.917 -0.12 1.092 -0.23 0.245 -0.161 0.368 -0.52 0.368 -1.077 0 -0.38 -0.078 -0.648 -0.231 -0.802 -0.211 -0.212 -0.712 -0.325 -1.503 -0.34 -0.547 0 -1.688 -0.044 -3.425 -0.132 -1.794 -0.088 -2.956 -0.14 -3.488 -0.154 -1.387 -0.044 -2.364 -0.212 -2.932 -0.505 -0.728 -0.373 -1.205 -1.01 -1.429 -1.91 -0.126 -0.498 -0.189 -1.15 -0.189 -1.956 0 -1.698 0.309 -2.895 0.925 -3.59 0.462 -0.527 1.163 -0.875 2.102 -1.044 0.848 -0.146 2.865 -0.22 6.053 -0.22z" fill="#000000"/>
+        </svg>
+
+        <div class="header">
+            <h1>SIMKL OAuth</h1>
+            <p>Get your SIMKL access token for Kometa</p>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div id="welcomeSection">
+            <div class="instructions">
+                <strong>How it works:</strong>
+                <ol>
+                    <li>Click "Connect with SIMKL"</li>
+                    <li>Click "Open SIMKL Authorization"</li>
+                    <li>Sign in to SIMKL and click <strong>YES</strong> (you'll be prompted twice &mdash; that's normal)</li>
+                    <li>The popup will close and your configuration will appear here</li>
+                </ol>
+            </div>
+            <button class="button primary" onclick="startAuth()" id="startBtn">Connect with SIMKL</button>
+        </div>
+
+        <div id="pinSection" class="pin-display">
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">Authorize Kometa on SIMKL</div>
+            <button class="button primary" onclick="openAuthorizeWindow()" id="authBtn">Open SIMKL Authorization</button>
+            <div style="margin-top: 15px; font-size: 0.85rem; color: var(--text-muted);">
+                After authorizing, close the SIMKL tab and return here for your configuration.
+            </div>
+        </div>
+
+        <div id="resultSection" class="result-section">
+            <h3>Configuration Ready</h3>
+            <p>Copy and paste this into your Kometa <code style="color: var(--simkl-teal); font-size: 0.85em;">config.yml</code>:</p>
+            <div class="config-output" id="configOutput"></div>
+            <button class="copy-btn" onclick="copyConfig()">Copy Configuration</button>
+            <button class="button secondary" onclick="resetApp()" style="margin-top: 15px;">Get Another Token</button>
+        </div>
+
+        <div class="footer">
+            <p>Your token never leaves your browser &mdash; this page talks directly to SIMKL and nothing is sent to this server.</p>
+            <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
+            <p>The SIMKL logo is the sole property of SIMKL or its licensors, and is used here for identification purposes only.  No endorsement of or by SIMKL is implied.</p>
+            <p><a href="/">← Back to Home</a></p>
+        </div>
+    </div>
+
+    <script>
+        'use strict';
+
+        // This page is fully client-side. All SIMKL API calls are made directly
+        // from the browser (api.simkl.com is CORS-enabled) using SIMKL's PIN
+        // (device) flow, which needs only the public client_id — the shared
+        // app's client_secret is never involved. The resulting user token
+        // never touches this server.
+
+        // Public OAuth client identifier for the shared Kometa SIMKL app.
+        // This is an identifier, not a secret; it is already visible in the
+        // authorize URL the legacy site renders to every visitor.
+        const SIMKL_CLIENT_ID = '4143188bcb37d40c45f25e97b90b5868c70f1d2cf5f240b127b65be77d0fb5ca';
+        const SIMKL_API = 'https://api.simkl.com/oauth';
+
+        let pollInterval = null;
+        let expiryTimer = null;
+        let simklAuthUrl = null;
+        let simklPopup = null;
+
+        function showStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+        }
+
+        function hideStatus() {
+            document.getElementById('status').style.display = 'none';
+        }
+
+        function stopPolling() {
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+            if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+        }
+
+        function openAuthorizeWindow() {
+            if (simklAuthUrl) {
+                simklPopup = window.open(simklAuthUrl, 'simkl-auth', 'width=600,height=700,menubar=no,toolbar=no,location=yes');
+            }
+        }
+
+        async function startAuth() {
+            const startBtn = document.getElementById('startBtn');
+            startBtn.disabled = true;
+            showStatus('Requesting a code from SIMKL...', 'info');
+
+            try {
+                const response = await fetch(`${SIMKL_API}/pin?client_id=${SIMKL_CLIENT_ID}`, {
+                    headers: { 'Accept': 'application/json' },
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to get a code (${response.status})`);
+                }
+
+                const data = await response.json();
+                if (!data.user_code) {
+                    throw new Error('Unexpected response from SIMKL');
+                }
+
+                // Build the SIMKL authorize URL with response_type=pin.
+                // This sends the user directly to the OAuth consent screen;
+                // SIMKL handles the PIN confirmation server-side.
+                // redirect_uri must point to /pin/{code} so SIMKL activates the
+                // PIN server-side. Without this the token is never generated.
+                const redirectUri = btoa('/pin/' + data.user_code);
+                simklAuthUrl = 'https://simkl.com/oauth/authorize?response_type=pin&client_id=' + encodeURIComponent(SIMKL_CLIENT_ID) + '&redirect_uri=' + encodeURIComponent(redirectUri);
+
+                document.getElementById('welcomeSection').style.display = 'none';
+                document.getElementById('pinSection').style.display = 'block';
+                hideStatus();
+
+                pollForAuth(data.user_code, Math.max((data.interval || 5), 2) * 1000);
+
+                // Give up when the code expires (default SIMKL TTL: 15 minutes)
+                expiryTimer = setTimeout(() => {
+                    stopPolling();
+                    showStatus('That code expired. Click below to get a new one.', 'error');
+                    document.getElementById('pinSection').style.display = 'none';
+                    document.getElementById('welcomeSection').style.display = 'block';
+                    startBtn.disabled = false;
+                }, (data.expires_in || 900) * 1000);
+            } catch (error) {
+                showStatus('Error: ' + error.message, 'error');
+                startBtn.disabled = false;
+            }
+        }
+
+        function pollForAuth(userCode, intervalMs) {
+            const startBtn = document.getElementById('startBtn');
+            pollInterval = setInterval(async () => {
+                try {
+                    const checkResponse = await fetch(`${SIMKL_API}/pin/check/${userCode}?client_id=${SIMKL_CLIENT_ID}`, {
+                        headers: { 'Accept': 'application/json' },
+                    });
+
+                    if (!checkResponse.ok) return; // transient; try again next tick
+
+                    const checkData = await checkResponse.json();
+
+                    if (checkData.access_token) {
+                        stopPolling();
+                        displayConfig(checkData.access_token);
+                    } else if (checkData.user_code) {
+                        // SIMKL returns a fresh PIN payload when the code
+                        // being checked is unknown or has expired.
+                        stopPolling();
+                        showStatus('That code is no longer valid. Click below to get a new one.', 'error');
+                        document.getElementById('pinSection').style.display = 'none';
+                        document.getElementById('welcomeSection').style.display = 'block';
+                        startBtn.disabled = false;
+                    }
+                    // Otherwise {result: "KO"} — still waiting for the user.
+                } catch (ignored) {
+                    // Network hiccup; keep polling until expiry.
+                }
+            }, intervalMs);
+        }
+
+        function displayConfig(accessToken) {
+            const config = `simkl:
+  user_token: ${accessToken}`;
+
+            document.getElementById('configOutput').textContent = config;
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('welcomeSection').style.display = 'none';
+            document.getElementById('resultSection').style.display = 'block';
+            showStatus('Successfully authenticated!', 'success');
+
+            if (simklPopup && !simklPopup.closed) {
+                simklPopup.close();
+                simklPopup = null;
+            }
+        }
+
+        function copyConfig() {
+            const configText = document.getElementById('configOutput').textContent;
+            navigator.clipboard.writeText(configText).then(() => {
+                showStatus('Configuration copied to clipboard!', 'success');
+                setTimeout(hideStatus, 3000);
+            }).catch(() => {
+                showStatus('Error copying configuration', 'error');
+            });
+        }
+
+        function resetApp() {
+            stopPolling();
+            document.getElementById('welcomeSection').style.display = 'block';
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('resultSection').style.display = 'none';
+            document.getElementById('startBtn').disabled = false;
+            hideStatus();
+        }
+    </script>
+</body>
+</html>

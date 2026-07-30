@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Privacy: never leak the OAuth code via Referer; the token exchange is
+         a same-origin POST to /mal-oauth/api/token, which Caddy forwards to
+         myanimelist.net (MAL sends no CORS headers, so a direct browser fetch
+         would be blocked). Nothing is stored server-side. -->
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <title>MyAnimeList OAuth - Kometa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /* --- MyAnimeList brand tokens --- */
+        :root {
+            --mal-blue:         #2e51a2;
+            --mal-blue-dark:    #1f3a7d;
+            --mal-blue-glow:    rgba(46, 81, 162, 0.25);
+            --bg-page:          #141414;
+            --bg-card:          #1c1c1c;
+            --bg-inset:         #111111;
+            --border-subtle:    rgba(255, 255, 255, 0.08);
+            --text-primary:     #f0f0f0;
+            --text-muted:       #999;
+            --text-dim:         #555;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: var(--bg-card);
+            border-radius: 12px;
+            border-top: 3px solid var(--mal-blue);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+            padding: 40px;
+            max-width: 560px;
+            width: 100%;
+        }
+
+        .mal-logo { display: block; width: 48px; height: 48px; margin: 0 auto 20px; border-radius: 8px; }
+
+        .header { text-align: center; margin-bottom: 28px; }
+        .header h1 { font-size: 1.75rem; font-weight: 700; color: #7ea0e8; margin-bottom: 8px; letter-spacing: -0.2px; }
+        .header p { color: var(--text-muted); font-size: 0.95rem; }
+
+        .status {
+            margin: 18px 0;
+            padding: 12px 15px;
+            border-radius: 6px;
+            text-align: center;
+            display: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .status.info    { background: rgba(100,149,237,.1);  color: #88aee0; border: 1px solid rgba(100,149,237,.25); }
+        .status.success { background: rgba(46,81,162,.12);   color: #8fabdf; border: 1px solid rgba(46,81,162,.35);  }
+        .status.error   { background: rgba(237,28,36,.12);   color: #f07880; border: 1px solid rgba(237,28,36,.3);   }
+
+        .form-group { margin-bottom: 18px; }
+        .form-group label {
+            display: block;
+            margin-bottom: 7px;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 11px 14px;
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-family: inherit;
+            color: var(--text-primary);
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .form-group input::placeholder { color: var(--text-dim); }
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--mal-blue);
+            box-shadow: 0 0 0 3px var(--mal-blue-glow);
+        }
+        .form-group input[readonly] { color: var(--text-muted); cursor: default; }
+
+        .button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 7px;
+            font-size: 0.95rem;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+            margin: 10px 0;
+        }
+        .button.primary { background: var(--mal-blue); color: #fff; }
+        .button.primary:hover { background: var(--mal-blue-dark); transform: translateY(-1px); box-shadow: 0 5px 15px var(--mal-blue-glow); }
+        .button.primary:disabled { background: #2a2a2a; color: var(--text-dim); cursor: not-allowed; transform: none; box-shadow: none; }
+        .button.secondary { background: rgba(255,255,255,.05); color: var(--text-muted); border: 1px solid var(--border-subtle); }
+        .button.secondary:hover { background: rgba(255,255,255,.09); color: var(--text-primary); }
+
+        .instructions {
+            background: rgba(46, 81, 162, 0.09);
+            border-left: 4px solid var(--mal-blue);
+            padding: 14px 16px;
+            margin: 20px 0;
+            border-radius: 0 6px 6px 0;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .instructions strong { color: var(--text-primary); }
+        .instructions ol { margin-left: 20px; }
+        .instructions li { margin: 6px 0; color: var(--text-muted); }
+        .instructions a { color: #8fabdf; }
+
+        .result-section { display: none; margin-top: 20px; }
+        .result-section h3 { color: var(--text-primary); margin-bottom: 10px; font-size: 1rem; font-weight: 700; }
+        .result-section p { color: var(--text-muted); margin-bottom: 10px; font-size: 0.9rem; }
+
+        .config-output {
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            padding: 14px 16px;
+            border-radius: 7px;
+            margin: 10px 0;
+            font-family: "Courier New", monospace;
+            font-size: 0.82rem;
+            color: #8fabdf;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.55;
+        }
+
+        .copy-btn {
+            background: var(--mal-blue);
+            color: #fff;
+            padding: 10px 22px;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 0.88rem;
+            font-weight: 700;
+            font-family: inherit;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+        .copy-btn:hover { background: var(--mal-blue-dark); box-shadow: 0 4px 12px var(--mal-blue-glow); }
+
+        .footer { text-align: center; margin-top: 28px; font-size: 0.82rem; color: var(--text-dim); line-height: 1.8; }
+        .footer a { color: #8fabdf; text-decoration: none; opacity: 0.8; }
+        .footer a:hover { opacity: 1; }
+
+        @media (max-width: 600px) {
+            .container { padding: 26px 16px; }
+            .header h1 { font-size: 1.4rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- MyAnimeList logo mark: blue square + white MAL letters -->
+        <svg class="mal-logo" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-label="MyAnimeList">
+            <rect x="0" y="0" width="1024" height="1024" fill="#2e51a2"/>
+            <path d="M432.49 410.61V590.3l-44.86-.06V479l-43.31 51.29-42.43-52.44-.43 112.75H256V410.65h47l39.79 54.29 43-54.31zm184.06 44.14.53 135.15h-50.45l-.17-61.25h-59.73c1.49 10.65 4.48 27 8.9 38 3.31 8.13 6.36 16 12.44 24.06l-36.37 24c-7.45-13.57-13.27-28.52-18.73-44.42a198.31 198.31 0 0 1-10.82-46.49c-1.81-16-2.07-31.38 2.28-47.19a83.37 83.37 0 0 1 24.77-39.81c6.68-6.25 16-10.67 23.47-14.66s15.85-5.63 23.62-7.66a158 158 0 0 1 25.41-3.9c8.49-.73 23.62-1.41 51-.6l11.63 37.31h-58.78c-12.65.17-18.73 0-28.61 4.46a47.7 47.7 0 0 0-27.26 41l56.81.7.81-38.61h49.26zM701.72 410v141.35L768 552l-9.17 37.87H656.28V409.33z" fill="#ffffff"/>
+        </svg>
+
+        <div class="header">
+            <h1>MyAnimeList OAuth</h1>
+            <p>Get your MAL access token for Kometa</p>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div id="authForm">
+            <div class="instructions">
+                <strong>To connect to MyAnimeList you must create a MAL application:</strong>
+                <ol>
+                    <li><a href="https://myanimelist.net/apiconfig" target="_blank" rel="noopener noreferrer">Click here to create a MyAnimeList API application.</a></li>
+                    <li>Enter an <code>Application Name</code> and fill in the required fields.</li>
+                    <li>Enter <code id="redirectUriHint"></code> for <code>App Redirect URL</code>.</li>
+                    <li>Submit the form and record the <code>Client ID</code> and <code>Client Secret</code>; you only need go through this process once.</li>
+                </ol>
+                <strong>Now, to authenticate to MyAnimeList:</strong>
+                <ol>
+                    <li>Enter the <code>Client ID</code> and <code>Client Secret</code> into the fields below.</li>
+                    <li>Click the <code>Continue to MyAnimeList</code> button.</li>
+                </ol>
+
+            </div>
+
+            <div class="form-group">
+                <label for="redirectUri">App Redirect URL registered with MyAnimeList</label>
+                <input type="text" id="redirectUri" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="clientId">MyAnimeList Client ID</label>
+                <input type="text" id="clientId" placeholder="Enter your Client ID" required>
+            </div>
+
+            <div class="form-group">
+                <label for="clientSecret">MyAnimeList Client Secret</label>
+                <input type="password" id="clientSecret" placeholder="Enter your Client Secret" required>
+            </div>
+
+            <button class="button primary" onclick="startAuthorization()" id="startBtn">Continue to MyAnimeList</button>
+        </div>
+
+        <div id="resultSection" class="result-section">
+            <h3>Configuration Ready</h3>
+            <p>Copy and paste this into your Kometa <code style="color: #8fabdf; font-size: 0.85em;">config.yml</code>:</p>
+            <div class="config-output" id="configOutput"></div>
+            <button class="copy-btn" onclick="copyConfig()">Copy Configuration</button>
+            <button class="button secondary" onclick="resetForm()" style="margin-top: 15px;">Get Another Token</button>
+        </div>
+
+        <div class="footer">
+            <p>Your credentials and tokens are held only in your browser; the token exchange is forwarded through this server without being stored.</p>
+            <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
+            <p>The MyAnimeList logo is the sole property of MyAnimeList or its licensors, and is used here for identification purposes only.  No endorsement of or by MyAnimeList is implied.</p>
+            <p><a href="/">← Back to Home</a></p>
+        </div>
+    </div>
+
+    <script>
+        'use strict';
+
+        // This page is fully client-side. The Client ID/Secret, authorization
+        // code, and resulting tokens are held only in browser memory (with a
+        // brief, single-use stay in sessionStorage across the MAL redirect).
+        //
+        // MAL's OAuth endpoints send no CORS headers, so the token exchange
+        // cannot be fetched cross-origin. Instead the page POSTs to the
+        // same-origin path /mal-oauth/api/token, which Caddy forwards to
+        // https://myanimelist.net/v1/oauth2/token (see Caddyfile).
+
+        const MAL_AUTHORIZE_URL = 'https://myanimelist.net/v1/oauth2/authorize';
+        const PENDING_KEY = 'mal_oauth_pending';
+        const AUTHORIZATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+        // Detect if we're running behind a proxy with a subdirectory
+        const basePath = window.location.pathname.startsWith('/mal-oauth') ? '/mal-oauth' : '';
+        // Must exactly match the App Redirect URL registered in the user's MAL app.
+        const redirectUri = window.location.origin + basePath + '/callback';
+        // Same-origin token endpoint; Caddy proxies this to MAL.
+        const tokenUrl = window.location.origin + basePath + '/api/token';
+
+        function showStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+        }
+
+        function hideStatus() {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'none';
+        }
+
+        function randomString(length) {
+            // RFC 7636 unreserved characters; MAL accepts these verbatim.
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+            const bytes = new Uint8Array(length);
+            crypto.getRandomValues(bytes);
+            return Array.from(bytes, b => chars[b % chars.length]).join('');
+        }
+
+        function loadPendingAuthorization() {
+            try {
+                return JSON.parse(sessionStorage.getItem(PENDING_KEY));
+            } catch (ignored) {
+                return null;
+            }
+        }
+
+        function clearPendingAuthorization() {
+            sessionStorage.removeItem(PENDING_KEY);
+        }
+
+        function startAuthorization() {
+            const clientId = document.getElementById('clientId').value.trim();
+            const clientSecret = document.getElementById('clientSecret').value.trim();
+
+            if (!clientId || !clientSecret) {
+                showStatus('Please enter your Client ID and Client Secret', 'error');
+                return;
+            }
+
+            // Hold the credentials, PKCE verifier, and anti-CSRF state in
+            // sessionStorage so they survive the round trip to MAL in this
+            // tab, but nowhere else.
+            const pending = {
+                client_id: clientId,
+                client_secret: clientSecret,
+                state: randomString(32),
+                code_verifier: randomString(64),
+                created_at: Date.now(),
+            };
+            sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+
+            const params = new URLSearchParams({
+                response_type: 'code',
+                client_id: clientId,
+                redirect_uri: redirectUri,
+                state: pending.state,
+                // MAL only supports PKCE "plain": challenge === verifier
+                code_challenge: pending.code_verifier,
+                code_challenge_method: 'plain',
+            });
+            window.location.assign(`${MAL_AUTHORIZE_URL}?${params}`);
+        }
+
+        async function handleCallback(code, state, malError) {
+            // Consume the pending authorization immediately: single-use, and it
+            // must never linger in storage once we're back from MAL.
+            const pending = loadPendingAuthorization();
+            clearPendingAuthorization();
+
+            if (!state) {
+                showStatus('Missing authorization state.', 'error');
+                return;
+            }
+            if (!pending || pending.state !== state || Date.now() - pending.created_at > AUTHORIZATION_TTL_MS) {
+                showStatus('This authorization request is invalid, expired, or already used.', 'error');
+                return;
+            }
+            if (malError) {
+                showStatus(`MyAnimeList authorization failed: ${malError}`, 'error');
+                return;
+            }
+            if (!code) {
+                showStatus('MyAnimeList did not return an authorization code.', 'error');
+                return;
+            }
+
+            showStatus('Exchanging authorization code for tokens...', 'info');
+
+            let response, data;
+            try {
+                response = await fetch(tokenUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: pending.client_id,
+                        client_secret: pending.client_secret,
+                        grant_type: 'authorization_code',
+                        code: code,
+                        redirect_uri: redirectUri,
+                        code_verifier: pending.code_verifier,
+                    }),
+                });
+                data = await response.json();
+            } catch (ignored) {
+                showStatus('Token exchange failed. Check your connection and try again.', 'error');
+                return;
+            }
+
+            if (!response.ok) {
+                const detail = data && (data.message || data.error_description || data.error);
+                showStatus(`Token exchange failed${detail ? `: ${detail}` : '. Verify the client credentials and App Redirect URL.'}`, 'error');
+                return;
+            }
+
+            displayConfig(pending.client_id, pending.client_secret, data);
+        }
+
+        function displayConfig(clientId, clientSecret, tokenData) {
+            const config = `mal:
+  client_id: ${clientId}
+  client_secret: ${clientSecret}
+  authorization:
+    access_token: ${tokenData.access_token}
+    token_type: ${tokenData.token_type}
+    expires_in: ${tokenData.expires_in}
+    refresh_token: ${tokenData.refresh_token}
+  localhost_url: ${redirectUri}
+  cache_expiration: 60`;
+
+            document.getElementById('configOutput').textContent = config;
+            document.getElementById('authForm').style.display = 'none';
+            document.getElementById('resultSection').style.display = 'block';
+            hideStatus();
+        }
+
+        function copyConfig() {
+            const configText = document.getElementById('configOutput').textContent;
+            navigator.clipboard.writeText(configText).then(() => {
+                showStatus('Configuration copied to clipboard!', 'success');
+                setTimeout(hideStatus, 3000);
+            }).catch(() => {
+                showStatus('Error copying configuration', 'error');
+            });
+        }
+
+        function resetForm() {
+            document.getElementById('clientId').value = '';
+            document.getElementById('clientSecret').value = '';
+            document.getElementById('authForm').style.display = 'block';
+            document.getElementById('resultSection').style.display = 'none';
+            document.getElementById('startBtn').disabled = false;
+            window.history.replaceState({}, '', `${basePath}/`);
+            hideStatus();
+        }
+
+        // --- Page load ---
+        document.getElementById('redirectUri').value = redirectUri;
+        document.getElementById('redirectUriHint').textContent = redirectUri;
+
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const state = params.get('state');
+        const malError = params.get('error');
+
+        if (code || state || malError) {
+            // Scrub the authorization code from the address bar and history
+            // before doing anything else; values are already in memory.
+            window.history.replaceState({}, '', `${basePath}/callback`);
+            handleCallback(code, state, malError);
+        } else {
+            // Stale pending authorizations serve no purpose on a fresh visit.
+            clearPendingAuthorization();
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Privacy: the Plex auth token is only ever sent to Plex itself
+         (see CSP connect-src). -->
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://plex.tv; img-src 'self' data: https:; base-uri 'none'; form-action 'none'">
+    <title>Plex OAuth - Kometa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --plex-orange: #E5A00D;
+            --plex-orange-dark: #C98B00;
+            --plex-orange-glow: rgba(229, 160, 13, 0.25);
+            --bg-page: #141414;
+            --bg-card: #1f1f1f;
+            --bg-inset: #161616;
+            --border: rgba(255, 255, 255, 0.07);
+            --text: #f0f0f0;
+            --muted: #999;
+            --dim: #777;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg-page);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: var(--bg-card);
+            border-radius: 14px;
+            border-top: 3px solid var(--plex-orange);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+            padding: 40px;
+            max-width: 520px;
+            width: 100%;
+        }
+        .plex-logo { display: block; width: 48px; height: 48px; margin: 0 auto 18px; }
+        .header { text-align: center; margin-bottom: 28px; }
+        .header h1 { font-size: 1.8rem; font-weight: 800; color: var(--plex-orange); margin-bottom: 8px; letter-spacing: -0.3px; }
+        .header p { color: var(--muted); font-size: 0.95rem; }
+        .status { margin: 18px 0; padding: 12px 15px; border-radius: 6px; text-align: center; display: none; font-size: 0.92rem; font-weight: 600; }
+        .status.info    { background: rgba(100,140,200,.12); color: #88aee0; border: 1px solid rgba(100,140,200,.25); }
+        .status.success { background: rgba(40,180,100,.12);  color: #5dbb88; border: 1px solid rgba(40,180,100,.25);  }
+        .status.error   { background: rgba(220,53,69,.12);   color: #f08090; border: 1px solid rgba(220,53,69,.25);   }
+        .button {
+            width: 100%;
+            padding: 13px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.97rem;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+            margin: 10px 0;
+        }
+        .button.primary { background: var(--plex-orange); color: #111; }
+        .button.primary:hover { background: var(--plex-orange-dark); transform: translateY(-1px); box-shadow: 0 5px 15px var(--plex-orange-glow); }
+        .button.primary:disabled { background: #3a3a3a; color: #666; cursor: not-allowed; transform: none; box-shadow: none; }
+        .button.secondary { background: rgba(255,255,255,.05); color: var(--muted); border: 1px solid var(--border); }
+        .button.secondary:hover { background: rgba(255,255,255,.09); color: var(--text); }
+        .pin-display { background: var(--bg-inset); border: 1px solid var(--border); padding: 24px 20px; border-radius: 10px; margin: 20px 0; text-align: center; display: none; }
+        .pin-code { font-size: 1rem; font-weight: 800; color: var(--plex-orange); font-family: "Courier New", monospace; margin: 10px 0; letter-spacing: 4px; }
+        .pin-instructions { font-size: 0.88rem; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+        .token-section { display: none; margin-top: 20px; }
+        .token-display {
+            background: var(--bg-inset);
+            border: 1.5px solid var(--plex-orange);
+            padding: 15px 18px;
+            border-radius: 8px;
+            margin: 10px 0;
+            word-break: break-all;
+            font-family: "Courier New", monospace;
+            font-size: 0.82rem;
+            color: var(--plex-orange);
+            line-height: 1.5;
+        }
+        .copy-btn {
+            background: var(--plex-orange);
+            color: #111;
+            padding: 10px 22px;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 700;
+            font-family: inherit;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+        .copy-btn:hover { background: var(--plex-orange-dark); box-shadow: 0 4px 12px var(--plex-orange-glow); }
+        .loading { display: inline-block; width: 18px; height: 18px; border: 3px solid rgba(255,255,255,.2); border-radius: 50%; border-top-color: rgba(255,255,255,.8); animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .instructions { background: rgba(229,160,13,.07); border-left: 4px solid var(--plex-orange); padding: 14px 16px; margin: 20px 0; border-radius: 0 6px 6px 0; font-size: 0.9rem; line-height: 1.55; }
+        .instructions ol { margin-left: 20px; }
+        .instructions li { margin: 7px 0; }
+        .account-panel { margin-top: 22px; padding: 18px; background: rgba(255,255,255,.04); border: 1px solid var(--border); border-radius: 10px; }
+        .account-panel h3 { margin-bottom: 14px; color: var(--muted); font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; }
+        .account-grid { display: grid; gap: 10px; }
+        .account-row { font-size: 0.92rem; }
+        .account-row strong { color: var(--plex-orange); }
+        .admin-badge { background: rgba(220,53,69,.85); color: #fff; padding: 1px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; margin-left: 8px; display: none; }
+        .footer { text-align: center; margin-top: 28px; font-size: 0.82rem; color: var(--dim); line-height: 1.7; }
+        .footer a { color: var(--plex-orange); text-decoration: none; opacity: 0.8; }
+        .footer a:hover { opacity: 1; }
+        @media (max-width: 600px) {
+            .container { padding: 26px 16px; }
+            .header h1 { font-size: 1.45rem; }
+            .pin-code { font-size: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Plex logo mark -->
+        <svg class="plex-logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Plex">
+            <rect width="48" height="48" rx="10" fill="#E5A00D"/>
+            <path d="M19 12 L37 24 L19 36 Z" fill="#141414"/>
+        </svg>
+
+        <div class="header">
+            <h1>Plex OAuth</h1>
+            <p>Get your Plex access token for Kometa</p>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div id="welcomeSection">
+            <div class="instructions">
+                <strong>How it works:</strong>
+                <ol>
+                    <li>Click "Start Authentication"</li>
+                    <li>A PIN code will appear</li>
+                    <li>Visit the Plex website link provided</li>
+                    <li>Sign in and authorize</li>
+                    <li>Your access token will be displayed</li>
+                </ol>
+            </div>
+            <button class="button primary" onclick="startAuth()" id="startBtn">Start Authentication</button>
+        </div>
+
+        <div id="pinSection" class="pin-display">
+            <div style="font-size: 0.85rem; color: var(--muted); margin-bottom: 8px;">Your PIN Code</div>
+            <div class="pin-code" id="pinCode">-</div>
+            <div class="pin-instructions">
+                Open this link in your browser:<br>
+                <a id="authLink" href="#" target="_blank" rel="noopener noreferrer" style="color: var(--plex-orange); text-decoration: underline;">Authenticate with Plex</a>
+            </div>
+            <div style="margin-top: 15px; font-size: 0.85rem; color: var(--muted);">
+                Waiting for authorization…
+            </div>
+        </div>
+
+        <div id="tokenSection" class="token-section">
+            <div style="font-size: 0.85rem; color: var(--muted); margin-bottom: 8px;">Your Plex Access Token</div>
+            <div class="token-display" id="tokenDisplay">-</div>
+            <button class="copy-btn" onclick="copyToken()">Copy Token</button>
+
+            <div class="account-panel">
+                <h3>Account Information</h3>
+                <div style="display: flex; align-items: center; margin-bottom: 14px;">
+                    <img id="avatarDisplay" src="" alt="Avatar" style="width: 52px; height: 52px; border-radius: 50%; margin-right: 14px; display: none; border: 2px solid var(--plex-orange);">
+                </div>
+                <div class="account-grid">
+                    <div class="account-row">
+                        <strong>Username:</strong> <span id="username">-</span>
+                        <span id="adminBadge" class="admin-badge">ADMIN</span>
+                    </div>
+                    <div class="account-row">
+                        <strong>Display Name:</strong> <span id="title">-</span>
+                    </div>
+                    <div class="account-row">
+                        <strong>Email:</strong> <span id="email">-</span>
+                    </div>
+                    <div class="account-row">
+                        <strong>User ID:</strong> <span id="userId" style="font-family: monospace;">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <button class="button secondary" onclick="resetApp()" style="margin-top: 18px;">Get Another Token</button>
+        </div>
+
+        <div class="footer">
+            <p>Your token never leaves your browser &mdash; this page talks directly to Plex and nothing is sent to this server.</p>
+            <p>This token is for use with Kometa and Plex-based applications</p>
+            <p>Never share your token with anyone you don't trust</p>
+            <p>The Plex logo is the sole property of Plex, inc. or its licensors, and is used here for identification purposes only.  No endorsement of or by Plex is implied.</p>
+            <p><a href="/">← Back to Home</a></p>
+        </div>
+    </div>
+
+    <script>
+        'use strict';
+
+        // This page is fully client-side. All Plex API calls are made directly
+        // from the browser (plex.tv is CORS-enabled), so requests originate
+        // from the user's IP, avoiding Plex's server-IP warning, and the
+        // resulting token never touches this server.
+
+        const PLEX_CLIENT_ID = 'com.kometa.plex-oauth';
+        const PLEX_API = 'https://plex.tv/api/v2';
+        const PLEX_HEADERS = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+            'X-Plex-Product': 'Kometa',
+            'X-Plex-Version': '1.0.0',
+            'X-Plex-Device': 'Kometa-Utilities',
+            'X-Plex-Platform': 'Web',
+        };
+
+        let currentPinId = null;
+        let pollInterval = null;
+
+        function showStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+        }
+
+        function hideStatus() {
+            document.getElementById('status').style.display = 'none';
+        }
+
+        async function startAuth() {
+            const startBtn = document.getElementById('startBtn');
+            startBtn.disabled = true;
+            showStatus('Getting PIN from Plex...', 'info');
+
+            try {
+                // Request a PIN directly from plex.tv (browser → plex.tv, user's IP)
+                const response = await fetch(`${PLEX_API}/pins`, {
+                    method: 'POST',
+                    headers: PLEX_HEADERS,
+                    body: JSON.stringify({ strong: true, label: 'Kometa Utilities' }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to get PIN (${response.status})`);
+                }
+
+                const data = await response.json();
+                currentPinId = data.id;
+
+                const authUrl = `https://app.plex.tv/auth#?clientID=${PLEX_CLIENT_ID}&code=${data.code}`;
+                document.getElementById('pinCode').textContent = data.code;
+                document.getElementById('authLink').href = authUrl;
+
+                document.getElementById('welcomeSection').style.display = 'none';
+                document.getElementById('pinSection').style.display = 'block';
+                hideStatus();
+
+                pollForAuth();
+            } catch (error) {
+                showStatus('Error: ' + error.message, 'error');
+                startBtn.disabled = false;
+            }
+        }
+
+        function pollForAuth() {
+            pollInterval = setInterval(async () => {
+                try {
+                    // Check PIN status directly from plex.tv (browser → plex.tv)
+                    const pinResponse = await fetch(`${PLEX_API}/pins/${currentPinId}`, {
+                        headers: PLEX_HEADERS,
+                    });
+
+                    if (!pinResponse.ok) throw new Error(`PIN check failed (${pinResponse.status})`);
+
+                    const pinData = await pinResponse.json();
+
+                    if (pinData.authToken) {
+                        clearInterval(pollInterval);
+
+                        // Fetch user info directly from plex.tv (browser → plex.tv)
+                        const userResponse = await fetch(`${PLEX_API}/user`, {
+                            headers: { ...PLEX_HEADERS, 'X-Plex-Token': pinData.authToken },
+                        });
+
+                        if (!userResponse.ok) throw new Error(`User info fetch failed (${userResponse.status})`);
+
+                        const user = await userResponse.json();
+                        showToken(
+                            pinData.authToken,
+                            user.username || 'Unknown',
+                            user.id || 'Unknown',
+                            user.email || 'Unknown',
+                            user.thumb || null,
+                            user.admin || false,
+                            user.title || user.username || 'Unknown',
+                        );
+                    }
+                } catch (error) {
+                    console.error('Poll error:', error);
+                }
+            }, 2000);
+        }
+
+        function showToken(token, username, userId, email, avatar, admin, title) {
+            document.getElementById('tokenDisplay').textContent = token;
+            document.getElementById('username').textContent = username;
+            document.getElementById('userId').textContent = userId;
+            document.getElementById('email').textContent = email;
+            document.getElementById('title').textContent = title;
+
+            document.getElementById('adminBadge').style.display = admin ? 'inline-block' : 'none';
+
+            const avatarDisplay = document.getElementById('avatarDisplay');
+            if (avatar) {
+                // Never show a broken-image icon; a failed avatar just hides.
+                avatarDisplay.onerror = () => { avatarDisplay.style.display = 'none'; };
+                avatarDisplay.src = avatar;
+                avatarDisplay.style.display = 'block';
+            } else {
+                avatarDisplay.style.display = 'none';
+            }
+
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('tokenSection').style.display = 'block';
+            showStatus('✓ Successfully authenticated!', 'success');
+        }
+
+        function copyToken() {
+            const tokenText = document.getElementById('tokenDisplay').textContent;
+            navigator.clipboard.writeText(tokenText).then(() => {
+                showStatus('✓ Token copied to clipboard!', 'success');
+                setTimeout(hideStatus, 3000);
+            }).catch(() => {
+                showStatus('Error copying token', 'error');
+            });
+        }
+
+        function resetApp() {
+            currentPinId = null;
+            if (pollInterval) clearInterval(pollInterval);
+
+            document.getElementById('welcomeSection').style.display = 'block';
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('tokenSection').style.display = 'none';
+            document.getElementById('startBtn').disabled = false;
+            hideStatus();
+        }
+    </script>
+</body>
+</html>

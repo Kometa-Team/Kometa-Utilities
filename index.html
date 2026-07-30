@@ -116,12 +116,84 @@
             padding-top: 20px;
             border-top: 1px solid #ecf0f1;
         }
+        .footer .privacy-btn {
+            background: none;
+            border: none;
+            color: #667eea;
+            font-size: 0.9rem;
+            font-family: inherit;
+            cursor: pointer;
+            text-decoration: underline;
+            padding: 0;
+        }
+        .footer .privacy-btn:hover {
+            color: #764ba2;
+        }
+
+        /* --- Privacy modal --- */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.55);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .modal-overlay.open {
+            display: flex;
+        }
+        .modal-box {
+            background: white;
+            border-radius: 16px;
+            max-width: 640px;
+            width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+            padding: 36px 32px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+            position: relative;
+        }
+        .modal-box h2 {
+            color: #2c3e50;
+            font-size: 1.6rem;
+            margin-bottom: 20px;
+            padding-right: 40px;
+        }
+        .modal-box h3 {
+            color: #2c3e50;
+            font-size: 1.1rem;
+            margin: 20px 0 8px;
+        }
+        .modal-box p {
+            color: #555;
+            font-size: 0.95rem;
+            line-height: 1.65;
+            margin-bottom: 12px;
+        }
+        .modal-close {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            background: none;
+            border: none;
+            font-size: 1.6rem;
+            color: #999;
+            cursor: pointer;
+            line-height: 1;
+        }
+        .modal-close:hover {
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Kometa Services</h1>
         <p class="subtitle">Authentication &amp; Metadata Services</p>
+
+        <p style="text-align:center;margin-bottom:32px;"><button class="privacy-btn" onclick="openPrivacyModal()">Notes on Privacy</button></p>
 
         <div class="services">
             <a href="/plex-oauth" class="service-card">
@@ -249,10 +321,47 @@
         </div>
 
         <div class="footer">
-            <p>All marks are the sole property of their owners, and are used here for identification purposes only. No endorsement of or by these entities is implied.</p>
+            <p>All marks are the sole property of their owners, and are used here for identification purposes only.<br>No endorsement of or by these entities is implied.</p>
 
-            <p>Kometa Utilities • <a href="https://kometa.wiki" style="color: #667eea;">kometa.wiki</a> • <a href="https://github.com/Kometa-Team/Kometa-Utilities" style="color: #667eea;">GitHub</a></p>
+            <p>Kometa Utilities • <a href="https://kometa.wiki" style="color: #667eea;">kometa.wiki</a> • <a href="https://github.com/Kometa-Team/Kometa-Utilities" style="color: #667eea;">GitHub</a> • <a href="https://discord.com/invite/kometa-822460010649878528" style="color: #667eea;">Discord</a></p>
         </div>
     </div>
+
+    <!-- Privacy modal -->
+    <div class="modal-overlay" id="privacyModal" onclick="if(event.target===this)closePrivacyModal()">
+        <div class="modal-box">
+            <button class="modal-close" onclick="closePrivacyModal()">&times;</button>
+            <h2>Notes on Privacy</h2>
+
+            <h3>OAuth Token Pages</h3>
+            <p>Plex, Trakt, MyAnimeList, and SIMKL OAuth pages are fully client-side. Your tokens are exchanged directly between your browser and the respective service&rsquo;s API. <strong>No token data is sent to or stored on this server.</strong></p>
+
+            <h3>Metadata Services</h3>
+            <p>AniDB, SIMKL, and IMDB services cache metadata on this server to improve performance. No personal data is collected or stored. Only publicly available metadata is cached.</p>
+
+            <h3>Analytics</h3>
+            <p>This site uses <a href="https://plausible.io" target="_blank" rel="noopener noreferrer">Plausible Analytics</a>, a privacy-friendly, self-hosted analytics service. It collects anonymous, aggregated data only &mdash; no cookies, no personal data, no fingerprinting.</p>
+
+			<h3>Source Code</h3>
+			<p>The source code for this project is available on <a href="https://github.com/Kometa-Team/Kometa-Utilities">Github</a> for review or self-hosting.  Doing so may require you to create additional applications to take the place of the official Kometa apps.</p>
+			
+            <h3>Contact</h3>
+            <p>Questions? Open an issue on <a href="https://github.com/Kometa-Team/Kometa-Utilities" target="_blank" rel="noopener noreferrer">GitHub</a> or discuss it on <a href="https://discord.com/invite/kometa-822460010649878528">Discord</a>.</p>
+        </div>
+    </div>
+
+    <script>
+        function openPrivacyModal() {
+            document.getElementById('privacyModal').classList.add('open');
+            document.body.style.overflow = 'hidden';
+        }
+        function closePrivacyModal() {
+            document.getElementById('privacyModal').classList.remove('open');
+            document.body.style.overflow = '';
+        }
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closePrivacyModal();
+        });
+    </script>
 </body>
 </html>

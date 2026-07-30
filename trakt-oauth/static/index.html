@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Privacy: never leak the OAuth code via Referer; tokens are only ever
+         sent to Trakt itself (see CSP connect-src). -->
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://api.trakt.tv https://trakt.tv; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <title>Trakt OAuth - Kometa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /* --- Trakt brand tokens --- */
+        :root {
+            --trakt-red:        #ED1C24;
+            --trakt-red-dark:   #B5090D;
+            --trakt-red-glow:   rgba(237, 28, 36, 0.22);
+            --bg-page:          #141414;
+            --bg-card:          #1c1c1c;
+            --bg-inset:         #111111;
+            --border-subtle:    rgba(255, 255, 255, 0.08);
+            --text-primary:     #f0f0f0;
+            --text-muted:       #999;
+            --text-dim:         #555;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: var(--bg-card);
+            border-radius: 12px;
+            border-top: 3px solid var(--trakt-red);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+            padding: 40px;
+            max-width: 560px;
+            width: 100%;
+        }
+
+        .trakt-logo { display: block; width: 48px; height: 48px; margin: 0 auto 20px; }
+
+        .header { text-align: center; margin-bottom: 28px; }
+        .header h1 { font-size: 1.75rem; font-weight: 700; color: var(--trakt-red); margin-bottom: 8px; letter-spacing: -0.2px; }
+        .header p { color: var(--text-muted); font-size: 0.95rem; }
+
+        .status {
+            margin: 18px 0;
+            padding: 12px 15px;
+            border-radius: 6px;
+            text-align: center;
+            display: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .status.info    { background: rgba(100,149,237,.1);  color: #88aee0; border: 1px solid rgba(100,149,237,.25); }
+        .status.success { background: rgba(237,28,36,.08);   color: #f07880; border: 1px solid rgba(237,28,36,.25);  }
+        .status.error   { background: rgba(237,28,36,.12);   color: #f07880; border: 1px solid rgba(237,28,36,.3);   }
+
+        .form-group { margin-bottom: 18px; }
+        .form-group label {
+            display: block;
+            margin-bottom: 7px;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 11px 14px;
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-family: inherit;
+            color: var(--text-primary);
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .form-group input::placeholder { color: var(--text-dim); }
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--trakt-red);
+            box-shadow: 0 0 0 3px var(--trakt-red-glow);
+        }
+        .form-group input[readonly] { color: var(--text-muted); cursor: default; }
+
+        .button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 7px;
+            font-size: 0.95rem;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+            margin: 10px 0;
+        }
+        .button.primary { background: var(--trakt-red); color: #fff; }
+        .button.primary:hover { background: var(--trakt-red-dark); transform: translateY(-1px); box-shadow: 0 5px 15px var(--trakt-red-glow); }
+        .button.primary:disabled { background: #2a2a2a; color: var(--text-dim); cursor: not-allowed; transform: none; box-shadow: none; }
+        .button.secondary { background: rgba(255,255,255,.05); color: var(--text-muted); border: 1px solid var(--border-subtle); }
+        .button.secondary:hover { background: rgba(255,255,255,.09); color: var(--text-primary); }
+
+        .instructions {
+            background: rgba(237, 28, 36, 0.07);
+            border-left: 4px solid var(--trakt-red);
+            padding: 14px 16px;
+            margin: 20px 0;
+            border-radius: 0 6px 6px 0;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .instructions strong { color: var(--text-primary); }
+        .instructions ol { margin-left: 20px; }
+        .instructions li { margin: 6px 0; color: var(--text-muted); }
+
+        .result-section { display: none; margin-top: 20px; }
+        .result-section h3 { color: var(--text-primary); margin-bottom: 10px; font-size: 1rem; font-weight: 700; }
+        .result-section p { color: var(--text-muted); margin-bottom: 10px; font-size: 0.9rem; }
+
+        .config-output {
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            padding: 14px 16px;
+            border-radius: 7px;
+            margin: 10px 0;
+            font-family: "Courier New", monospace;
+            font-size: 0.82rem;
+            color: var(--trakt-red);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.55;
+        }
+
+        .copy-btn {
+            background: var(--trakt-red);
+            color: #fff;
+            padding: 10px 22px;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 0.88rem;
+            font-weight: 700;
+            font-family: inherit;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+        .copy-btn:hover { background: var(--trakt-red-dark); box-shadow: 0 4px 12px var(--trakt-red-glow); }
+
+        .footer { text-align: center; margin-top: 28px; font-size: 0.82rem; color: var(--text-dim); line-height: 1.8; }
+        .footer a { color: var(--trakt-red); text-decoration: none; opacity: 0.8; }
+        .footer a:hover { opacity: 1; }
+
+        @media (max-width: 600px) {
+            .container { padding: 26px 16px; }
+            .header h1 { font-size: 1.4rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Trakt logo mark: red rounded square + bold white T -->
+        <svg class="trakt-logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Trakt">
+            <rect width="48" height="48" rx="10" fill="#ED1C24"/>
+            <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                  font-family="Roboto, Arial, sans-serif" font-weight="700" font-size="28"
+                  fill="#ffffff">t</text>
+        </svg>
+
+        <div class="header">
+            <h1>Trakt OAuth</h1>
+            <p>Get your Trakt access token for Kometa</p>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div id="authForm">
+            <div class="instructions">
+                <strong>To connect to Trakt.tv you must create a Trakt application:</strong>
+                <ol>
+                    <li><a href="https://app.trakt.tv/settings/apps/api" target="_blank" rel="noopener noreferrer">Click here to create a Trakt API application.</a></li>
+                    <li>Click the "+" in the upper right.</li>
+                    <li>Enter a <code>Name</code> for the application.</li>
+                    <li>Enter <code id="redirectUriHint"></code> for <code>Redirect uri</code>.</li>
+                    <li>You can leave "Description" and "JavaScript (CORS) origins" blank.</li>
+                    <li>Click the `Create` button.</li>
+                    <li>Record the <code>Client ID</code> and <code>Client Secret</code>; you only need go through this process once.</li>
+                </ol>
+                <strong>Now, to authenticate to Trakt.tv:</strong>
+                <ol>
+                    <li>Enter the <code>Client ID</code> and <code>Client Secret</code> into the fields below.</li>
+                    <li>Click the <code>Continue to Trakt</code> button.</li>
+                </ol>
+
+            </div>
+
+            <div class="form-group">
+                <label for="redirectUri">Callback URI registered with Trakt</label>
+                <input type="text" id="redirectUri" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="clientId">Trakt Client ID</label>
+                <input type="text" id="clientId" placeholder="Enter your Client ID" required>
+            </div>
+
+            <div class="form-group">
+                <label for="clientSecret">Trakt Client Secret</label>
+                <input type="password" id="clientSecret" placeholder="Enter your Client Secret" required>
+            </div>
+
+            <button class="button primary" onclick="startAuthorization()" id="startBtn">Continue to Trakt</button>
+        </div>
+
+        <div id="resultSection" class="result-section">
+            <h3>Configuration Ready</h3>
+            <p>Copy and paste this into your Kometa <code style="color: var(--trakt-red); font-size: 0.85em;">config.yml</code>:</p>
+            <div class="config-output" id="configOutput"></div>
+            <button class="copy-btn" onclick="copyConfig()">Copy Configuration</button>
+            <button class="button secondary" onclick="resetForm()" style="margin-top: 15px;">Get Another Token</button>
+        </div>
+
+        <div class="footer">
+            <p>Your credentials and tokens never leave your browser &mdash; this page talks directly to Trakt and nothing is sent to this server.</p>
+            <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
+            <p>The Trakt logo is the sole property of Trakt or its licensors, and is used here for identification purposes only.  No endorsement of or by Trakt is implied.</p>
+            <p><a href="/">← Back to Home</a></p>
+        </div>
+    </div>
+
+    <script>
+        'use strict';
+
+        // This page is fully client-side. The Client ID/Secret, authorization
+        // code, and resulting tokens are held only in browser memory (with a
+        // brief, single-use stay in sessionStorage across the Trakt redirect)
+        // and are exchanged directly with Trakt's CORS-enabled token endpoint.
+
+        const TRAKT_AUTHORIZE_URL = 'https://trakt.tv/oauth/authorize';
+        const TRAKT_TOKEN_URL = 'https://api.trakt.tv/oauth/token';
+        const PENDING_KEY = 'trakt_oauth_pending';
+        const AUTHORIZATION_TTL_MS = 10 * 60 * 1000; // 10 minutes, mirrors the old server-side TTL
+
+        // Detect if we're running behind a proxy with a subdirectory
+        const basePath = window.location.pathname.startsWith('/trakt-oauth') ? '/trakt-oauth' : '';
+        // Must exactly match the Redirect uri registered in the user's Trakt app.
+        const redirectUri = window.location.origin + basePath + '/callback';
+
+        function showStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+        }
+
+        function hideStatus() {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'none';
+        }
+
+        function generateState() {
+            const bytes = new Uint8Array(32);
+            crypto.getRandomValues(bytes);
+            return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function loadPendingAuthorization() {
+            try {
+                return JSON.parse(sessionStorage.getItem(PENDING_KEY));
+            } catch (ignored) {
+                return null;
+            }
+        }
+
+        function clearPendingAuthorization() {
+            sessionStorage.removeItem(PENDING_KEY);
+        }
+
+        function startAuthorization() {
+            const clientId = document.getElementById('clientId').value.trim();
+            const clientSecret = document.getElementById('clientSecret').value.trim();
+
+            if (!clientId || !clientSecret) {
+                showStatus('Please enter your Client ID and Client Secret', 'error');
+                return;
+            }
+
+            // Hold the credentials and anti-CSRF state in sessionStorage so they
+            // survive the round trip to Trakt in this tab, but nowhere else.
+            const pending = {
+                client_id: clientId,
+                client_secret: clientSecret,
+                state: generateState(),
+                created_at: Date.now(),
+            };
+            sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+
+            const params = new URLSearchParams({
+                response_type: 'code',
+                client_id: clientId,
+                redirect_uri: redirectUri,
+                state: pending.state,
+            });
+            window.location.assign(`${TRAKT_AUTHORIZE_URL}?${params}`);
+        }
+
+        async function handleCallback(code, state, traktError) {
+            // Consume the pending authorization immediately: single-use, and it
+            // must never linger in storage once we're back from Trakt.
+            const pending = loadPendingAuthorization();
+            clearPendingAuthorization();
+
+            if (!state) {
+                showStatus('Missing authorization state.', 'error');
+                return;
+            }
+            if (!pending || pending.state !== state || Date.now() - pending.created_at > AUTHORIZATION_TTL_MS) {
+                showStatus('This authorization request is invalid, expired, or already used.', 'error');
+                return;
+            }
+            if (traktError) {
+                showStatus(`Trakt authorization failed: ${traktError}`, 'error');
+                return;
+            }
+            if (!code) {
+                showStatus('Trakt did not return an authorization code.', 'error');
+                return;
+            }
+
+            showStatus('Exchanging authorization code for tokens...', 'info');
+
+            let response, data;
+            try {
+                response = await fetch(TRAKT_TOKEN_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        code: code,
+                        client_id: pending.client_id,
+                        client_secret: pending.client_secret,
+                        redirect_uri: redirectUri,
+                        grant_type: 'authorization_code',
+                    }),
+                });
+                data = await response.json();
+            } catch (ignored) {
+                showStatus('Token exchange failed. Check your connection and try again.', 'error');
+                return;
+            }
+
+            if (!response.ok) {
+                const detail = data && (data.error_description || data.error);
+                showStatus(`Token exchange failed${detail ? `: ${detail}` : '. Verify the client credentials and callback URI.'}`, 'error');
+                return;
+            }
+
+            displayConfig(pending.client_id, pending.client_secret, data);
+        }
+
+        function displayConfig(clientId, clientSecret, tokenData) {
+            const config = `trakt:
+  client_id: ${clientId}
+  client_secret: ${clientSecret}
+  authorization:
+    access_token: ${tokenData.access_token}
+    token_type: ${tokenData.token_type}
+    expires_in: ${tokenData.expires_in}
+    refresh_token: ${tokenData.refresh_token}
+    scope: public
+    created_at: ${tokenData.created_at}`;
+
+            document.getElementById('configOutput').textContent = config;
+            document.getElementById('authForm').style.display = 'none';
+            document.getElementById('resultSection').style.display = 'block';
+            hideStatus();
+        }
+
+        function copyConfig() {
+            const configText = document.getElementById('configOutput').textContent;
+            navigator.clipboard.writeText(configText).then(() => {
+                showStatus('Configuration copied to clipboard!', 'success');
+                setTimeout(hideStatus, 3000);
+            }).catch(() => {
+                showStatus('Error copying configuration', 'error');
+            });
+        }
+
+        function resetForm() {
+            document.getElementById('clientId').value = '';
+            document.getElementById('clientSecret').value = '';
+            document.getElementById('authForm').style.display = 'block';
+            document.getElementById('resultSection').style.display = 'none';
+            document.getElementById('startBtn').disabled = false;
+            window.history.replaceState({}, '', `${basePath}/`);
+            hideStatus();
+        }
+
+        // --- Page load ---
+        document.getElementById('redirectUri').value = redirectUri;
+        document.getElementById('redirectUriHint').textContent = redirectUri;
+
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const state = params.get('state');
+        const traktError = params.get('error');
+
+        if (code || state || traktError) {
+            // Scrub the authorization code from the address bar and history
+            // before doing anything else; values are already in memory.
+            window.history.replaceState({}, '', `${basePath}/callback`);
+            handleCallback(code, state, traktError);
+        } else {
+            // Stale pending authorizations serve no purpose on a fresh visit.
+            clearPendingAuthorization();
+        }
+    </script>
+</body>
+</html>

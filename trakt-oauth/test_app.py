@@ -49,9 +49,7 @@ def test_callback_exchanges_code_and_rejects_state_replay(client, monkeypatch) -
         "/api/start",
         json={"client_id": "client", "client_secret": "secret"},
     )
-    state = parse_qs(
-        urlparse(start_response.get_json()["authorization_url"]).query
-    )["state"][0]
+    state = parse_qs(urlparse(start_response.get_json()["authorization_url"]).query)["state"][0]
     exchange_arguments = []
 
     def fake_exchange(client_id, client_secret, code, redirect_uri):
@@ -70,9 +68,7 @@ def test_callback_exchanges_code_and_rejects_state_replay(client, monkeypatch) -
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
     assert b"access" in response.data
-    assert exchange_arguments == [
-        ("client", "secret", "code", app_module.TRAKT_REDIRECT_URI)
-    ]
+    assert exchange_arguments == [("client", "secret", "code", app_module.TRAKT_REDIRECT_URI)]
 
     replay_response = client.get(f"/callback?code=code&state={state}")
     assert replay_response.status_code == 400
@@ -111,9 +107,7 @@ def test_official_exchange_uses_server_credentials_and_is_single_use(client, mon
     monkeypatch.setattr(app_module, "CLIENT_ID", "server-client")
     monkeypatch.setattr(app_module, "CLIENT_SECRET", "server-secret")
     start_response = client.post("/api/official/start", json={})
-    state = parse_qs(
-        urlparse(start_response.get_json()["authorization_url"]).query
-    )["state"][0]
+    state = parse_qs(urlparse(start_response.get_json()["authorization_url"]).query)["state"][0]
     exchange_arguments = []
 
     def fake_exchange(client_id, client_secret, code, redirect_uri):
@@ -128,9 +122,7 @@ def test_official_exchange_uses_server_credentials_and_is_single_use(client, mon
 
     monkeypatch.setattr(app_module, "exchange_code_for_token", fake_exchange)
 
-    response = client.post(
-        "/api/official/exchange", json={"code": "code", "state": state}
-    )
+    response = client.post("/api/official/exchange", json={"code": "code", "state": state})
     assert response.status_code == 200
     data = response.get_json()
     assert data["success"] is True
@@ -141,9 +133,7 @@ def test_official_exchange_uses_server_credentials_and_is_single_use(client, mon
         ("server-client", "server-secret", "code", app_module.TRAKT_REDIRECT_URI)
     ]
 
-    replay_response = client.post(
-        "/api/official/exchange", json={"code": "code", "state": state}
-    )
+    replay_response = client.post("/api/official/exchange", json={"code": "code", "state": state})
     assert replay_response.status_code == 400
 
 

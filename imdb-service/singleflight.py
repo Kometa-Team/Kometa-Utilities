@@ -12,9 +12,9 @@ IMDB_UPSTREAM_CONCURRENCY = max(1, int(os.getenv("IMDB_UPSTREAM_CONCURRENCY", "8
 _tasks: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Hashable, asyncio.Task[Any]]] = (
     WeakKeyDictionary()
 )
-_semaphores: WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[Hashable, asyncio.Semaphore]
-] = WeakKeyDictionary()
+_semaphores: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Hashable, asyncio.Semaphore]] = (
+    WeakKeyDictionary()
+)
 
 
 async def run_singleflight(key: Hashable, factory: Callable[[], Awaitable[T]]) -> T:

@@ -1,6 +1,6 @@
 # SIMKL OAuth - Kometa (Static PIN Flow)
 
-A fully client-side SIMKL OAuth page using the PIN (device) flow.  
+A fully client-side SIMKL OAuth page using the PIN (device) flow.
 The browser talks directly to `api.simkl.com` (CORS-enabled); the user token never touches this server.
 
 ## How It Works
@@ -13,7 +13,7 @@ The browser talks directly to `api.simkl.com` (CORS-enabled); the user token nev
 
 ## Configuration
 
-Only `SIMKL_CLIENT_ID` is needed (public identifier — already visible in the legacy site's authorize URL).  
+Only `SIMKL_CLIENT_ID` is needed (public identifier — already visible in the legacy site's authorize URL).
 It is injected into `static/index.html` at build/deploy time from `.env`.
 
 ```bash

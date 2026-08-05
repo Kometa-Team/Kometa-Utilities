@@ -26,7 +26,7 @@ def test_health_endpoint(client, path) -> None:
 def test_index_page(client) -> None:
     response = client.get("/")
     assert response.status_code == 200
-    assert b'/logo.svg' in response.data
+    assert b"/logo.svg" in response.data
 
 
 def test_logo(client) -> None:
@@ -60,7 +60,9 @@ def test_official_start_builds_pkce_url_with_server_credentials(client, monkeypa
     assert pending["code_verifier"] == query["code_challenge"][0]
 
 
-def test_official_exchange_uses_server_credentials_and_never_returns_secret(client, monkeypatch) -> None:
+def test_official_exchange_uses_server_credentials_and_never_returns_secret(
+    client, monkeypatch
+) -> None:
     monkeypatch.setattr(app_module, "CLIENT_ID", "server-client")
     monkeypatch.setattr(app_module, "CLIENT_SECRET", "server-secret")
     start_response = client.post("/api/official/start", json={})
@@ -79,9 +81,7 @@ def test_official_exchange_uses_server_credentials_and_never_returns_secret(clie
 
     monkeypatch.setattr(app_module, "exchange_code_for_token", fake_exchange)
 
-    response = client.post(
-        "/api/official/exchange", json={"code": "code", "state": state}
-    )
+    response = client.post("/api/official/exchange", json={"code": "code", "state": state})
     assert response.status_code == 200
     data = response.get_json()
     assert data["success"] is True
@@ -98,9 +98,7 @@ def test_official_exchange_uses_server_credentials_and_never_returns_secret(clie
         )
     ]
 
-    replay_response = client.post(
-        "/api/official/exchange", json={"code": "code", "state": state}
-    )
+    replay_response = client.post("/api/official/exchange", json={"code": "code", "state": state})
     assert replay_response.status_code == 400
 
 

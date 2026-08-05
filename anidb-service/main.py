@@ -399,9 +399,7 @@ async def health_ready() -> JSONResponse:
         )
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             tables = {row[0] for row in await cursor.fetchall()}
         if not {"anime", "tags", "relations", "api_logs"}.issubset(tables):
             return JSONResponse(

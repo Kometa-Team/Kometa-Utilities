@@ -19,7 +19,7 @@ on:
 jobs:
   build-imdb-base:
     name: Build imdb-service-base
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -30,8 +30,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -54,15 +54,13 @@ jobs:
             type=raw,value=${{ steps.tag.outputs.image_tag }}
 
       - name: Build imdb-service-base
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ./imdb-service
           file: ./imdb-service/Dockerfile.base
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Make package public
         run: |
@@ -75,7 +73,7 @@ jobs:
 
   build-images:
     name: Build ${{ matrix.image }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -107,8 +105,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -127,15 +125,13 @@ jobs:
             type=sha
 
       - name: Build ${{ matrix.image }}
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Make package public
         run: |
@@ -148,7 +144,7 @@ jobs:
 
   build-imdb-service:
     name: Build imdb-service
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: build-imdb-base
     permissions:
       contents: read
@@ -158,8 +154,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -178,7 +174,7 @@ jobs:
             type=sha
 
       - name: Build imdb-service
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ./imdb-service
           file: ./imdb-service/Dockerfile
@@ -187,8 +183,6 @@ jobs:
             BASE_IMAGE=ghcr.io/kometa-team/imdb-service-base:${{ needs.build-imdb-base.outputs.image_tag }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Make package public
         run: |

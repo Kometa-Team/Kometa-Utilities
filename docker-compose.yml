@@ -6,6 +6,62 @@ x-default-logging: &default-logging
 
 services:
 
+  floppy:
+    container_name: floppy
+    # Image defaults to :latest tag (points to stable release branch)
+    # You can also explicitly use :latest, :release, or :dev
+    image: ghcr.io/dannyvfilms/floppy
+    restart: unless-stopped
+    depends_on:
+      - floppy-db
+      - floppy-redis
+    environment:
+      - TZ=America/Chicago
+      - SECRET=Y11OVHtMVdV0*k#i2nqRhh&rKwQ%QMi9
+      - REDIS_URL=redis://floppy-redis:6379
+      - DB_HOST=floppy-db
+      # These stay "yamtrack" on purpose: renaming the database, role, or
+      # password against an existing postgres_data volume breaks the stack.
+      # New installs can use any values as long as both services agree.
+      - DB_NAME=yamtrack
+      - DB_USER=yamtrack
+      - DB_PASSWORD=yamtrack
+      - DB_PORT=5432
+      - ADMIN_ENABLED=True
+      # Off by default: otherwise a publicly known demo/demodemo
+      # account is provisioned after migrations.
+      - DEMO_ACCOUNT_ENABLED=True
+      # Keep DEBUG off in production: the debug toolbar slows every request
+      # and disables Django's cached template loader.
+      - DEBUG=False
+      # Web server concurrency: WEB_CONCURRENCY gunicorn worker processes,
+      # each serving GUNICORN_THREADS requests concurrently. The defaults
+      # (2 workers x 4 threads) prevent one slow request from blocking the UI.
+      - WEB_CONCURRENCY=2
+      - GUNICORN_THREADS=4
+    ports:
+      - 8003:8000
+
+  floppy-db:
+    image: postgres:16-alpine
+    container_name: floppy-db
+    environment:
+      - POSTGRES_DB=yamtrack
+      - POSTGRES_USER=yamtrack
+      - POSTGRES_PASSWORD=yamtrack
+    volumes:
+      - floppy_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  floppy-redis:
+    container_name: floppy-redis
+    image: redis:8-alpine
+    restart: unless-stopped
+    # Persist to disk so a restart doesn't drop the cache wholesale (#386).
+    command: redis-server --appendonly yes
+    volumes:
+      - floppy_redis_data:/data
+
   transfer:
     image: kometa-utilities-transfer:local
     build:
@@ -93,6 +149,8 @@ services:
     container_name: trakt-oauth
     restart: unless-stopped
     logging: *default-logging
+    env_file:
+      - ./trakt-oauth/.env
     environment:
       - ROOT_PATH=/trakt-oauth
       - SECRET_KEY=${TRAKT_SECRET_KEY:-changeme-generate-random-key}
@@ -115,6 +173,8 @@ services:
     container_name: mal-oauth
     restart: unless-stopped
     logging: *default-logging
+    env_file:
+      - ./mal-oauth/.env
     environment:
       - ROOT_PATH=/mal-oauth
       - SECRET_KEY=${MAL_SECRET_KEY:-changeme-generate-random-key}
@@ -249,6 +309,9 @@ services:
       - PARENTAL_PROXY_URLS=${PARENTAL_PROXY_URLS:-}
       - PARENTAL_PROXY_RETRY_COUNT=${PARENTAL_PROXY_RETRY_COUNT:-1}
       - PARENTAL_PROXY_BAN_TTL_MINUTES=${PARENTAL_PROXY_BAN_TTL_MINUTES:-30}
+      - PARENTAL_BROWSER_MAX_CONTEXTS=${PARENTAL_BROWSER_MAX_CONTEXTS:-8}
+      - PARENTAL_BROWSER_IDLE_CLOSE_SECONDS=${PARENTAL_BROWSER_IDLE_CLOSE_SECONDS:-1800}
+      - PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS=${PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS:-300}
 
       - PARENTAL_DECODO_BROWSER_ENABLED=${PARENTAL_DECODO_BROWSER_ENABLED:-false}
       - PARENTAL_DECODO_BROWSER_HOST=${PARENTAL_DECODO_BROWSER_HOST:-gate.decodo.com}
@@ -276,7 +339,7 @@ services:
         limits:
           cpus: "2.00"
           memory: 1G
-          pids: 512
+          pids: 2048
         reservations:
           memory: 512M
 
@@ -292,6 +355,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ./index.html:/var/www/html/index.html
       - ./maintenance.html:/var/www/html/maintenance.html
+      - ./floppy-maintenance.html:/var/www/html/floppy-maintenance.html
+      - ./translations-maintenance.html:/var/www/html/translations-maintenance.html
+      - ./analytics-maintenance.html:/var/www/html/analytics-maintenance.html
+      - ./transfer-maintenance.html:/var/www/html/transfer-maintenance.html
       - ./favicon.ico:/var/www/html/favicon.ico
       # Static browser-only Trakt OAuth page (no backend involved)
       - ./trakt-oauth/static:/var/www/html/trakt-oauth:ro
@@ -541,3 +608,5 @@ volumes:
   redis-data:
     external: true
     name: kometa-utilities_redis-data
+  floppy_redis_data:
+  floppy_postgres_data:

@@ -48,8 +48,16 @@ yourdomain.com {
         file_server
     }
 
+    # Official "Use Kometa App" Trakt OAuth backend: the browser asks the
+    # Flask service for an authorization URL and later to exchange the code.
+    # The official client secret lives only in the container's environment.
+    handle /trakt-oauth/api/* {
+        uri strip_prefix /trakt-oauth
+        reverse_proxy trakt-oauth:5000
+    }
+
     # Handle /trakt-oauth path
-    # Static browser-only Trakt OAuth: credentials and tokens are exchanged
+    # Static browser-only Trakt OAuth: BYO credentials and tokens are exchanged
     # directly between the user's browser and Trakt; nothing sensitive
     # touches this server. Register https://yourdomain.com/trakt-oauth/callback
     # as the Redirect uri in the Trakt application.
@@ -75,8 +83,17 @@ yourdomain.com {
         }
     }
 
+    # Official "Use Kometa App" MyAnimeList OAuth backend: the browser asks
+    # the Flask service for an authorization URL and later to exchange the code.
+    # MAL's PKCE flow needs no client_secret, so the official secret never
+    # reaches the browser; the server holds it in its environment.
+    handle /mal-oauth/api/official/* {
+        uri strip_prefix /mal-oauth
+        reverse_proxy mal-oauth:5000
+    }
+
     # Handle /mal-oauth path
-    # Static browser-only MyAnimeList OAuth: credentials and tokens are held
+    # Static browser-only MyAnimeList OAuth: BYO credentials and tokens are held
     # only in the user's browser; the token exchange transits the same-origin
     # proxy above. Register https://yourdomain.com/mal-oauth/callback as the
     # App Redirect URL in the MAL application.

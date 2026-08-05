@@ -9,7 +9,7 @@
          would be blocked). Nothing is stored server-side. -->
     <meta name="referrer" content="no-referrer">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
-    <title>MyAnimeList OAuth - Kometa</title>
+    <title>MyAnimeList OAuth - Kometa - Browser Version</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
@@ -131,6 +131,33 @@
         .instructions li { margin: 6px 0; color: var(--text-muted); }
         .instructions a { color: #8fabdf; }
 
+        .tabs {
+            display: flex;
+            gap: 8px;
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 5px;
+            margin: 20px 0 4px;
+        }
+        .tab {
+            flex: 1;
+            padding: 10px 8px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, color 0.2s;
+        }
+        .tab:hover { color: var(--text-primary); }
+        .tab.active { background: var(--mal-blue); color: #fff; }
+        .mode-section { display: none; margin-top: 16px; }
+        .mode-section.active { display: block; }
+
         .result-section { display: none; margin-top: 20px; }
         .result-section h3 { color: var(--text-primary); margin-bottom: 10px; font-size: 1rem; font-weight: 700; }
         .result-section p { color: var(--text-muted); margin-bottom: 10px; font-size: 0.9rem; }
@@ -190,39 +217,54 @@
 
         <div id="status" class="status"></div>
 
-        <div id="authForm">
+        <div class="tabs" role="tablist">
+            <button class="tab active" role="tab" id="tabOfficial" onclick="selectMode('official')">Use Kometa App</button>
+            <button class="tab" role="tab" id="tabByo" onclick="selectMode('byo')">Bring Your Own</button>
+        </div>
+
+        <div id="officialSection" class="mode-section active">
             <div class="instructions">
-                <strong>To connect to MyAnimeList you must create a MAL application:</strong>
+                <strong>Use the shared Kometa MyAnimeList application.</strong>
+                <ol>
+                    <li>Click the <code>Continue to MyAnimeList</code> button.</li>
+                    <li>Authorize the Kometa application on MyAnimeList when prompted.</li>
+                </ol>
+            </div>
+            <button class="button primary" onclick="startAuthorizationOfficial()" id="startOfficialBtn">Continue to MyAnimeList</button>
+        </div>
+
+        <div id="byoSection" class="mode-section">
+            <div class="instructions">
+                <strong>To connect using your own MAL application you must create one:</strong>
                 <ol>
                     <li><a href="https://myanimelist.net/apiconfig" target="_blank" rel="noopener noreferrer">Click here to create a MyAnimeList API application.</a></li>
                     <li>Enter an <code>Application Name</code> and fill in the required fields.</li>
-                    <li>Enter <code id="redirectUriHint"></code> for <code>App Redirect URL</code>.</li>
+                    <li>Enter <code id="byoRedirectUriHint"></code> for <code>App Redirect URL</code>.</li>
                     <li>Submit the form and record the <code>Client ID</code> and <code>Client Secret</code>; you only need go through this process once.</li>
                 </ol>
                 <strong>Now, to authenticate to MyAnimeList:</strong>
                 <ol>
-                    <li>Enter the <code>Client ID</code> and <code>Client Secret</code> into the fields below.</li>
+                    <li>Enter the <code>Client ID</code> below. The <code>Client Secret</code> is optional &mdash; MAL's PKCE flow works without it.</li>
                     <li>Click the <code>Continue to MyAnimeList</code> button.</li>
                 </ol>
-
             </div>
 
             <div class="form-group">
-                <label for="redirectUri">App Redirect URL registered with MyAnimeList</label>
-                <input type="text" id="redirectUri" readonly>
+                <label for="byoRedirectUri">App Redirect URL registered with MyAnimeList</label>
+                <input type="text" id="byoRedirectUri" readonly>
             </div>
 
             <div class="form-group">
-                <label for="clientId">MyAnimeList Client ID</label>
-                <input type="text" id="clientId" placeholder="Enter your Client ID" required>
+                <label for="byoClientId">MyAnimeList Client ID</label>
+                <input type="text" id="byoClientId" placeholder="Enter your Client ID" required>
             </div>
 
             <div class="form-group">
-                <label for="clientSecret">MyAnimeList Client Secret</label>
-                <input type="password" id="clientSecret" placeholder="Enter your Client Secret" required>
+                <label for="byoClientSecret">MyAnimeList Client Secret (optional)</label>
+                <input type="password" id="byoClientSecret" placeholder="Enter your Client Secret (optional)">
             </div>
 
-            <button class="button primary" onclick="startAuthorization()" id="startBtn">Continue to MyAnimeList</button>
+            <button class="button primary" onclick="startAuthorizationByo()" id="startByoBtn">Continue to MyAnimeList</button>
         </div>
 
         <div id="resultSection" class="result-section">
@@ -234,7 +276,7 @@
         </div>
 
         <div class="footer">
-            <p>Your credentials and tokens are held only in your browser; the token exchange is forwarded through this server without being stored.</p>
+            <p>In "Bring Your Own" mode your credentials are held only in your browser and the exchange is forwarded without being stored. In "Use Kometa App" mode the official app credentials are held server-side.</p>
             <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
             <p>The MyAnimeList logo is the sole property of MyAnimeList or its licensors, and is used here for identification purposes only.  No endorsement of or by MyAnimeList is implied.</p>
             <p><a href="/">← Back to Home</a></p>
@@ -244,14 +286,19 @@
     <script>
         'use strict';
 
-        // This page is fully client-side. The Client ID/Secret, authorization
-        // code, and resulting tokens are held only in browser memory (with a
-        // brief, single-use stay in sessionStorage across the MAL redirect).
+        // Two flows share this page:
+        //   - "Use Kometa App" (official): the browser asks the same-origin
+        //     backend (/api/official/*) for an authorization URL and later to
+        //     exchange the code. MAL's PKCE flow needs no client_secret, so the
+        //     official secret never reaches the browser at all.
+        //   - "Bring Your Own" (byo): the user's own Client ID/Secret,
+        //     authorization code, and tokens are held only in browser memory.
         //
         // MAL's OAuth endpoints send no CORS headers, so the token exchange
-        // cannot be fetched cross-origin. Instead the page POSTs to the
+        // cannot be fetched cross-origin. In BYO mode the page POSTs to the
         // same-origin path /mal-oauth/api/token, which Caddy forwards to
-        // https://myanimelist.net/v1/oauth2/token (see Caddyfile).
+        // https://myanimelist.net/v1/oauth2/token (see Caddyfile). Official mode
+        // exchanges through the backend, which calls MAL server-to-server.
 
         const MAL_AUTHORIZE_URL = 'https://myanimelist.net/v1/oauth2/authorize';
         const PENDING_KEY = 'mal_oauth_pending';
@@ -296,12 +343,50 @@
             sessionStorage.removeItem(PENDING_KEY);
         }
 
-        function startAuthorization() {
-            const clientId = document.getElementById('clientId').value.trim();
-            const clientSecret = document.getElementById('clientSecret').value.trim();
+        function selectMode(mode) {
+            document.getElementById('officialSection').classList.toggle('active', mode === 'official');
+            document.getElementById('byoSection').classList.toggle('active', mode === 'byo');
+            document.getElementById('tabOfficial').classList.toggle('active', mode === 'official');
+            document.getElementById('tabByo').classList.toggle('active', mode === 'byo');
+            hideStatus();
+        }
 
-            if (!clientId || !clientSecret) {
-                showStatus('Please enter your Client ID and Client Secret', 'error');
+        async function startAuthorizationOfficial() {
+            const btn = document.getElementById('startOfficialBtn');
+            btn.disabled = true;
+            showStatus('Contacting the OAuth service...', 'info');
+            try {
+                const response = await fetch(`${basePath}/api/official/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    showStatus(data.error || 'The Kometa MAL app is unavailable.', 'error');
+                    btn.disabled = false;
+                    return;
+                }
+                const authUrl = new URL(data.authorization_url);
+                const pending = {
+                    mode: 'official',
+                    state: authUrl.searchParams.get('state'),
+                    created_at: Date.now(),
+                };
+                sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+                window.location.assign(data.authorization_url);
+            } catch (ignored) {
+                showStatus('Could not contact the OAuth service. Try again or use "Bring Your Own".', 'error');
+                btn.disabled = false;
+            }
+        }
+
+        function startAuthorizationByo() {
+            const clientId = document.getElementById('byoClientId').value.trim();
+            const clientSecret = document.getElementById('byoClientSecret').value.trim();
+
+            if (!clientId) {
+                showStatus('Please enter your Client ID', 'error');
                 return;
             }
 
@@ -309,6 +394,7 @@
             // sessionStorage so they survive the round trip to MAL in this
             // tab, but nowhere else.
             const pending = {
+                mode: 'byo',
                 client_id: clientId,
                 client_secret: clientSecret,
                 state: randomString(32),
@@ -356,18 +442,29 @@
 
             let response, data;
             try {
-                response = await fetch(tokenUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: new URLSearchParams({
+                if (pending.mode === 'official') {
+                    response = await fetch(`${basePath}/api/official/exchange`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ code: code, state: pending.state }),
+                    });
+                } else {
+                    const body = new URLSearchParams({
                         client_id: pending.client_id,
-                        client_secret: pending.client_secret,
                         grant_type: 'authorization_code',
                         code: code,
                         redirect_uri: redirectUri,
                         code_verifier: pending.code_verifier,
-                    }),
-                });
+                    });
+                    if (pending.client_secret) {
+                        body.set('client_secret', pending.client_secret);
+                    }
+                    response = await fetch(tokenUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: body,
+                    });
+                }
                 data = await response.json();
             } catch (ignored) {
                 showStatus('Token exchange failed. Check your connection and try again.', 'error');
@@ -380,23 +477,35 @@
                 return;
             }
 
-            displayConfig(pending.client_id, pending.client_secret, data);
+            if (pending.mode === 'official') {
+                displayConfig(data.client_id, '', data);
+            } else {
+                displayConfig(pending.client_id, pending.client_secret, data);
+            }
         }
 
         function displayConfig(clientId, clientSecret, tokenData) {
-            const config = `mal:
-  client_id: ${clientId}
-  client_secret: ${clientSecret}
-  authorization:
-    access_token: ${tokenData.access_token}
-    token_type: ${tokenData.token_type}
-    expires_in: ${tokenData.expires_in}
-    refresh_token: ${tokenData.refresh_token}
-  localhost_url: ${redirectUri}
-  cache_expiration: 60`;
+            const lines = [
+                `mal:`,
+                `  client_id: ${clientId}`,
+            ];
+            if (clientSecret) {
+                lines.push(`  client_secret: ${clientSecret}`);
+            }
+            lines.push(
+                `  authorization:`,
+                `    access_token: ${tokenData.access_token}`,
+                `    token_type: ${tokenData.token_type}`,
+                `    expires_in: ${tokenData.expires_in}`,
+                `    refresh_token: ${tokenData.refresh_token}`,
+                `  localhost_url: ${redirectUri}`,
+                `  cache_expiration: 60`,
+            );
+            const config = lines.join('\n');
 
             document.getElementById('configOutput').textContent = config;
-            document.getElementById('authForm').style.display = 'none';
+            document.getElementById('officialSection').classList.remove('active');
+            document.getElementById('byoSection').classList.remove('active');
             document.getElementById('resultSection').style.display = 'block';
             hideStatus();
         }
@@ -412,18 +521,18 @@
         }
 
         function resetForm() {
-            document.getElementById('clientId').value = '';
-            document.getElementById('clientSecret').value = '';
-            document.getElementById('authForm').style.display = 'block';
+            document.getElementById('byoClientId').value = '';
+            document.getElementById('byoClientSecret').value = '';
+            document.getElementById('startOfficialBtn').disabled = false;
+            selectMode('official');
             document.getElementById('resultSection').style.display = 'none';
-            document.getElementById('startBtn').disabled = false;
             window.history.replaceState({}, '', `${basePath}/`);
             hideStatus();
         }
 
         // --- Page load ---
-        document.getElementById('redirectUri').value = redirectUri;
-        document.getElementById('redirectUriHint').textContent = redirectUri;
+        document.getElementById('byoRedirectUri').value = redirectUri;
+        document.getElementById('byoRedirectUriHint').textContent = redirectUri;
 
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');

@@ -2754,6 +2754,197 @@ def test_playwright_proxy_settings_uses_decodo_sticky_browser_session(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_parental_browser_context_evicts_lru_when_over_cap(monkeypatch):
+    import main
+
+    closed: list[str] = []
+
+    class FakeContext:
+        def __init__(self, key: str):
+            self.key = key
+
+        def set_default_navigation_timeout(self, *args, **kwargs):
+            pass
+
+        def set_default_timeout(self, *args, **kwargs):
+            pass
+
+        async def close(self):
+            closed.append(self.key)
+
+    class FakeStealth:
+        async def apply_stealth_async(self, _context, **kwargs):
+            pass
+
+    async def fake_launch_persistent_context(**kwargs):
+        return FakeContext(kwargs["proxy"]["server"])
+
+    mock_manager = MagicMock()
+    mock_manager.chromium.launch_persistent_context = fake_launch_persistent_context
+
+    monkeypatch.setattr(main, "parental_browser_manager", mock_manager)
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_MAX_CONTEXTS", 3)
+    monkeypatch.setattr(main, "PARENTAL_DECODO_BROWSER_ENABLED", False)
+    monkeypatch.setattr(main, "parental_browser_contexts", {})
+    monkeypatch.setattr(main, "parental_browser_context_last_used", {})
+    monkeypatch.setattr(main, "parental_browser_context_users", {})
+    monkeypatch.setattr("playwright_stealth.Stealth", FakeStealth, raising=False)
+
+    ports = list(range(10001, 10006))
+    proxies = [f"http://user:pass@gate.decodo.com:{port}" for port in ports]
+    servers = [f"http://gate.decodo.com:{port}" for port in ports]
+
+    for proxy in proxies:
+        await main._get_parental_browser_context(proxy)
+
+    assert len(main.parental_browser_contexts) == 3
+    assert set(closed) == {servers[0], servers[1]}
+    for proxy in proxies[2:]:
+        assert proxy in main.parental_browser_contexts
+
+
+@pytest.mark.asyncio
+async def test_parental_browser_context_eviction_skips_in_use_contexts(monkeypatch):
+    import main
+
+    closed: list[str] = []
+
+    class FakeContext:
+        def __init__(self, key: str):
+            self.key = key
+
+        def set_default_navigation_timeout(self, *args, **kwargs):
+            pass
+
+        def set_default_timeout(self, *args, **kwargs):
+            pass
+
+        async def close(self):
+            closed.append(self.key)
+
+    class FakeStealth:
+        async def apply_stealth_async(self, _context, **kwargs):
+            pass
+
+    async def fake_launch_persistent_context(**kwargs):
+        return FakeContext(kwargs["proxy"]["server"])
+
+    mock_manager = MagicMock()
+    mock_manager.chromium.launch_persistent_context = fake_launch_persistent_context
+
+    monkeypatch.setattr(main, "parental_browser_manager", mock_manager)
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_MAX_CONTEXTS", 2)
+    monkeypatch.setattr(main, "PARENTAL_DECODO_BROWSER_ENABLED", False)
+    monkeypatch.setattr(main, "parental_browser_contexts", {})
+    monkeypatch.setattr(main, "parental_browser_context_last_used", {})
+    monkeypatch.setattr(main, "parental_browser_context_users", {})
+    monkeypatch.setattr("playwright_stealth.Stealth", FakeStealth, raising=False)
+
+    ports = list(range(20001, 20004))
+    proxies = [f"http://user:pass@gate.decodo.com:{port}" for port in ports]
+    servers = [f"http://gate.decodo.com:{port}" for port in ports]
+
+    await main._get_parental_browser_context(proxies[0])
+    await main._get_parental_browser_context(proxies[1])
+    main.parental_browser_context_users[proxies[1]] = 1
+    await main._get_parental_browser_context(proxies[2])
+
+    assert proxies[1] in main.parental_browser_contexts
+    assert proxies[2] in main.parental_browser_contexts
+    assert proxies[0] not in main.parental_browser_contexts
+    assert closed == [servers[0]]
+
+
+@pytest.mark.asyncio
+async def test_parental_browser_reaper_closes_idle_contexts_only(monkeypatch):
+    import main
+
+    closed: list[str] = []
+
+    class FakeContext:
+        def __init__(self, key: str):
+            self.key = key
+
+        async def close(self):
+            closed.append(self.key)
+
+    class FakeManager:
+        def __init__(self):
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    contexts = {
+        "stale-idle": FakeContext("stale-idle"),
+        "stale-in-use": FakeContext("stale-in-use"),
+        "fresh-idle": FakeContext("fresh-idle"),
+    }
+    now = main.time.monotonic()
+    last_used = {
+        "stale-idle": now - 3600,
+        "stale-in-use": now - 3600,
+        "fresh-idle": now - 10,
+    }
+    users = {"stale-in-use": 1}
+    manager = FakeManager()
+
+    monkeypatch.setattr(main, "parental_browser_contexts", contexts)
+    monkeypatch.setattr(main, "parental_browser_context_last_used", last_used)
+    monkeypatch.setattr(main, "parental_browser_context_users", users)
+    monkeypatch.setattr(main, "parental_browser_manager", manager)
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_IDLE_CLOSE_SECONDS", 300)
+
+    reaped = await main._parental_browser_reap_idle()
+
+    assert reaped == 1
+    assert closed == ["stale-idle"]
+    assert "stale-idle" not in contexts
+    assert "stale-in-use" in contexts
+    assert "fresh-idle" in contexts
+    assert not manager.stopped
+
+
+@pytest.mark.asyncio
+async def test_parental_browser_reaper_stops_manager_when_empty(monkeypatch):
+    import main
+
+    closed: list[str] = []
+
+    class FakeContext:
+        def __init__(self, key: str):
+            self.key = key
+
+        async def close(self):
+            closed.append(self.key)
+
+    class FakeManager:
+        def __init__(self):
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    contexts = {"only-idle": FakeContext("only-idle")}
+    now = main.time.monotonic()
+    last_used = {"only-idle": now - 3600}
+    manager = FakeManager()
+
+    monkeypatch.setattr(main, "parental_browser_contexts", contexts)
+    monkeypatch.setattr(main, "parental_browser_context_last_used", last_used)
+    monkeypatch.setattr(main, "parental_browser_context_users", {})
+    monkeypatch.setattr(main, "parental_browser_manager", manager)
+    monkeypatch.setattr(main, "PARENTAL_BROWSER_IDLE_CLOSE_SECONDS", 300)
+
+    reaped = await main._parental_browser_reap_idle()
+
+    assert reaped == 1
+    assert closed == ["only-idle"]
+    assert main.parental_browser_manager is None
+    assert manager.stopped
+
+
+@pytest.mark.asyncio
 async def test_fetch_parental_html_retries_with_second_proxy(monkeypatch):
     from fastapi import HTTPException
 

@@ -6,8 +6,8 @@
     <!-- Privacy: never leak the OAuth code via Referer; tokens are only ever
          sent to Trakt itself (see CSP connect-src). -->
     <meta name="referrer" content="no-referrer">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://api.trakt.tv https://trakt.tv; img-src 'self' data:; base-uri 'none'; form-action 'none'">
-    <title>Trakt OAuth - Kometa</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.trakt.tv https://trakt.tv; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <title>Trakt OAuth - Kometa - Browser Version</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
@@ -128,6 +128,33 @@
         .instructions ol { margin-left: 20px; }
         .instructions li { margin: 6px 0; color: var(--text-muted); }
 
+        .tabs {
+            display: flex;
+            gap: 8px;
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 5px;
+            margin: 20px 0 4px;
+        }
+        .tab {
+            flex: 1;
+            padding: 10px 8px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, color 0.2s;
+        }
+        .tab:hover { color: var(--text-primary); }
+        .tab.active { background: var(--trakt-red); color: #fff; }
+        .mode-section { display: none; margin-top: 16px; }
+        .mode-section.active { display: block; }
+
         .result-section { display: none; margin-top: 20px; }
         .result-section h3 { color: var(--text-primary); margin-bottom: 10px; font-size: 1rem; font-weight: 700; }
         .result-section p { color: var(--text-muted); margin-bottom: 10px; font-size: 0.9rem; }
@@ -189,42 +216,45 @@
 
         <div id="status" class="status"></div>
 
-        <div id="authForm">
+        <div class="tabs" role="tablist">
+            <button class="tab active" role="tab" id="tabOfficial" onclick="selectMode('official')">Use Kometa App</button>
+            <button class="tab" role="tab" id="tabByo" onclick="selectMode('byo')">Bring Your Own</button>
+        </div>
+
+        <div id="officialSection" class="mode-section active">
             <div class="instructions">
-                <strong>To connect to Trakt.tv you must create a Trakt application:</strong>
+                <strong>Use the shared Kometa Trakt application.</strong>
                 <ol>
-                    <li><a href="https://app.trakt.tv/settings/apps/api" target="_blank" rel="noopener noreferrer">Click here to create a Trakt API application.</a></li>
-                    <li>Click the "+" in the upper right.</li>
-                    <li>Enter a <code>Name</code> for the application.</li>
-                    <li>Enter <code id="redirectUriHint"></code> for <code>Redirect uri</code>.</li>
-                    <li>You can leave "Description" and "JavaScript (CORS) origins" blank.</li>
-                    <li>Click the `Create` button.</li>
-                    <li>Record the <code>Client ID</code> and <code>Client Secret</code>; you only need go through this process once.</li>
+                    <li>Click the <code>Continue to Trakt</code> button.</li>
+                    <li>Authorize the Kometa application on Trakt when prompted.</li>
                 </ol>
-                <strong>Now, to authenticate to Trakt.tv:</strong>
+            </div>
+            <button class="button primary" onclick="startAuthorizationOfficial()" id="startOfficialBtn">Continue to Trakt</button>
+        </div>
+
+        <div id="byoSection" class="mode-section">
+            <div class="instructions">
+                <strong>Use your own Trakt application.</strong>
                 <ol>
-                    <li>Enter the <code>Client ID</code> and <code>Client Secret</code> into the fields below.</li>
+                    <li>Create an app at <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener noreferrer">trakt.tv/oauth/applications</a>.</li>
+                    <li>Enter <code id="byoRedirectUriHint"></code> as the <code>Redirect uri</code>.</li>
+                    <li>Enter your <code>Client ID</code> and <code>Client Secret</code> below.</li>
                     <li>Click the <code>Continue to Trakt</code> button.</li>
                 </ol>
-
             </div>
-
             <div class="form-group">
-                <label for="redirectUri">Callback URI registered with Trakt</label>
-                <input type="text" id="redirectUri" readonly>
+                <label for="byoRedirectUri">App Redirect uri registered with Trakt</label>
+                <input type="text" id="byoRedirectUri" readonly>
             </div>
-
             <div class="form-group">
-                <label for="clientId">Trakt Client ID</label>
-                <input type="text" id="clientId" placeholder="Enter your Client ID" required>
+                <label for="byoClientId">Trakt Client ID</label>
+                <input type="text" id="byoClientId" placeholder="Enter your Client ID" required>
             </div>
-
             <div class="form-group">
-                <label for="clientSecret">Trakt Client Secret</label>
-                <input type="password" id="clientSecret" placeholder="Enter your Client Secret" required>
+                <label for="byoClientSecret">Trakt Client Secret</label>
+                <input type="password" id="byoClientSecret" placeholder="Enter your Client Secret" required>
             </div>
-
-            <button class="button primary" onclick="startAuthorization()" id="startBtn">Continue to Trakt</button>
+            <button class="button primary" onclick="startAuthorizationByo()" id="startByoBtn">Continue to Trakt</button>
         </div>
 
         <div id="resultSection" class="result-section">
@@ -236,7 +266,7 @@
         </div>
 
         <div class="footer">
-            <p>Your credentials and tokens never leave your browser &mdash; this page talks directly to Trakt and nothing is sent to this server.</p>
+            <p>In "Bring Your Own" mode your credentials never leave your browser. In "Use Kometa App" mode the official secret is held server-side and only revealed once you complete authorization.</p>
             <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
             <p>The Trakt logo is the sole property of Trakt or its licensors, and is used here for identification purposes only.  No endorsement of or by Trakt is implied.</p>
             <p><a href="/">← Back to Home</a></p>
@@ -246,10 +276,15 @@
     <script>
         'use strict';
 
-        // This page is fully client-side. The Client ID/Secret, authorization
-        // code, and resulting tokens are held only in browser memory (with a
-        // brief, single-use stay in sessionStorage across the Trakt redirect)
-        // and are exchanged directly with Trakt's CORS-enabled token endpoint.
+        // Two flows share this page:
+        //   - "Use Kometa App" (official): the browser asks the same-origin
+        //     backend (/api/official/*) for an authorization URL and later to
+        //     exchange the code. The official client_secret is held server-side
+        //     and is only returned to the browser after a successful exchange.
+        //   - "Bring Your Own" (byo): fully client-side; the user's own Client
+        //     ID/Secret, the authorization code, and the tokens are held only in
+        //     browser memory and exchanged directly with Trakt's CORS-enabled
+        //     token endpoint.
 
         const TRAKT_AUTHORIZE_URL = 'https://trakt.tv/oauth/authorize';
         const TRAKT_TOKEN_URL = 'https://api.trakt.tv/oauth/token';
@@ -258,7 +293,7 @@
 
         // Detect if we're running behind a proxy with a subdirectory
         const basePath = window.location.pathname.startsWith('/trakt-oauth') ? '/trakt-oauth' : '';
-        // Must exactly match the Redirect uri registered in the user's Trakt app.
+        // Must exactly match the Redirect uri registered in the Kometa Trakt app.
         const redirectUri = window.location.origin + basePath + '/callback';
 
         function showStatus(message, type = 'info') {
@@ -291,9 +326,47 @@
             sessionStorage.removeItem(PENDING_KEY);
         }
 
-        function startAuthorization() {
-            const clientId = document.getElementById('clientId').value.trim();
-            const clientSecret = document.getElementById('clientSecret').value.trim();
+        function selectMode(mode) {
+            document.getElementById('officialSection').classList.toggle('active', mode === 'official');
+            document.getElementById('byoSection').classList.toggle('active', mode === 'byo');
+            document.getElementById('tabOfficial').classList.toggle('active', mode === 'official');
+            document.getElementById('tabByo').classList.toggle('active', mode === 'byo');
+            hideStatus();
+        }
+
+        async function startAuthorizationOfficial() {
+            const btn = document.getElementById('startOfficialBtn');
+            btn.disabled = true;
+            showStatus('Contacting the OAuth service...', 'info');
+            try {
+                const response = await fetch(`${basePath}/api/official/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    showStatus(data.error || 'The Kometa Trakt app is unavailable.', 'error');
+                    btn.disabled = false;
+                    return;
+                }
+                const authUrl = new URL(data.authorization_url);
+                const pending = {
+                    mode: 'official',
+                    state: authUrl.searchParams.get('state'),
+                    created_at: Date.now(),
+                };
+                sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+                window.location.assign(data.authorization_url);
+            } catch (ignored) {
+                showStatus('Could not contact the OAuth service. Try again or use "Bring Your Own".', 'error');
+                btn.disabled = false;
+            }
+        }
+
+        function startAuthorizationByo() {
+            const clientId = document.getElementById('byoClientId').value.trim();
+            const clientSecret = document.getElementById('byoClientSecret').value.trim();
 
             if (!clientId || !clientSecret) {
                 showStatus('Please enter your Client ID and Client Secret', 'error');
@@ -303,6 +376,7 @@
             // Hold the credentials and anti-CSRF state in sessionStorage so they
             // survive the round trip to Trakt in this tab, but nowhere else.
             const pending = {
+                mode: 'byo',
                 client_id: clientId,
                 client_secret: clientSecret,
                 state: generateState(),
@@ -346,17 +420,25 @@
 
             let response, data;
             try {
-                response = await fetch(TRAKT_TOKEN_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        code: code,
-                        client_id: pending.client_id,
-                        client_secret: pending.client_secret,
-                        redirect_uri: redirectUri,
-                        grant_type: 'authorization_code',
-                    }),
-                });
+                if (pending.mode === 'official') {
+                    response = await fetch(`${basePath}/api/official/exchange`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ code: code, state: pending.state }),
+                    });
+                } else {
+                    response = await fetch(TRAKT_TOKEN_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            code: code,
+                            client_id: pending.client_id,
+                            client_secret: pending.client_secret,
+                            redirect_uri: redirectUri,
+                            grant_type: 'authorization_code',
+                        }),
+                    });
+                }
                 data = await response.json();
             } catch (ignored) {
                 showStatus('Token exchange failed. Check your connection and try again.', 'error');
@@ -369,7 +451,11 @@
                 return;
             }
 
-            displayConfig(pending.client_id, pending.client_secret, data);
+            if (pending.mode === 'official') {
+                displayConfig(data.client_id, data.client_secret, data);
+            } else {
+                displayConfig(pending.client_id, pending.client_secret, data);
+            }
         }
 
         function displayConfig(clientId, clientSecret, tokenData) {
@@ -385,7 +471,8 @@
     created_at: ${tokenData.created_at}`;
 
             document.getElementById('configOutput').textContent = config;
-            document.getElementById('authForm').style.display = 'none';
+            document.getElementById('officialSection').classList.remove('active');
+            document.getElementById('byoSection').classList.remove('active');
             document.getElementById('resultSection').style.display = 'block';
             hideStatus();
         }
@@ -401,18 +488,22 @@
         }
 
         function resetForm() {
-            document.getElementById('clientId').value = '';
-            document.getElementById('clientSecret').value = '';
-            document.getElementById('authForm').style.display = 'block';
             document.getElementById('resultSection').style.display = 'none';
-            document.getElementById('startBtn').disabled = false;
+            document.getElementById('officialSection').classList.add('active');
+            document.getElementById('byoSection').classList.remove('active');
+            document.getElementById('tabOfficial').classList.add('active');
+            document.getElementById('tabByo').classList.remove('active');
+            document.getElementById('startOfficialBtn').disabled = false;
+            document.getElementById('startByoBtn').disabled = false;
+            document.getElementById('byoClientId').value = '';
+            document.getElementById('byoClientSecret').value = '';
             window.history.replaceState({}, '', `${basePath}/`);
             hideStatus();
         }
 
         // --- Page load ---
-        document.getElementById('redirectUri').value = redirectUri;
-        document.getElementById('redirectUriHint').textContent = redirectUri;
+        document.getElementById('byoRedirectUri').value = redirectUri;
+        document.getElementById('byoRedirectUriHint').textContent = redirectUri;
 
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');

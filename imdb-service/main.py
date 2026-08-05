@@ -56,6 +56,13 @@ PARENTAL_BROWSER_SELECTOR_TIMEOUT_SECONDS = int(
 )
 PARENTAL_BROWSER_RETRY_COUNT = int(os.getenv("PARENTAL_BROWSER_RETRY_COUNT", "2"))
 PARENTAL_BROWSER_CONCURRENCY = int(os.getenv("PARENTAL_BROWSER_CONCURRENCY", "2"))
+PARENTAL_BROWSER_MAX_CONTEXTS = int(os.getenv("PARENTAL_BROWSER_MAX_CONTEXTS", "8"))
+PARENTAL_BROWSER_IDLE_CLOSE_SECONDS = int(
+    os.getenv("PARENTAL_BROWSER_IDLE_CLOSE_SECONDS", "1800")
+)
+PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS = int(
+    os.getenv("PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS", "300")
+)
 PARENTAL_BROWSER_USER_DATA_DIR = Path(
     os.getenv("PARENTAL_BROWSER_USER_DATA_DIR", str(DATA_DIR / "playwright"))
 )
@@ -110,11 +117,14 @@ last_activity: Optional[str] = None  # ISO timestamp of last phase change
 _refresh_lock: asyncio.Lock = asyncio.Lock()  # guards manual single-table refreshes
 proxy_health: Dict[str, datetime] = {}  # proxy URL -> cooldown-until UTC
 parental_browser_contexts: Dict[str, Any] = {}
+parental_browser_context_last_used: Dict[str, float] = {}  # context key -> monotonic timestamp
+parental_browser_context_users: Dict[str, int] = {}  # context key -> in-flight fetch count
 parental_browser_manager: Any = None
 parental_browser_lock: Optional[asyncio.Lock] = None
 parental_browser_semaphore: Optional[asyncio.Semaphore] = None
 parental_decodo_browser_session_id: Optional[str] = None
 parental_prefetch_task: Optional[asyncio.Task] = None
+parental_browser_reaper_task: Optional[asyncio.Task] = None
 artifact_cleanup_task: Optional[asyncio.Task] = None
 cache_stats_snapshot: Optional[Dict[str, Any]] = None
 cache_stats_path: Optional[Path] = None
@@ -467,29 +477,60 @@ def _playwright_proxy_identity(proxy_url: Optional[str]) -> tuple[str, Optional[
     return proxy_url, proxy_settings
 
 
+async def _parental_browser_evict_excess(max_contexts: int) -> None:
+    """Close least-recently-used idle browser contexts until the cache fits the cap.
+
+    Only contexts with no in-flight fetches are evicted, so an active fetch never
+    loses its context mid-request. This bounds the number of persistent Chromium
+    instances (one per distinct proxy), preventing the container from exhausting
+    its thread/pid limit.
+    """
+    if len(parental_browser_contexts) <= max_contexts:
+        return
+
+    idle_keys = [
+        key
+        for key in parental_browser_contexts
+        if parental_browser_context_users.get(key, 0) == 0
+    ]
+    idle_keys.sort(key=lambda key: parental_browser_context_last_used.get(key, 0.0))
+
+    excess = len(parental_browser_contexts) - max_contexts
+    for key in idle_keys[:excess]:
+        context = parental_browser_contexts.pop(key, None)
+        parental_browser_context_last_used.pop(key, None)
+        if context is None:
+            continue
+        try:
+            await context.close()
+        except Exception:
+            pass  # nosec B110
+        _parental_log(
+            "browser_context_evicted_lru",
+            context_key=key,
+            max_contexts=max_contexts,
+            remaining=len(parental_browser_contexts),
+        )
+
+
 async def _get_parental_browser_context(proxy_url: Optional[str]) -> Any:
     """Get or create a long-lived persistent browser context for parental fetches."""
     global parental_browser_manager
 
     context_key = _parental_browser_context_key(proxy_url)
-    existing = parental_browser_contexts.get(context_key)
-    if existing is not None:
-        _parental_log(
-            "browser_context_reused",
-            proxy=_proxy_log_label(proxy_url),
-            context_key=context_key,
-        )
-        return existing
 
     async with _get_parental_browser_lock():
         existing = parental_browser_contexts.get(context_key)
         if existing is not None:
+            parental_browser_context_last_used[context_key] = time.monotonic()
             _parental_log(
                 "browser_context_reused",
                 proxy=_proxy_log_label(proxy_url),
                 context_key=context_key,
             )
             return existing
+
+        await _parental_browser_evict_excess(PARENTAL_BROWSER_MAX_CONTEXTS - 1)
 
         from playwright.async_api import async_playwright
         from playwright_stealth import Stealth
@@ -525,6 +566,7 @@ async def _get_parental_browser_context(proxy_url: Optional[str]) -> Any:
         context.set_default_timeout(PARENTAL_BROWSER_SELECTOR_TIMEOUT_SECONDS * 1000)
         await Stealth().apply_stealth_async(context)
         parental_browser_contexts[context_key] = context
+        parental_browser_context_last_used[context_key] = time.monotonic()
         _parental_log(
             "browser_context_ready",
             proxy=_proxy_log_label(proxy_url),
@@ -533,8 +575,70 @@ async def _get_parental_browser_context(proxy_url: Optional[str]) -> Any:
         return context
 
 
+async def _parental_browser_reap_idle() -> int:
+    """Close browser contexts idle longer than the idle timeout.
+
+    Unlike ``_parental_browser_evict_excess`` (which only runs when a new
+    context is created), this runs on a schedule so idle Chromium instances
+    are released instead of holding the container's pid/thread budget forever.
+    Returns the number of contexts closed.
+    """
+    global parental_browser_manager
+
+    idle_timeout = max(1, PARENTAL_BROWSER_IDLE_CLOSE_SECONDS)
+    now = time.monotonic()
+
+    async with _get_parental_browser_lock():
+        stale_keys = [
+            key
+            for key, last_used in parental_browser_context_last_used.items()
+            if parental_browser_context_users.get(key, 0) == 0
+            and now - last_used >= idle_timeout
+        ]
+        for key in stale_keys:
+            last_used = parental_browser_context_last_used.pop(key, 0.0)
+            context = parental_browser_contexts.pop(key, None)
+            parental_browser_context_users.pop(key, None)
+            if context is None:
+                continue
+            try:
+                await context.close()
+            except Exception:
+                pass  # nosec B110
+            _parental_log(
+                "browser_context_reaped_idle",
+                context_key=key,
+                idle_seconds=int(now - last_used),
+                remaining=len(parental_browser_contexts),
+            )
+
+        if not parental_browser_contexts and parental_browser_manager is not None:
+            manager = parental_browser_manager
+            parental_browser_manager = None
+            try:
+                await manager.stop()
+            except Exception:
+                pass  # nosec B110
+            _parental_log("browser_manager_stopped_idle")
+
+        return len(stale_keys)
+
+
+async def _parental_browser_reaper_worker() -> None:
+    """Periodically close idle browser contexts to bound pid/thread usage."""
+    while True:
+        try:
+            await _parental_browser_reap_idle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"⚠️  Browser context reaper failed: {e}")
+        await asyncio.sleep(max(5, PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS))
+
+
+
 async def _close_parental_browser_contexts() -> None:
-    """Close any cached parental browser contexts and the shared Playwright manager."""
+    """Close any cached browser contexts and the shared Playwright manager."""
     global parental_browser_manager
 
     async with _get_parental_browser_lock():
@@ -544,6 +648,8 @@ async def _close_parental_browser_contexts() -> None:
             except Exception:
                 pass  # nosec B110
         parental_browser_contexts.clear()
+        parental_browser_context_last_used.clear()
+        parental_browser_context_users.clear()
 
         if parental_browser_manager is not None:
             try:
@@ -650,6 +756,7 @@ async def _migrate_cache_tables() -> None:
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown: load DB state, rebuild charts, start scheduler."""
     global last_refresh, refresh_worker_task, parental_prefetch_task, artifact_cleanup_task
+    global parental_browser_reaper_task
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("🔧 Initializing IMDB Service...")
@@ -661,6 +768,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Could not initialize cache DB: {e}")
 
     artifact_cleanup_task = asyncio.create_task(_artifact_cleanup_worker())
+    parental_browser_reaper_task = asyncio.create_task(_parental_browser_reaper_worker())
 
     if DB_PATH.exists():
         try:
@@ -714,6 +822,12 @@ async def lifespan(app: FastAPI):
         artifact_cleanup_task.cancel()
         try:
             await artifact_cleanup_task
+        except asyncio.CancelledError:
+            pass
+    if parental_browser_reaper_task:
+        parental_browser_reaper_task.cancel()
+        try:
+            await parental_browser_reaper_task
         except asyncio.CancelledError:
             pass
     await http_clients.close_clients()
@@ -1535,15 +1649,38 @@ async def _fetch_parental_guide_html_via_browser(
     if not PARENTAL_BROWSER_ENABLED:
         raise HTTPException(status_code=502, detail="Browser fallback is disabled")
 
+    url = f"{IMDB_WEB_BASE_URL}/title/{imdb_id}/parentalguide"
+    timeout_ms = PARENTAL_BROWSER_NAV_TIMEOUT_SECONDS * 1000
+    browser_retries = max(1, PARENTAL_BROWSER_RETRY_COUNT)
+    context = await _get_parental_browser_context(proxy_url)
+    context_key = _parental_browser_context_key(proxy_url)
+    parental_browser_context_users[context_key] = (
+        parental_browser_context_users.get(context_key, 0) + 1
+    )
+    try:
+        return await _fetch_parental_guide_html_via_browser_inner(
+            imdb_id, proxy_url, context, browser_retries, url, timeout_ms
+        )
+    finally:
+        parental_browser_context_users[context_key] = max(
+            0, parental_browser_context_users.get(context_key, 0) - 1
+        )
+
+
+async def _fetch_parental_guide_html_via_browser_inner(
+    imdb_id: str,
+    proxy_url: Optional[str],
+    context: Any,
+    browser_retries: int,
+    url: str,
+    timeout_ms: int,
+) -> str:
+    """Run the browser-based parental fetch inside a shared context."""
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
     except ImportError as e:
         raise HTTPException(status_code=502, detail=f"Playwright is not installed: {e}")
 
-    url = f"{IMDB_WEB_BASE_URL}/title/{imdb_id}/parentalguide"
-    timeout_ms = PARENTAL_BROWSER_NAV_TIMEOUT_SECONDS * 1000
-    browser_retries = max(1, PARENTAL_BROWSER_RETRY_COUNT)
-    context = await _get_parental_browser_context(proxy_url)
     try:
         async with _get_parental_browser_semaphore():
             last_error: Optional[HTTPException] = None
@@ -3115,12 +3252,11 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 
     <div class="endpoint">
-
-    <div class="endpoint">
         <strong>GET /interests/{{imdb_id}}</strong> - IMDb interests (genres, themes, constraints)<br>
         <code>curl "{base}/interests/tt0111161"</code>
     </div>
 
+    <div class="endpoint">
         <strong>GET /keywords/{{imdb_id}}</strong> - Cached IMDb keywords with interest/vote scores<br>
         <code>curl "{base}/keywords/tt0111161"</code>
     </div>

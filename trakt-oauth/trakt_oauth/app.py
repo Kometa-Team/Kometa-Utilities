@@ -23,6 +23,12 @@ TRAKT_REDIRECT_URI = os.getenv(
     "TRAKT_REDIRECT_URI", "http://localhost:8080/callback"
 )
 AUTHORIZATION_TTL_SECONDS = 600
+
+# Official Kometa Trakt app credentials, held server-side only. These are used
+# by the /api/official/* endpoints so the client_secret never reaches the
+# browser. Leave empty to disable the official flow.
+CLIENT_ID = os.getenv("CLIENT_ID", "")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 pending_authorizations = {}
 pending_authorizations_lock = Lock()
 
@@ -53,6 +59,18 @@ def remove_expired_authorizations(now):
     ]
     for state in expired_states:
         pending_authorizations.pop(state, None)
+
+
+def build_authorization_url(client_id, state):
+    """Build the Trakt authorization URL for a given client and state."""
+    return f"{TRAKT_AUTH_URL}/authorize?" + urlencode(
+        {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": TRAKT_REDIRECT_URI,
+            "state": state,
+        }
+    )
 
 
 def exchange_code_for_token(client_id, client_secret, code, redirect_uri):
@@ -105,15 +123,7 @@ def start_authorization():
             "created_at": now,
         }
 
-    authorization_url = f"{TRAKT_AUTH_URL}/authorize?" + urlencode(
-        {
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": TRAKT_REDIRECT_URI,
-            "state": state,
-        }
-    )
-    return jsonify({"authorization_url": authorization_url})
+    return jsonify({"authorization_url": build_authorization_url(client_id, state)})
 
 
 @app.route("/callback")
@@ -208,6 +218,95 @@ def exchange_code():
         )
     except Exception as e:
         print(f"Error in exchange_code: {e}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+
+@app.route("/api/official/start", methods=["POST"])
+def official_start_authorization():
+    """Start an authorization with the server-held official credentials.
+
+    The client_secret never leaves this process; the browser only receives the
+    authorization URL and a single-use state to present on the callback.
+    """
+    if not CLIENT_ID or not CLIENT_SECRET:
+        return (
+            jsonify({"error": "The Kometa Trakt app is not configured."}),
+            503,
+        )
+
+    state = secrets.token_urlsafe(32)
+    now = time.monotonic()
+    with pending_authorizations_lock:
+        remove_expired_authorizations(now)
+        pending_authorizations[state] = {
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "created_at": now,
+        }
+
+    return jsonify({"authorization_url": build_authorization_url(CLIENT_ID, state)})
+
+
+@app.route("/api/official/exchange", methods=["POST"])
+def official_exchange_code():
+    """Exchange an authorization code using the official credentials.
+
+    The browser supplies only the code and the state issued by
+    /api/official/start; the client_id/client_secret come from this process.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        code = data.get("code", "").strip()
+        state = data.get("state", "").strip()
+        if not code or not state:
+            return (
+                jsonify({"error": "Missing required parameters (code, state)"}),
+                400,
+            )
+
+        now = time.monotonic()
+        with pending_authorizations_lock:
+            remove_expired_authorizations(now)
+            authorization = pending_authorizations.pop(state, None)
+
+        if authorization is None:
+            return (
+                jsonify({"error": "This authorization request is invalid, expired, or already used."}),
+                400,
+            )
+
+        token_data = exchange_code_for_token(
+            authorization["client_id"],
+            authorization["client_secret"],
+            code,
+            TRAKT_REDIRECT_URI,
+        )
+        if not token_data:
+            return (
+                jsonify({"error": "Failed to exchange code for token. Check server logs."}),
+                500,
+            )
+
+        if "error" in token_data:
+            error_msg = token_data.get(
+                "error_description", token_data.get("error", "Unknown error")
+            )
+            return jsonify({"error": f"Trakt error: {error_msg}"}), 400
+
+        return jsonify(
+            {
+                "success": True,
+                "client_id": authorization["client_id"],
+                "client_secret": authorization["client_secret"],
+                "access_token": token_data.get("access_token"),
+                "refresh_token": token_data.get("refresh_token"),
+                "expires_in": token_data.get("expires_in"),
+                "token_type": token_data.get("token_type", "Bearer"),
+                "created_at": token_data.get("created_at"),
+            }
+        )
+    except Exception as e:
+        print(f"Error in official_exchange_code: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 

@@ -96,6 +96,7 @@ Supported environment variables for `imdb-service`:
 - `PARENTAL_PROXY_URLS`
 - `PARENTAL_PROXY_RETRY_COUNT`
 - `PARENTAL_PROXY_BAN_TTL_MINUTES`
+- `PARENTAL_BROWSER_MAX_CONTEXTS`
 
 Example:
 
@@ -104,6 +105,7 @@ PARENTAL_PROXY_ENABLED=true
 PARENTAL_PROXY_URLS=http://user:pass@proxy1.example.com:8080,http://user:pass@proxy2.example.com:8080
 PARENTAL_PROXY_RETRY_COUNT=2
 PARENTAL_PROXY_BAN_TTL_MINUTES=30
+PARENTAL_BROWSER_MAX_CONTEXTS=8
 ```
 
 Notes:
@@ -111,6 +113,7 @@ Notes:
 - proxy rotation is used only for IMDb parental guide fetches
 - failed proxies are temporarily cooled down in-process before reuse
 - cached parental guide data is still preferred, so proxy usage should stay low in normal operation
+- each distinct proxy URL used by the browser fallback opens its own persistent Playwright context (one Chromium instance); `PARENTAL_BROWSER_MAX_CONTEXTS` caps how many are held at once, with idle least-recently-used contexts closed above the cap so the container never exhausts its thread/pid limit
 - for docker compose deployments, put these values in the server-side `.env` file rather than committing credentials into `docker-compose.yml`
 
 Example server-side `.env` values:

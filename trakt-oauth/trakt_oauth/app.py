@@ -19,9 +19,7 @@ app.secret_key = os.getenv("SECRET_KEY", "dev-key-change-in-production")
 # Trakt API Configuration
 TRAKT_API_URL = "https://api.trakt.tv"
 TRAKT_AUTH_URL = "https://trakt.tv/oauth"
-TRAKT_REDIRECT_URI = os.getenv(
-    "TRAKT_REDIRECT_URI", "http://localhost:8080/callback"
-)
+TRAKT_REDIRECT_URI = os.getenv("TRAKT_REDIRECT_URI", "http://localhost:8080/callback")
 AUTHORIZATION_TTL_SECONDS = 600
 
 # Official Kometa Trakt app credentials, held server-side only. These are used
@@ -29,7 +27,7 @@ AUTHORIZATION_TTL_SECONDS = 600
 # browser. Leave empty to disable the official flow.
 CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-pending_authorizations = {}
+pending_authorizations: dict[str, dict] = {}
 pending_authorizations_lock = Lock()
 
 
@@ -191,9 +189,7 @@ def exchange_code():
                 400,
             )
 
-        token_data = exchange_code_for_token(
-            client_id, client_secret, code, TRAKT_REDIRECT_URI
-        )
+        token_data = exchange_code_for_token(client_id, client_secret, code, TRAKT_REDIRECT_URI)
         if not token_data:
             return (
                 jsonify({"error": "Failed to exchange code for token. Check your credentials."}),
@@ -271,7 +267,9 @@ def official_exchange_code():
 
         if authorization is None:
             return (
-                jsonify({"error": "This authorization request is invalid, expired, or already used."}),
+                jsonify(
+                    {"error": "This authorization request is invalid, expired, or already used."}
+                ),
                 400,
             )
 

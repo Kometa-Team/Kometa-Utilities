@@ -93,7 +93,6 @@ CREATE TABLE IF NOT EXISTS import_meta (
 """
 
 
-
 CACHE_SCHEMA_SQL = """
 
 CREATE TABLE IF NOT EXISTS import_meta (
@@ -131,6 +130,7 @@ CREATE TABLE IF NOT EXISTS imdb_constraint_cache (
     PRIMARY KEY (constraint_type, constraint_key)
 );
 """
+
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all dataset tables and indexes in the given connection."""
@@ -600,7 +600,6 @@ def run_direct_import(
             table_updated[table] = datetime.now(timezone.utc).isoformat()
             if on_table_done:
                 on_table_done(table, count)
-
 
         conn.execute(
             "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",

@@ -56,9 +56,7 @@ def test_parental_failure_artifact_cleanup_enforces_size_cap(tmp_path, monkeypat
     monkeypatch.setattr(main, "PARENTAL_FAILURE_RETENTION_DAYS", 14)
     monkeypatch.setattr(main, "PARENTAL_FAILURE_MAX_MB", 0)
 
-    removed = main._cleanup_parental_failure_artifacts(
-        datetime(2026, 7, 21, tzinfo=timezone.utc)
-    )
+    removed = main._cleanup_parental_failure_artifacts(datetime(2026, 7, 21, tzinfo=timezone.utc))
 
     assert removed == {"files": 1, "bytes": 4}
     assert not artifact.exists()
@@ -4376,7 +4374,7 @@ def test_dashboard_respects_root_path(monkeypatch):
     client = TestClient(main.app)
     response = client.get("/dashboard")
     assert response.status_code == 200
-    assert '/imdb-service/logo.svg' in response.text
+    assert "/imdb-service/logo.svg" in response.text
 
 
 def test_import_disk_space_preflight_rejects_low_capacity(tmp_path, monkeypatch):
@@ -4394,9 +4392,7 @@ def test_refresh_unknown_table_returns_404(monkeypatch):
 
     monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
     client = TestClient(main.app, raise_server_exceptions=False)
-    response = client.post(
-        "/refresh/not_a_table", headers={"X-Admin-Token": "test-admin-token"}
-    )
+    response = client.post("/refresh/not_a_table", headers={"X-Admin-Token": "test-admin-token"})
     assert response.status_code == 404
 
 
@@ -4406,9 +4402,7 @@ def test_refresh_requires_admin_token(monkeypatch):
     monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
     client = TestClient(main.app)
     assert client.post("/refresh/title_basics").status_code == 401
-    response = client.post(
-        "/refresh/title_basics", headers={"X-Admin-Token": "wrong-token"}
-    )
+    response = client.post("/refresh/title_basics", headers={"X-Admin-Token": "wrong-token"})
     assert response.status_code == 401
 
 
@@ -4418,9 +4412,7 @@ def test_refresh_conflict_when_not_idle(monkeypatch):
     monkeypatch.setattr(main, "IMDB_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setattr(main, "current_phase", "importing")
     client = TestClient(main.app, raise_server_exceptions=False)
-    response = client.post(
-        "/refresh/title_basics", headers={"X-Admin-Token": "test-admin-token"}
-    )
+    response = client.post("/refresh/title_basics", headers={"X-Admin-Token": "test-admin-token"})
     assert response.status_code == 409
 
 
@@ -4437,9 +4429,7 @@ def test_refresh_starts_background_task(monkeypatch):
 
     monkeypatch.setattr(main, "_refresh_single_table", fake_refresh)
     client = TestClient(main.app)
-    response = client.post(
-        "/refresh/title_ratings", headers={"X-Admin-Token": "test-admin-token"}
-    )
+    response = client.post("/refresh/title_ratings", headers={"X-Admin-Token": "test-admin-token"})
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"

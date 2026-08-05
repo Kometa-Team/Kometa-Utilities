@@ -1,8 +1,8 @@
 """IMDB Service - FastAPI caching service for IMDB public datasets."""
 
 import asyncio
-import hashlib
 import csv
+import hashlib
 import io
 import json
 import os
@@ -25,9 +25,9 @@ import constraints
 import http_clients
 import httpx
 import singleflight
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from importer import ALLOWED_TABLES, SCHEMA_SQL, CACHE_SCHEMA_SQL, TABLE_TO_STEM
+from importer import ALLOWED_TABLES, CACHE_SCHEMA_SQL, SCHEMA_SQL, TABLE_TO_STEM
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
@@ -57,9 +57,7 @@ PARENTAL_BROWSER_SELECTOR_TIMEOUT_SECONDS = int(
 PARENTAL_BROWSER_RETRY_COUNT = int(os.getenv("PARENTAL_BROWSER_RETRY_COUNT", "2"))
 PARENTAL_BROWSER_CONCURRENCY = int(os.getenv("PARENTAL_BROWSER_CONCURRENCY", "2"))
 PARENTAL_BROWSER_MAX_CONTEXTS = int(os.getenv("PARENTAL_BROWSER_MAX_CONTEXTS", "8"))
-PARENTAL_BROWSER_IDLE_CLOSE_SECONDS = int(
-    os.getenv("PARENTAL_BROWSER_IDLE_CLOSE_SECONDS", "1800")
-)
+PARENTAL_BROWSER_IDLE_CLOSE_SECONDS = int(os.getenv("PARENTAL_BROWSER_IDLE_CLOSE_SECONDS", "1800"))
 PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS = int(
     os.getenv("PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS", "300")
 )
@@ -290,9 +288,7 @@ def _cleanup_parental_failure_artifacts(now: Optional[datetime] = None) -> Dict[
 
     current = now or datetime.now(timezone.utc)
     cutoff = current.timestamp() - PARENTAL_FAILURE_RETENTION_DAYS * 86400
-    pattern = re.compile(
-        r"^tt\d+-attempt\d+-.+-\d{8}T\d{6}Z\.(?:png|html|json)$"
-    )
+    pattern = re.compile(r"^tt\d+-attempt\d+-.+-\d{8}T\d{6}Z\.(?:png|html|json)$")
     candidates: list[tuple[Path, os.stat_result]] = []
     for path in PARENTAL_BROWSER_SCREENSHOT_DIR.iterdir():
         if path.is_file() and pattern.fullmatch(path.name):
@@ -489,9 +485,7 @@ async def _parental_browser_evict_excess(max_contexts: int) -> None:
         return
 
     idle_keys = [
-        key
-        for key in parental_browser_contexts
-        if parental_browser_context_users.get(key, 0) == 0
+        key for key in parental_browser_contexts if parental_browser_context_users.get(key, 0) == 0
     ]
     idle_keys.sort(key=lambda key: parental_browser_context_last_used.get(key, 0.0))
 
@@ -592,8 +586,7 @@ async def _parental_browser_reap_idle() -> int:
         stale_keys = [
             key
             for key, last_used in parental_browser_context_last_used.items()
-            if parental_browser_context_users.get(key, 0) == 0
-            and now - last_used >= idle_timeout
+            if parental_browser_context_users.get(key, 0) == 0 and now - last_used >= idle_timeout
         ]
         for key in stale_keys:
             last_used = parental_browser_context_last_used.pop(key, 0.0)
@@ -636,7 +629,6 @@ async def _parental_browser_reaper_worker() -> None:
         await asyncio.sleep(max(5, PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS))
 
 
-
 async def _close_parental_browser_contexts() -> None:
     """Close any cached browser contexts and the shared Playwright manager."""
     global parental_browser_manager
@@ -664,9 +656,9 @@ async def _ensure_db_schema() -> None:
     if not DB_PATH.exists():
         return
 
-
     async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        await db.execute('''
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS imdb_parental (
             imdb_id TEXT PRIMARY KEY,
             nudity TEXT,
@@ -675,19 +667,24 @@ async def _ensure_db_schema() -> None:
             alcohol TEXT,
             frightening TEXT,
             updated_at TEXT
-        )''')
-        await db.execute('''
+        )"""
+        )
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS imdb_keywords (
             imdb_id TEXT PRIMARY KEY,
             keywords TEXT,
             expiration_date TEXT
-        )''')
-        await db.execute('''
+        )"""
+        )
+        await db.execute(
+            """
         CREATE TABLE IF NOT EXISTS imdb_interests (
             imdb_id TEXT PRIMARY KEY,
             interests TEXT,
             expiration_date TEXT
-        )''')
+        )"""
+        )
 
         await db.commit()
 
@@ -1159,13 +1156,9 @@ async def health_ready() -> JSONResponse:
     try:
         required_core = set(ALLOWED_TABLES) | {"import_meta"}
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             core_tables = {row[0] for row in await cursor.fetchall()}
-            cursor = await db.execute(
-                "SELECT value FROM import_meta WHERE key = 'last_refresh'"
-            )
+            cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'last_refresh'")
             last_completed_refresh = await cursor.fetchone()
         required_cache = {
             "imdb_parental",
@@ -1174,9 +1167,7 @@ async def health_ready() -> JSONResponse:
             "imdb_constraint_cache",
         }
         async with aiosqlite.connect(CACHE_DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             cache_tables = {row[0] for row in await cursor.fetchall()}
         if not required_core.issubset(core_tables) or not last_completed_refresh:
             return JSONResponse(
@@ -2013,11 +2004,13 @@ async def _query_parental_cache(
             updated_dt = datetime.fromisoformat(updated_at)
             if updated_dt.tzinfo is None:
                 updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-            
+
             # Check the title's release year to determine if we should ever expire this
             ttl_days = PARENTAL_GUIDE_TTL_DAYS
             async with aiosqlite.connect(DB_PATH) as core_db:
-                core_cursor = await core_db.execute("SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,))
+                core_cursor = await core_db.execute(
+                    "SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,)
+                )
                 year_row = await core_cursor.fetchone()
                 if year_row and year_row[0]:
                     try:
@@ -2028,7 +2021,7 @@ async def _query_parental_cache(
                             ttl_days = 99999
                     except ValueError:
                         pass
-                        
+
             expired = datetime.now(timezone.utc) - updated_dt > timedelta(days=ttl_days)
         return (
             _normalize_parental_payload(
@@ -2198,9 +2191,7 @@ async def _refresh_keywords_cache(imdb_id: str) -> Dict[str, list[int]]:
         await _update_keywords_cache(imdb_id, keywords)
         return keywords
 
-    return await singleflight.run_singleflight(
-        ("keywords", str(CACHE_DB_PATH), imdb_id), refresh
-    )
+    return await singleflight.run_singleflight(("keywords", str(CACHE_DB_PATH), imdb_id), refresh)
 
 
 async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
@@ -2244,10 +2235,7 @@ async def _refresh_parental_cache(imdb_id: str) -> tuple[Dict[str, str], str]:
         cached_at = await _update_parental_cache(imdb_id, parental)
         return parental, cached_at
 
-    return await singleflight.run_singleflight(
-        ("parental", str(CACHE_DB_PATH), imdb_id), refresh
-    )
-
+    return await singleflight.run_singleflight(("parental", str(CACHE_DB_PATH), imdb_id), refresh)
 
 
 async def _load_cache_stats() -> Dict[str, Any]:
@@ -2281,8 +2269,7 @@ async def _load_cache_stats() -> Dict[str, Any]:
     breakdown: Dict[str, Dict[str, int]] = {}
     for severity in severities:
         values = {
-            category: int(row[f"{category}_{severity.lower()}"] or 0)
-            for category in categories
+            category: int(row[f"{category}_{severity.lower()}"] or 0) for category in categories
         }
         if any(values.values()):
             breakdown[severity] = values
@@ -3432,11 +3419,11 @@ async def dashboard(request: Request) -> HTMLResponse:
         <h2>Charts</h2>
         <ul id="charts"><li>Loading…</li></ul>
 
-        
+
         <h2>Parental Cache</h2>
         <ul id="parental"><li>Loading…</li></ul>
 
-        
+
         <h2>Constraint Cache</h2>
         <ul id="constraints"><li>Loading…</li></ul>
 
@@ -3548,10 +3535,10 @@ async def dashboard(request: Request) -> HTMLResponse:
     function renderParental(pc) {{
         const el = document.getElementById('parental');
         if (!pc || !pc.breakdown) {{ el.innerHTML = '<li>No data</li>'; return; }}
-        
+
         const categories = ["nudity", "violence", "profanity", "alcohol", "frightening"];
         let html = `<li style="column-span: all; margin-bottom: 8px;">items_cached: <span class="count">${{fmt(pc.items_cached)}}</span></li>`;
-        
+
         html += `<table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: right;">
             <thead>
                 <tr style="color: #8a94a6; border-bottom: 1px solid #2a323d;">
@@ -3564,7 +3551,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                 </tr>
             </thead>
             <tbody>`;
-            
+
         const severities = ["None", "Mild", "Moderate", "Severe", "Unknown"];
         for (const sev of severities) {{
             if (!pc.breakdown[sev]) continue;
@@ -3576,7 +3563,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             html += `</tr>`;
         }}
         html += `</tbody></table>`;
-        
+
         // Remove the default ul styling for this specific container since we used a table
         el.style.columns = '1';
         el.innerHTML = html;
@@ -3665,11 +3652,11 @@ const urlParams = new URLSearchParams(window.location.search);
             msgEl.style.cssText = 'background: #2d4a2d; color: #7fd97f; padding: 12px 16px; border-radius: 8px; margin-bottom: 24px; font-size: 14px; font-weight: 500;';
             msgEl.textContent = msg;
             document.querySelector('header').insertAdjacentElement('afterend', msgEl);
-            
+
             // Clean up the URL so it doesn't persist on refresh
             window.history.replaceState({{}}, document.title, window.location.pathname);
         }}
-        
+
         const r = await fetch(BASE + '/stats');
         const d = await r.json();
         const phaseEl = document.getElementById('phase');
@@ -4016,8 +4003,6 @@ async def get_parental_guide(
     }
 
 
-
-
 async def _query_interests_cache(
     imdb_id: str,
 ) -> tuple[Optional[list[Dict[str, str]]], Optional[bool]]:
@@ -4032,12 +4017,12 @@ async def _query_interests_cache(
         row = await cursor.fetchone()
         if not row:
             return None, None
-            
+
         try:
             interests = json.loads(row["interests"])
         except json.JSONDecodeError:
             return None, None
-            
+
         expiration_date = row["expiration_date"]
         expired = True
         if expiration_date:
@@ -4045,7 +4030,7 @@ async def _query_interests_cache(
             if expiration_dt.tzinfo is None:
                 expiration_dt = expiration_dt.replace(tzinfo=timezone.utc)
             expired = datetime.now(timezone.utc) > expiration_dt
-            
+
         return interests, expired
 
 
@@ -4056,7 +4041,9 @@ async def _update_interests_cache(imdb_id: str, interests: list[Dict[str, str]])
     # Determine TTL based on title age, same as parental guide
     ttl_days = KEYWORDS_TTL_DAYS
     async with aiosqlite.connect(DB_PATH) as core_db:
-        core_cursor = await core_db.execute("SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,))
+        core_cursor = await core_db.execute(
+            "SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,)
+        )
         year_row = await core_cursor.fetchone()
         if year_row and year_row[0]:
             try:
@@ -4070,13 +4057,13 @@ async def _update_interests_cache(imdb_id: str, interests: list[Dict[str, str]])
     expiration_date = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
     async with aiosqlite.connect(CACHE_DB_PATH) as db:
         await db.execute(
-            '''
+            """
             INSERT INTO imdb_interests(imdb_id, interests, expiration_date)
             VALUES(?, ?, ?)
             ON CONFLICT(imdb_id) DO UPDATE SET
                 interests = excluded.interests,
                 expiration_date = excluded.expiration_date
-            ''',
+            """,
             (imdb_id, json.dumps(interests), expiration_date),
         )
         await db.commit()
@@ -4090,14 +4077,13 @@ async def _refresh_interests_cache(imdb_id: str) -> list[Dict[str, str]]:
         await _update_interests_cache(imdb_id, interests)
         return interests
 
-    return await singleflight.run_singleflight(
-        ("interests", str(CACHE_DB_PATH), imdb_id), refresh
-    )
+    return await singleflight.run_singleflight(("interests", str(CACHE_DB_PATH), imdb_id), refresh)
 
 
 async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
     """Fetch all interests for a title via IMDb GraphQL."""
-    query = '''
+    query = (
+        """
     query {
       title(id: "%s") {
         interests(first: 50) {
@@ -4105,7 +4091,9 @@ async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
         }
       }
     }
-    ''' % imdb_id
+    """
+        % imdb_id
+    )
 
     try:
         client = http_clients.get_graphql_client()
@@ -4147,14 +4135,13 @@ async def get_interests(
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
     imdb_id = _validate_imdb_id(imdb_id)
-    
+
     cached, expired = (None, None) if ignore_cache else await _query_interests_cache(imdb_id)
     if cached is not None and expired is False:
         return {"imdb_id": imdb_id, "interests": cached}
-        
+
     interests = await _refresh_interests_cache(imdb_id)
     return {"imdb_id": imdb_id, "interests": interests}
-
 
 
 @app.get("/keywords/{imdb_id}")
@@ -4272,61 +4259,68 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
         return dict(row)
 
 
-
 @app.post("/upload-csv")
-async def upload_csv(request: Request, file: UploadFile = File(...)):
+async def upload_csv(request: Request, file: UploadFile = File(...)):  # noqa: B008
+    """Upload a CSV file to populate the IMDB cache database."""
     _require_admin(request)
-    if not file.filename.endswith('.csv'):
+    if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Must be a .csv file")
-    
+
     content = await file.read()
     try:
-        text = content.decode('utf-8')
+        text = content.decode("utf-8")
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
-    
+
     reader = csv.DictReader(io.StringIO(text))
     fieldnames = reader.fieldnames or []
-    
+
     if "imdb_id" not in fieldnames:
         raise HTTPException(status_code=400, detail="CSV must contain an 'imdb_id' column")
-        
-    is_parental = all(k in fieldnames for k in ["nudity", "violence", "profanity", "alcohol", "frightening"])
+
+    is_parental = all(
+        k in fieldnames for k in ["nudity", "violence", "profanity", "alcohol", "frightening"]
+    )
     is_keyword = "keywords" in fieldnames
     is_interest = "interests" in fieldnames
-    
+
     if not is_parental and not is_keyword and not is_interest:
-        raise HTTPException(status_code=400, detail="CSV must contain either parental categories, a keywords column, or an interests column")
-        
+        raise HTTPException(
+            status_code=400,
+            detail="CSV must contain either parental categories, a keywords column, or an interests column",
+        )
+
     await _ensure_db_schema()
     now_iso = datetime.now(timezone.utc).isoformat()
     expire_iso = (datetime.now(timezone.utc) + timedelta(days=KEYWORDS_TTL_DAYS)).isoformat()
-    
-    table_name = "imdb_parental" if is_parental else "imdb_keywords" if is_keyword else "imdb_interests"
-    
+
+    table_name = (
+        "imdb_parental" if is_parental else "imdb_keywords" if is_keyword else "imdb_interests"
+    )
+
     inserted_count = 0
     updated_count = 0
     ignored_count = 0
-    
+
     async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        cursor = await db.execute(f"SELECT imdb_id FROM {table_name}")
+        cursor = await db.execute(f"SELECT imdb_id FROM {table_name}")  # nosec B608
         existing_ids = {row[0] for row in await cursor.fetchall()}
-        
+
         for row in reader:
             imdb_id = row.get("imdb_id", "").strip().lower()
             if not imdb_id.startswith("tt"):
                 ignored_count += 1
                 continue
-                
+
             if imdb_id in existing_ids:
                 updated_count += 1
             else:
                 inserted_count += 1
                 existing_ids.add(imdb_id)
-                
+
             if is_parental:
                 await db.execute(
-                    '''
+                    """
                     INSERT INTO imdb_parental(imdb_id, nudity, violence, profanity, alcohol, frightening, updated_at)
                     VALUES(?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(imdb_id) DO UPDATE SET
@@ -4336,7 +4330,7 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
                         alcohol = excluded.alcohol,
                         frightening = excluded.frightening,
                         updated_at = excluded.updated_at
-                    ''',
+                    """,
                     (
                         imdb_id,
                         row.get("nudity", "None"),
@@ -4344,8 +4338,8 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
                         row.get("profanity", "None"),
                         row.get("alcohol", "None"),
                         row.get("frightening", "None"),
-                        now_iso
-                    )
+                        now_iso,
+                    ),
                 )
             elif is_keyword:
                 raw_kw = row.get("keywords", "")
@@ -4358,16 +4352,16 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
                     interested = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                     voted = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                     parsed_kw[name] = [interested, voted]
-                
+
                 await db.execute(
-                    '''
+                    """
                     INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date)
                     VALUES(?, ?, ?)
                     ON CONFLICT(imdb_id) DO UPDATE SET
                         keywords = excluded.keywords,
                         expiration_date = excluded.expiration_date
-                    ''',
-                    (imdb_id, json.dumps(parsed_kw), expire_iso)
+                    """,
+                    (imdb_id, json.dumps(parsed_kw), expire_iso),
                 )
             elif is_interest:
                 raw_int = row.get("interests", "")
@@ -4378,21 +4372,26 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
                     parts = int_segment.split(":")
                     if len(parts) >= 2:
                         parsed_int.append({"id": parts[0], "text": parts[1]})
-                
+
                 await db.execute(
-                    '''
+                    """
                     INSERT INTO imdb_interests(imdb_id, interests, expiration_date)
                     VALUES(?, ?, ?)
                     ON CONFLICT(imdb_id) DO UPDATE SET
                         interests = excluded.interests,
                         expiration_date = excluded.expiration_date
-                    ''',
-                    (imdb_id, json.dumps(parsed_int), expire_iso)
+                    """,
+                    (imdb_id, json.dumps(parsed_int), expire_iso),
                 )
         await db.commit()
-    
-    print(f"📥 CSV Upload complete for {table_name}: {inserted_count} new records inserted, {updated_count} existing records updated, {ignored_count} rows ignored.")
-    
+
+    print(
+        f"📥 CSV Upload complete for {table_name}: {inserted_count} new records inserted, {updated_count} existing records updated, {ignored_count} rows ignored."
+    )
+
     import urllib.parse
+
     msg = f"Successfully processed {inserted_count + updated_count} rows ({inserted_count} new items added, {updated_count} updated)."
-    return RedirectResponse(url=f"{ROOT_PATH}/dashboard?msg={urllib.parse.quote(msg)}", status_code=303)
+    return RedirectResponse(
+        url=f"{ROOT_PATH}/dashboard?msg={urllib.parse.quote(msg)}", status_code=303
+    )

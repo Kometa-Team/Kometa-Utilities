@@ -15,7 +15,6 @@ from typing import Any, Optional
 
 import aiosqlite
 import http_clients
-import httpx
 import singleflight
 
 GRAPHQL_URL = os.getenv("IMDB_GRAPHQL_URL", "https://api.graphql.imdb.com/")

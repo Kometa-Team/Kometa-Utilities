@@ -27,11 +27,9 @@ LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "myanimelist-log
 # flow; CLIENT_SECRET is kept as a fallback for any future non-PKCE needs.
 CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-MAL_REDIRECT_URI = os.getenv(
-    "MAL_REDIRECT_URI", "https://utilities.kometa.wiki/mal-oauth/callback"
-)
+MAL_REDIRECT_URI = os.getenv("MAL_REDIRECT_URI", "https://utilities.kometa.wiki/mal-oauth/callback")
 AUTHORIZATION_TTL_SECONDS = 600
-pending_authorizations = {}
+pending_authorizations: dict[str, dict] = {}
 pending_authorizations_lock = Lock()
 
 
@@ -202,9 +200,7 @@ def official_start_authorization():
             "created_at": now,
         }
 
-    return jsonify(
-        {"authorization_url": build_authorization_url(CLIENT_ID, state, code_verifier)}
-    )
+    return jsonify({"authorization_url": build_authorization_url(CLIENT_ID, state, code_verifier)})
 
 
 @app.route("/api/official/exchange", methods=["POST"])
@@ -232,7 +228,9 @@ def official_exchange_code():
 
         if authorization is None:
             return (
-                jsonify({"error": "This authorization request is invalid, expired, or already used."}),
+                jsonify(
+                    {"error": "This authorization request is invalid, expired, or already used."}
+                ),
                 400,
             )
 

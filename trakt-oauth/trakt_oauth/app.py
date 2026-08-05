@@ -27,7 +27,7 @@ AUTHORIZATION_TTL_SECONDS = 600
 # browser. Leave empty to disable the official flow.
 CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-pending_authorizations = {}
+pending_authorizations: dict[str, dict] = {}
 pending_authorizations_lock = Lock()
 
 

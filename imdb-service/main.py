@@ -4260,7 +4260,8 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
 
 
 @app.post("/upload-csv")
-async def upload_csv(request: Request, file: UploadFile = File(...)):
+async def upload_csv(request: Request, file: UploadFile = File(...)):  # noqa: B008
+    """Upload a CSV file to populate the IMDB cache database."""
     _require_admin(request)
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Must be a .csv file")
@@ -4302,7 +4303,7 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
     ignored_count = 0
 
     async with aiosqlite.connect(CACHE_DB_PATH) as db:
-        cursor = await db.execute(f"SELECT imdb_id FROM {table_name}")
+        cursor = await db.execute(f"SELECT imdb_id FROM {table_name}")  # nosec B608
         existing_ids = {row[0] for row in await cursor.fetchall()}
 
         for row in reader:

@@ -29,7 +29,7 @@ CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 MAL_REDIRECT_URI = os.getenv("MAL_REDIRECT_URI", "https://utilities.kometa.wiki/mal-oauth/callback")
 AUTHORIZATION_TTL_SECONDS = 600
-pending_authorizations = {}
+pending_authorizations: dict[str, dict] = {}
 pending_authorizations_lock = Lock()
 
 

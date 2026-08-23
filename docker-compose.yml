@@ -214,6 +214,28 @@ services:
         reservations:
           memory: 64M
 
+  flicklist-oauth:
+    image: ghcr.io/kometa-team/flicklist-oauth:latest
+    container_name: flicklist-oauth
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ./flicklist-oauth/.env
+    environment:
+      - ROOT_PATH=/flicklist-oauth
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
   simkl-service:
     image: ghcr.io/kometa-team/simkl-service:latest
     container_name: simkl-service
@@ -368,6 +390,8 @@ services:
       - ./plex-oauth/static:/var/www/html/plex-oauth:ro
       # Static browser-only SIMKL OAuth page (PIN flow, no backend involved)
       - ./simkl-oauth/static:/var/www/html/simkl-oauth:ro
+      # Static browser-only FlickList OAuth page (device-code flow, no backend involved)
+      - ./flicklist-oauth/static:/var/www/html/flicklist-oauth:ro
       - caddy_data:/data
       - caddy_config:/config
     healthcheck:

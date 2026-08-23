@@ -1,0 +1,21 @@
+import pytest
+from flicklist_oauth.app import app
+
+
+@pytest.fixture()
+def client():
+    """Flask test client for the FlickList OAuth app."""
+    with app.test_client() as client:
+        yield client
+
+
+@pytest.mark.parametrize("path", ["/api/health", "/health/live", "/health/ready"])
+def test_health_endpoint(client, path) -> None:
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
+
+
+def test_index_page(client) -> None:
+    response = client.get("/")
+    assert response.status_code == 200

@@ -119,6 +119,38 @@ yourdomain.com {
         file_server
     }
 
+    # FlickList device-code proxy - same-origin passthrough to FlickList.
+    # FlickList's /api/auth endpoints send no CORS headers (confirmed via a
+    # live OPTIONS preflight against /api/auth/device/code), so the static
+    # page cannot fetch flicklist.tv directly from the browser; it POSTs here
+    # instead and Caddy forwards the request untouched. No client_secret is
+    # used anywhere in this flow, so nothing sensitive touches this server.
+    handle /flicklist-oauth/api/device/code* {
+        rewrite * /api/auth/device/code
+        reverse_proxy https://flicklist.tv {
+            header_up Host flicklist.tv
+        }
+    }
+
+    handle /flicklist-oauth/api/device/token* {
+        rewrite * /api/auth/device/token
+        reverse_proxy https://flicklist.tv {
+            header_up Host flicklist.tv
+        }
+    }
+
+    # Handle /flicklist-oauth path
+    # Static browser-only FlickList OAuth (device-code flow): the browser
+    # polls through the same-origin proxy above; the resulting fs_live_...
+    # key never touches this server, only the user's browser.
+    handle /flicklist-oauth* {
+        root * /var/www/html
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        header X-Content-Type-Options "nosniff"
+        file_server
+    }
+
     # Handle /imdb-service path
     # FastAPI service serving IMDB dataset API
     handle /imdb-service* {

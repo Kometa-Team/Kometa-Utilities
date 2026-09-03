@@ -244,7 +244,7 @@
                 </ol>
                 <strong>Now, to authenticate to MyAnimeList:</strong>
                 <ol>
-                    <li>Enter the <code>Client ID</code> below. The <code>Client Secret</code> is optional &mdash; MAL's PKCE flow works without it.</li>
+                    <li>Enter your <code>Client ID</code> and <code>Client Secret</code> below. MAL requires the <code>Client Secret</code> when exchanging the code for tokens.</li>
                     <li>Click the <code>Continue to MyAnimeList</code> button.</li>
                 </ol>
             </div>
@@ -260,8 +260,8 @@
             </div>
 
             <div class="form-group">
-                <label for="byoClientSecret">MyAnimeList Client Secret (optional)</label>
-                <input type="password" id="byoClientSecret" placeholder="Enter your Client Secret (optional)">
+                <label for="byoClientSecret">MyAnimeList Client Secret</label>
+                <input type="password" id="byoClientSecret" placeholder="Enter your Client Secret">
             </div>
 
             <button class="button primary" onclick="startAuthorizationByo()" id="startByoBtn">Continue to MyAnimeList</button>
@@ -387,6 +387,10 @@
 
             if (!clientId) {
                 showStatus('Please enter your Client ID', 'error');
+                return;
+            }
+            if (!clientSecret) {
+                showStatus('Please enter your Client Secret', 'error');
                 return;
             }
 

@@ -334,7 +334,7 @@
             <h2>Notes on Privacy</h2>
 
             <h3>OAuth Token Pages</h3>
-            <p>Plex, Trakt, MyAnimeList, and SIMKL OAuth pages are fully client-side. Your tokens are exchanged directly between your browser and the respective service&rsquo;s API. <strong>No token data is sent to or stored on this server.</strong></p>
+            <p>Plex, Trakt, MyAnimeList, and SIMKL OAuth pages are fully client-side OR they use a Kometa-controlled client ID. You log into the remote site and that site sends some data back.  Your tokens are exchanged directly between your browser and the respective service's API. If you use the "Bring Your Own" option and provide your own client_id and secret, those tokens do not traverse our server. <strong>No user token data is sent to or stored on this server.</strong></p>
 
             <h3>Metadata Services</h3>
             <p>AniDB, SIMKL, and IMDB services cache metadata on this server to improve performance. No personal data is collected or stored. Only publicly available metadata is cached.</p>

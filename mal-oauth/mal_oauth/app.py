@@ -22,9 +22,10 @@ MAL_API_URL = "https://myanimelist.net/v1/oauth2"
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "myanimelist-logo.svg"
 
-# Official Kometa MAL app credentials, held server-side only. MAL supports
-# PKCE without a client_secret, so only CLIENT_ID is required for the official
-# flow; CLIENT_SECRET is kept as a fallback for any future non-PKCE needs.
+# Official Kometa MAL app credentials, held server-side only. MAL's token
+# endpoint rejects exchanges without a client_secret ("Client authentication
+# failed"), so CLIENT_SECRET is required for the official flow too and is
+# never exposed to the browser.
 CLIENT_ID = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 MAL_REDIRECT_URI = os.getenv("MAL_REDIRECT_URI", "https://utilities.kometa.wiki/mal-oauth/callback")
@@ -53,8 +54,8 @@ def generate_pkce_pair():
 def exchange_code_for_token(client_id, client_secret, code, code_verifier, redirect_uri):
     """Exchange authorization code for access token.
 
-    client_secret is optional: MAL's PKCE flow works without it, and the
-    official flow intentionally omits it so the secret never leaves the server.
+    MAL requires client_secret for the token exchange; it is always supplied
+    by callers (the official flow sends the server-held CLIENT_SECRET).
     redirect_uri must exactly match the value used in the authorization
     request; MAL rejects the exchange otherwise.
     """
@@ -187,6 +188,11 @@ def official_start_authorization():
             jsonify({"error": "The Kometa MAL app is not configured."}),
             503,
         )
+    if not CLIENT_SECRET:
+        return (
+            jsonify({"error": "The Kometa MAL app secret is not configured."}),
+            503,
+        )
 
     state = secrets.token_urlsafe(32)
     code_verifier = generate_pkce_pair()
@@ -208,8 +214,8 @@ def official_exchange_code():
     """Exchange an authorization code using the official credentials.
 
     The browser supplies only the code and the state issued by
-    /api/official/start; the exchange uses the server-held client_id and the
-    server-generated PKCE verifier, with no client_secret involved.
+    /api/official/start; the exchange uses the server-held client_id and
+    client_secret plus the server-generated PKCE verifier.
     """
     try:
         data = request.get_json(silent=True) or {}

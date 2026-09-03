@@ -43,6 +43,13 @@ def test_official_start_returns_503_when_unconfigured(client, monkeypatch) -> No
     assert response.status_code == 503
 
 
+def test_official_start_returns_503_when_secret_unconfigured(client, monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "CLIENT_ID", "server-client")
+    monkeypatch.setattr(app_module, "CLIENT_SECRET", "")
+    response = client.post("/api/official/start", json={})
+    assert response.status_code == 503
+
+
 def test_official_start_builds_pkce_url_with_server_credentials(client, monkeypatch) -> None:
     monkeypatch.setattr(app_module, "CLIENT_ID", "server-client")
     monkeypatch.setattr(app_module, "CLIENT_SECRET", "server-secret")

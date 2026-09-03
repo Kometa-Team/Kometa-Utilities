@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS title_ratings (
     numVotes INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tr_votes ON title_ratings(numVotes DESC);
+CREATE INDEX IF NOT EXISTS idx_tr_rating ON title_ratings(averageRating DESC);
 
 CREATE TABLE IF NOT EXISTS title_akas (
     tconst TEXT NOT NULL,

@@ -2986,10 +2986,27 @@ async def search(
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
+    # When sorting by a title_ratings column, force the planner to drive the
+    # scan from title_ratings (via idx_tr_rating / idx_tr_votes) so it can use
+    # the index for ORDER BY and stop at LIMIT, instead of temp-sorting every
+    # match. CROSS JOIN is safe here: tconst is the PK of both tables, so the
+    # join is 1:1 and matches the LEFT JOIN result set.
+    if sort_col.startswith("tr."):
+        from_clause = (
+            "FROM title_ratings tr "
+            "CROSS JOIN title_basics tb ON tb.tconst = tr.tconst "
+        )
+        distinct = ""
+    else:
+        from_clause = (
+            "FROM title_basics tb "
+            "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst "
+        )
+        distinct = "DISTINCT "
+
     sql = (
-        f"SELECT DISTINCT tb.tconst "  # nosec B608
-        f"FROM title_basics tb "
-        f"LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst "
+        f"SELECT {distinct}tb.tconst "  # nosec B608
+        f"{from_clause}"
         f"{where_clause} "
         f"ORDER BY {sort_col} {sort_dir} "
         f"LIMIT ?"

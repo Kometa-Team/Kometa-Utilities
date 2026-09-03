@@ -289,6 +289,10 @@ services:
     image: ghcr.io/kometa-team/imdb-service:latest
     container_name: imdb-service
     restart: unless-stopped
+    # PID 1 must reap zombie Chromium/Playwright child processes; without an
+    # init process they accumulate as zombies and exhaust the pids cgroup
+    # limit below (see docs/incidents/2026-09-03-imdb-thread-exhaustion.md).
+    init: true
     logging: *default-logging
     environment:
       - ROOT_PATH=/imdb-service
@@ -342,6 +346,21 @@ services:
           pids: 2048
         reservations:
           memory: 512M
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:2
+    container_name: uptime-kuma
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - uptime-kuma-data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          pids: 512
+        reservations:
+          memory: 256M
 
   caddy:
     image: caddy:latest
@@ -582,6 +601,7 @@ volumes:
   imdb-data:
   anidb-db:
   simkl-data:
+  uptime-kuma-data:
   fider-db:
     external: true
     name: kometa-utilities_fider-db

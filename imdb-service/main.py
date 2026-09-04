@@ -2993,15 +2993,11 @@ async def search(
     # join is 1:1 and matches the LEFT JOIN result set.
     if sort_col.startswith("tr."):
         from_clause = (
-            "FROM title_ratings tr "
-            "CROSS JOIN title_basics tb ON tb.tconst = tr.tconst "
+            "FROM title_ratings tr " "CROSS JOIN title_basics tb ON tb.tconst = tr.tconst "
         )
         distinct = ""
     else:
-        from_clause = (
-            "FROM title_basics tb "
-            "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst "
-        )
+        from_clause = "FROM title_basics tb " "LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst "
         distinct = "DISTINCT "
 
     sql = (

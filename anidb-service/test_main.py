@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -28,7 +29,7 @@ from main import (  # noqa: E402
 
 
 @pytest.fixture
-def test_client():
+def test_client(clean_test_env):
     """Provide a test client for the FastAPI app."""
     with TestClient(app) as client:
         yield client
@@ -43,7 +44,7 @@ def test_health_endpoints(test_client):
     assert ready.json() == {"status": "ready"}
 
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def clean_test_env():
     """Clean up test environment before and after tests."""
     import shutil

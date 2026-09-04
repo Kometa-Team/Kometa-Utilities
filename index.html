@@ -246,6 +246,19 @@
                 <div class="service-desc">Connect your SIMKL account</div>
             </a>
 
+            <a href="/flicklist-oauth" class="service-card">
+                <div class="service-icon">
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="FlickList">
+                        <rect width="48" height="48" rx="10" fill="#4F7CFF"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="800" font-size="17"
+                              fill="#0a0a13">FL</text>
+                    </svg>
+                </div>
+                <div class="service-title">FlickList OAuth</div>
+                <div class="service-desc">Connect your FlickList account</div>
+            </a>
+
             <a href="/simkl-service" class="service-card">
                 <div class="service-icon">
                     <img src="/simkl-service/logo.svg?v=5d5f50ea" alt="">
@@ -335,6 +348,8 @@
 
             <h3>OAuth Token Pages</h3>
             <p>Plex, Trakt, MyAnimeList, and SIMKL OAuth pages are fully client-side OR they use a Kometa-controlled client ID. You log into the remote site and that site sends some data back.  Your tokens are exchanged directly between your browser and the respective service's API. If you use the "Bring Your Own" option and provide your own client_id and secret, those tokens do not traverse our server. <strong>No user token data is sent to or stored on this server.</strong></p>
+
+            <p>FlickList OAuth works the same way, with one difference: FlickList&rsquo;s API doesn&rsquo;t support cross-origin browser requests, so your browser talks to a same-origin passthrough on this server that forwards each request to FlickList untouched. <strong>Your key is never stored here &mdash; it only passes through.</strong></p>
 
             <h3>Metadata Services</h3>
             <p>AniDB, SIMKL, and IMDB services cache metadata on this server to improve performance. No personal data is collected or stored. Only publicly available metadata is cached.</p>

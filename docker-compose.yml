@@ -122,27 +122,27 @@ services:
         reservations:
           memory: 256M
 
-  plex-oauth:
-    image: ghcr.io/kometa-team/plex-oauth:latest
-    container_name: plex-oauth
-    restart: unless-stopped
-    logging: *default-logging
-    env_file:
-      - ./plex-oauth/.env
-    environment:
-      - ROOT_PATH=/plex-oauth
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 64M
+#   plex-oauth:
+#     image: ghcr.io/kometa-team/plex-oauth:latest
+#     container_name: plex-oauth
+#     restart: unless-stopped
+#     logging: *default-logging
+#     env_file:
+#       - ./plex-oauth/.env
+#     environment:
+#       - ROOT_PATH=/plex-oauth
+#     healthcheck:
+#       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+#       interval: 15s
+#       timeout: 5s
+#       retries: 5
+#       start_period: 10s
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 128M
+#         reservations:
+#           memory: 64M
 
   trakt-oauth:
     image: ghcr.io/kometa-team/trakt-oauth:latest
@@ -191,28 +191,28 @@ services:
         reservations:
           memory: 64M
 
-  simkl-oauth:
-    image: ghcr.io/kometa-team/simkl-oauth:latest
-    container_name: simkl-oauth
-    restart: unless-stopped
-    logging: *default-logging
-    environment:
-      - ROOT_PATH=/simkl-oauth
-      - CLIENT_ID=${SIMKL_CLIENT_ID:?SIMKL_CLIENT_ID must be set in .env}
-      - CLIENT_SECRET=${SIMKL_CLIENT_SECRET:?SIMKL_CLIENT_SECRET must be set in .env}
-      - REDIRECT_URI=${SIMKL_REDIRECT_URI:?SIMKL_REDIRECT_URI must be set in .env}
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 64M
+#   simkl-oauth:
+#     image: ghcr.io/kometa-team/simkl-oauth:latest
+#     container_name: simkl-oauth
+#     restart: unless-stopped
+#     logging: *default-logging
+#     environment:
+#       - ROOT_PATH=/simkl-oauth
+#       - CLIENT_ID=${SIMKL_CLIENT_ID:?SIMKL_CLIENT_ID must be set in .env}
+#       - CLIENT_SECRET=${SIMKL_CLIENT_SECRET:?SIMKL_CLIENT_SECRET must be set in .env}
+#       - REDIRECT_URI=${SIMKL_REDIRECT_URI:?SIMKL_REDIRECT_URI must be set in .env}
+#     healthcheck:
+#       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+#       interval: 15s
+#       timeout: 5s
+#       retries: 5
+#       start_period: 10s
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 128M
+#         reservations:
+#           memory: 64M
 
   simkl-service:
     image: ghcr.io/kometa-team/simkl-service:latest

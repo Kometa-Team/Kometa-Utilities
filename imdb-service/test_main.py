@@ -732,6 +732,64 @@ def test_load_chart_cache_restores_saved_cache(tmp_path):
     assert charts.chart_refreshed_at == saved_refreshed
 
 
+def test_load_chart_cache_rejects_legacy_sidecar(tmp_path):
+    """A pre-versioning cache predates the IMDb-sourced rankings, so discard it."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000, cache_path=cache_path)
+
+    # Rewrite the sidecar in the old unversioned "name -> timestamp" format.
+    charts._chart_refreshed_path(cache_path).write_text(
+        json.dumps({name: "2026-01-01T00:00:00+00:00" for name in charts.ALL_CHART_NAMES}),
+        encoding="utf-8",
+    )
+
+    charts.chart_cache = {}
+    assert charts.load_chart_cache(cache_path) is False
+
+
+def test_load_chart_cache_rejects_other_version(tmp_path):
+    """A cache written under a different chart version must not be served."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000, cache_path=cache_path)
+
+    sidecar_path = charts._chart_refreshed_path(cache_path)
+    sidecar = json.loads(sidecar_path.read_text())
+    assert sidecar["version"] == charts.CHART_CACHE_VERSION
+    sidecar["version"] = charts.CHART_CACHE_VERSION - 1
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    charts.chart_cache = {}
+    assert charts.load_chart_cache(cache_path) is False
+
+
+def test_load_chart_cache_returns_false_without_sidecar(tmp_path):
+    """Without a sidecar the cache version is unknown, so it cannot be trusted."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000, cache_path=cache_path)
+    charts._chart_refreshed_path(cache_path).unlink()
+
+    charts.chart_cache = {}
+    assert charts.load_chart_cache(cache_path) is False
+
+
 def test_load_chart_cache_returns_false_for_missing_file(tmp_path):
     import charts
 
@@ -1026,6 +1084,313 @@ def test_graphql_id_cache_keeps_stale_on_failure(tmp_path):
         )
 
     assert charts.chart_cache["popular_movies"][0]["tconst"] == "ttSTALE"
+
+
+def test_graphql_requests_send_browser_headers():
+    """Requests must look like a browser client; IMDb's GraphQL edge 403s otherwise."""
+    import charts
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {"data": {"chartTitles": {"edges": []}}}
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.fetch_graphql_chart_ids("top_movies")
+
+    headers = mock_client.post.call_args.kwargs["headers"]
+    assert "Mozilla/5.0" in headers["user-agent"]
+    assert headers["x-imdb-client-name"]
+
+
+def test_graphql_errors_payload_returns_empty():
+    """A 200 response carrying GraphQL errors must not be read as an empty chart."""
+    import charts
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "errors": [{"message": 'Value "X" does not exist in "ChartTitleType" enum.'}]
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    with patch("charts.httpx.Client", return_value=mock_client):
+        ids = charts.fetch_graphql_chart_ids("top_movies")
+
+    assert ids == []
+
+
+def test_rating_charts_have_graphql_sources():
+    """Every locally-computable chart must also have an authoritative IMDb source."""
+    import charts
+
+    for name in charts.CHART_CONFIGS:
+        assert name in charts.GRAPHQL_CHART_CONFIGS, f"{name} has no IMDb GraphQL source"
+
+    assert charts.GRAPHQL_CHART_CONFIGS["top_movies"]["chartType"] == "TOP_RATED_MOVIES"
+    assert charts.GRAPHQL_CHART_CONFIGS["top_movies"]["first"] == 250
+    # IMDb's Bottom 100 is 100 entries, not 250.
+    assert charts.GRAPHQL_CHART_CONFIGS["lowest_rated"]["first"] == 100
+
+
+def test_all_chart_names_has_no_duplicates():
+    import charts
+
+    assert len(charts.ALL_CHART_NAMES) == len(set(charts.ALL_CHART_NAMES))
+    assert set(charts.ALL_CHART_NAMES) == set(charts.CHART_CONFIGS) | set(
+        charts.GRAPHQL_CHART_CONFIGS
+    )
+
+
+def test_top_movies_uses_imdb_order_not_local_ranking(tmp_path):
+    """Published IMDb order wins over the local Bayesian approximation.
+
+    Locally, wr order is Beta > Alpha > Gamma (see _seed_db_for_charts).  IMDb
+    here returns Gamma, Alpha, Beta — the chart must follow IMDb.
+    """
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {
+            "chartTitles": {
+                "edges": [
+                    {"node": {"id": "tt0000003"}},  # Gamma
+                    {"node": {"id": "tt0000001"}},  # Alpha
+                    {"node": {"id": "tt0000002"}},  # Beta
+                ]
+            }
+        }
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    top = charts.chart_cache["top_movies"]
+    assert [item["tconst"] for item in top] == ["tt0000003", "tt0000001", "tt0000002"]
+    assert [item["rank"] for item in top] == [1, 2, 3]
+    # Still enriched from the local DB.
+    assert top[0]["primaryTitle"] == "Gamma"
+    assert top[0]["averageRating"] == 2.0
+
+
+def test_top_movies_falls_back_to_local_when_graphql_unavailable(tmp_path):
+    """A failed IMDb fetch must not blank the chart; local ranking fills in."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = RuntimeError("network down")
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    # Local Bayesian order: Beta > Alpha > Gamma.
+    assert [item["tconst"] for item in charts.chart_cache["top_movies"]] == [
+        "tt0000002",
+        "tt0000001",
+        "tt0000003",
+    ]
+
+
+def test_graphql_failure_for_one_chart_keeps_others_fresh(tmp_path):
+    """One failing chart must not discard the fresh IDs fetched for the rest."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    def post(url, **kwargs):
+        query = kwargs["json"]["query"]
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        if "MOST_POPULAR_MOVIES" in query:
+            raise RuntimeError("network down")
+        resp.json.return_value = {
+            "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+        }
+        return resp
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = post
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert charts.chart_cache["top_movies"][0]["tconst"] == "tt0000001"
+    assert charts.chart_cache["popular_movies"] == []
+    cached = json.loads(graphql_cache_path.read_text())["ids"]
+    assert cached["top_movies"] == ["tt0000001"]
+
+
+def test_stale_chart_reports_its_true_age_not_the_rebuild_time(tmp_path):
+    """A chart held back on a stale fetch must not look freshly refreshed.
+
+    This is the failure that made a two-month-old popular_shows chart read as
+    one day old, hiding the staleness from callers.
+    """
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    from datetime import datetime, timedelta, timezone
+
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=57)).isoformat()
+    graphql_cache_path.write_text(
+        json.dumps(
+            {
+                "fetched_at": long_ago,
+                "ids": {name: ["tt0000001"] for name in charts.GRAPHQL_CHART_CONFIGS},
+                "fetched_at_by_chart": {name: long_ago for name in charts.GRAPHQL_CHART_CONFIGS},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # IMDb is unreachable, so every chart falls back to those stale IDs.
+    mock_client = MagicMock()
+    mock_client.post.side_effect = RuntimeError("403 Forbidden")
+
+    charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert charts.chart_cache["popular_shows"][0]["tconst"] == "tt0000001"
+    # The whole point: the timestamp reports the stale fetch, not this rebuild.
+    assert charts.chart_refreshed_at["popular_shows"] == long_ago
+    assert charts.chart_source["popular_shows"] == "imdb"
+
+    # And it survives the round trip through the cache file.
+    reloaded = json.loads(graphql_cache_path.read_text())
+    assert reloaded["fetched_at_by_chart"]["popular_shows"] == long_ago
+
+
+def test_fresh_chart_reports_the_fetch_time(tmp_path):
+    """A chart fetched this run is timestamped now and marked as IMDb-sourced."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    from datetime import datetime, timezone
+
+    before = datetime.now(timezone.utc)
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert charts.chart_source["popular_shows"] == "imdb"
+    refreshed = datetime.fromisoformat(charts.chart_refreshed_at["popular_shows"])
+    assert refreshed >= before
+
+
+def test_locally_computed_chart_is_marked_local(tmp_path):
+    """A chart falling back to the Bayesian approximation must say so."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    _seed_db_for_charts(db_path)
+
+    charts.chart_cache = {}
+    charts.chart_source = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000)
+
+    assert charts.chart_source["top_movies"] == "local"
+    # Charts with no local fallback have nothing to serve at all.
+    assert charts.chart_source["popular_shows"] == "unavailable"
+
+
+def test_graphql_id_cache_refetched_when_chart_missing_from_cache(tmp_path):
+    """A cache predating a newly configured chart must be treated as stale."""
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    from datetime import datetime, timezone
+
+    # Fresh timestamp, but no entry for top_movies.
+    _write_graphql_id_cache(
+        graphql_cache_path,
+        datetime.now(timezone.utc),
+        {"popular_movies": ["ttOLD"]},
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": "tt0000001"}}]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+
+    charts.chart_cache = {}
+    with patch("charts.httpx.Client", return_value=mock_client):
+        charts.rebuild_all_charts(
+            db_path,
+            min_votes=25000,
+            fetch_graphql=True,
+            graphql_cache_path=graphql_cache_path,
+        )
+
+    assert mock_client.post.call_count == len(charts.GRAPHQL_CHART_CONFIGS)
+    assert charts.chart_cache["top_movies"][0]["tconst"] == "tt0000001"
 
 
 def test_get_chart_popular_movies(tmp_path, monkeypatch):
@@ -2398,6 +2763,9 @@ async def test_fetch_parental_html_falls_back_to_browser_on_empty_http(monkeypat
     async def fake_browser(_imdb_id, proxy_url=None):
         return sample_html
 
+    # This test is about the browser fallback, which is only reached once the
+    # GraphQL step is out of the way; leaving it on hits the real IMDb API.
+    monkeypatch.setattr(main, "PARENTAL_GRAPHQL_ENABLED", False)
     monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", fake_http)
     monkeypatch.setattr(main, "_fetch_parental_guide_html_via_browser", fake_browser)
 
@@ -2956,6 +3324,9 @@ async def test_fetch_parental_html_retries_with_second_proxy(monkeypatch):
     proxies = iter(["http://proxy-a", "http://proxy-b"])
 
     monkeypatch.setattr(main, "PARENTAL_PROXY_ENABLED", True)
+    # Proxy retry happens on the browser path, after the GraphQL step; leaving
+    # GraphQL on hits the real IMDb API and short-circuits the retry.
+    monkeypatch.setattr(main, "PARENTAL_GRAPHQL_ENABLED", False)
     monkeypatch.setattr(main, "PARENTAL_PROXY_RETRY_COUNT", 2)
     monkeypatch.setattr(main, "proxy_health", {})
     monkeypatch.setattr(main, "_choose_parental_proxy", lambda _exclude=None: next(proxies, None))

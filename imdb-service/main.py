@@ -4251,7 +4251,12 @@ async def get_chart(chart_name: str, limit: Optional[int] = None) -> Dict[str, A
     return {
         "chart": chart_name,
         "total": len(results),
+        # refreshed_at is the age of the underlying data: for IMDb-sourced
+        # charts that is when IMDb served it, not when this cache was rebuilt.
         "refreshed_at": charts.chart_refreshed_at.get(chart_name),
+        # "imdb" = IMDb's own ranking; "local" = Bayesian approximation served
+        # because IMDb was unreachable.
+        "source": charts.chart_source.get(chart_name),
         "results": results,
     }
 

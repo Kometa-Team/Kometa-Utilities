@@ -5,6 +5,8 @@ import csv
 import hashlib
 import io
 import json
+import logging
+import logging.handlers
 import os
 import random
 import re
@@ -107,6 +109,15 @@ PARENTAL_PREFETCH_ORDER = os.getenv("PARENTAL_PREFETCH_ORDER", "weighted_random"
 # A non-zero busy timeout makes readers wait out a checkpoint or a writer
 # instead of failing the request outright.
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "15000"))
+# Uvicorn's per-request access log shares stdout with the service's operational
+# output, and at this request volume it evicts everything else from the
+# container log within hours -- which has twice now made an incident
+# undiagnosable after the fact. Nothing else records these requests (Caddy has
+# no access log for this site), so they are routed to their own rotating file
+# rather than dropped. Set ACCESS_LOG_FILE empty to leave them on stdout.
+ACCESS_LOG_FILE = os.getenv("ACCESS_LOG_FILE", "access.log")
+ACCESS_LOG_MAX_BYTES = int(os.getenv("ACCESS_LOG_MAX_BYTES", str(50 * 1024**2)))
+ACCESS_LOG_BACKUPS = int(os.getenv("ACCESS_LOG_BACKUPS", "3"))
 
 # --- Global state ---
 last_refresh: Optional[str] = None  # ISO 8601 UTC string
@@ -144,6 +155,39 @@ PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid^="advisory-"]',
     "li.ipc-metadata-list-item--link",
 )
+
+
+def _configure_access_logging() -> Optional[Path]:
+    """Send uvicorn's access log to its own rotating file.
+
+    Returns the log path, or None if access logs were left on stdout.
+    """
+    if not ACCESS_LOG_FILE:
+        return None
+
+    path = Path(ACCESS_LOG_FILE)
+    if not path.is_absolute():
+        path = DATA_DIR / path
+
+    handler = logging.handlers.RotatingFileHandler(
+        path,
+        maxBytes=ACCESS_LOG_MAX_BYTES,
+        backupCount=ACCESS_LOG_BACKUPS,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+
+    access_logger = logging.getLogger("uvicorn.access")
+    for existing in list(access_logger.handlers):
+        access_logger.removeHandler(existing)
+    access_logger.addHandler(handler)
+    # Set the level explicitly: once we take this logger over, its level must
+    # not depend on uvicorn's own logging config still being in effect.
+    access_logger.setLevel(logging.INFO)
+    # Without this the records still reach uvicorn's stdout handler via the
+    # parent logger, which is the whole problem.
+    access_logger.propagate = False
+    return path
 
 
 # --- Database access ---
@@ -836,6 +880,14 @@ async def lifespan(app: FastAPI):
     global parental_browser_reaper_task
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        access_log_path = _configure_access_logging()
+        if access_log_path:
+            print(f"📝 Access log → {access_log_path}")
+    except Exception as e:
+        print(f"⚠️  Could not redirect access log: {e}")
+
     print("🔧 Initializing IMDB Service...")
 
     # An import killed mid-flight leaves a DB-sized staging file behind; it is

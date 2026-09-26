@@ -1,8 +1,10 @@
 x-default-logging: &default-logging
   driver: json-file
   options:
-    max-size: "20m"
-    max-file: "3"
+    # 60MiB of container log was evicting operational output within hours on
+    # chatty services, leaving incidents undiagnosable after the fact.
+    max-size: "50m"
+    max-file: "5"
 
 services:
 
@@ -308,6 +310,12 @@ services:
       - PARENTAL_FAILURE_CLEANUP_HOURS=${PARENTAL_FAILURE_CLEANUP_HOURS:-24}
       - CACHE_STATS_TTL_SECONDS=${CACHE_STATS_TTL_SECONDS:-5}
       - IMDB_UPSTREAM_CONCURRENCY=${IMDB_UPSTREAM_CONCURRENCY:-8}
+      - SQLITE_BUSY_TIMEOUT_MS=${SQLITE_BUSY_TIMEOUT_MS:-15000}
+      # Uvicorn access logs go to their own rotating file in the data volume so
+      # they do not evict operational output from the container log.
+      - ACCESS_LOG_FILE=${ACCESS_LOG_FILE:-access.log}
+      - ACCESS_LOG_MAX_BYTES=${ACCESS_LOG_MAX_BYTES:-52428800}
+      - ACCESS_LOG_BACKUPS=${ACCESS_LOG_BACKUPS:-3}
 
       - PARENTAL_PROXY_ENABLED=${PARENTAL_PROXY_ENABLED:-false}
       - PARENTAL_PROXY_URLS=${PARENTAL_PROXY_URLS:-}

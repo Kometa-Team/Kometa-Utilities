@@ -426,6 +426,85 @@ def _import_and_publish(gz_paths, live_db, **kwargs):
     swap_staged_db(live_db)
 
 
+def test_access_log_redirected_to_file(tmp_path, monkeypatch):
+    """Access records must go to the file and stop reaching stdout.
+
+    Leaving propagate=True would still send them to uvicorn's stdout handler,
+    which is the behaviour this exists to stop.
+    """
+    import logging
+
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "ACCESS_LOG_FILE", "access.log")
+
+    access_logger = logging.getLogger("uvicorn.access")
+    original = list(access_logger.handlers)
+    original_propagate = access_logger.propagate
+    try:
+        path = main._configure_access_logging()
+
+        assert path == tmp_path / "access.log"
+        assert access_logger.propagate is False
+        assert len(access_logger.handlers) == 1
+
+        access_logger.info("GET /title/tt0111161 200")
+        for handler in access_logger.handlers:
+            handler.flush()
+
+        assert "GET /title/tt0111161 200" in path.read_text(encoding="utf-8")
+    finally:
+        for handler in list(access_logger.handlers):
+            handler.close()
+            access_logger.removeHandler(handler)
+        for handler in original:
+            access_logger.addHandler(handler)
+        access_logger.propagate = original_propagate
+
+
+def test_access_log_can_stay_on_stdout(tmp_path, monkeypatch):
+    """An empty ACCESS_LOG_FILE leaves uvicorn's logging untouched."""
+    import logging
+
+    import main
+
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "ACCESS_LOG_FILE", "")
+
+    access_logger = logging.getLogger("uvicorn.access")
+    before = list(access_logger.handlers)
+
+    assert main._configure_access_logging() is None
+    assert list(access_logger.handlers) == before
+    assert not (tmp_path / "access.log").exists()
+
+
+def test_access_log_honours_absolute_path(tmp_path, monkeypatch):
+    import logging
+
+    import main
+
+    target = tmp_path / "elsewhere" / "access.log"
+    target.parent.mkdir()
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "ACCESS_LOG_FILE", str(target))
+
+    access_logger = logging.getLogger("uvicorn.access")
+    original = list(access_logger.handlers)
+    original_propagate = access_logger.propagate
+    try:
+        assert main._configure_access_logging() == target
+        assert target.exists()
+    finally:
+        for handler in list(access_logger.handlers):
+            handler.close()
+            access_logger.removeHandler(handler)
+        for handler in original:
+            access_logger.addHandler(handler)
+        access_logger.propagate = original_propagate
+
+
 @pytest.mark.asyncio
 async def test_db_connect_sets_busy_timeout(tmp_path, monkeypatch):
     """Every connection must carry a busy timeout, or contention 500s instantly."""

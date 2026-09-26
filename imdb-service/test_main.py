@@ -418,13 +418,130 @@ def _make_all_gz_files(tmp_path):
     return gz_paths
 
 
+def _import_and_publish(gz_paths, live_db, **kwargs):
+    """Run a staged import and publish it, the way the refresh flow does."""
+    from importer import run_direct_import, swap_staged_db
+
+    run_direct_import(gz_paths, live_db, **kwargs)
+    swap_staged_db(live_db)
+
+
+@pytest.mark.asyncio
+async def test_db_connect_sets_busy_timeout(tmp_path, monkeypatch):
+    """Every connection must carry a busy timeout, or contention 500s instantly."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "SQLITE_BUSY_TIMEOUT_MS", 7000)
+
+    async with main._db_connect() as db:
+        cursor = await db.execute("PRAGMA busy_timeout")
+        assert (await cursor.fetchone())[0] == 7000
+
+
+@pytest.mark.asyncio
+async def test_cache_db_connect_sets_busy_timeout(tmp_path, monkeypatch):
+    import main
+
+    cache_path = tmp_path / "cache.db"
+    monkeypatch.setattr(main, "CACHE_DB_PATH", cache_path)
+    monkeypatch.setattr(main, "SQLITE_BUSY_TIMEOUT_MS", 3000)
+
+    async with main._cache_db_connect() as db:
+        cursor = await db.execute("PRAGMA busy_timeout")
+        assert (await cursor.fetchone())[0] == 3000
+
+
+@pytest.mark.asyncio
+async def test_swap_barrier_waits_for_in_flight_connections(tmp_path, monkeypatch):
+    """The swap must not rename the file while a reader still holds it open."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "_db_swap_cond", None)
+    monkeypatch.setattr(main, "_db_active_connections", 0)
+    monkeypatch.setattr(main, "_db_swap_in_progress", False)
+
+    events = []
+    reader_may_finish = asyncio.Event()
+
+    async def reader():
+        async with main._db_connect() as db:
+            await db.execute("SELECT 1")
+            events.append("reader-open")
+            await reader_may_finish.wait()
+        events.append("reader-closed")
+
+    async def swapper():
+        # Give the reader a moment to take the barrier.
+        await asyncio.sleep(0.05)
+        events.append("swap-requested")
+        async with main._db_swap_barrier():
+            events.append("swap-running")
+
+    reader_task = asyncio.create_task(reader())
+    swap_task = asyncio.create_task(swapper())
+    await asyncio.sleep(0.15)
+
+    # Swap has been requested but must still be waiting on the open reader.
+    assert "swap-requested" in events
+    assert "swap-running" not in events
+
+    reader_may_finish.set()
+    await asyncio.gather(reader_task, swap_task)
+
+    assert events.index("reader-closed") < events.index("swap-running")
+
+
+@pytest.mark.asyncio
+async def test_swap_barrier_blocks_new_connections(tmp_path, monkeypatch):
+    """Connections opened during a swap wait for it rather than racing it."""
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "_db_swap_cond", None)
+    monkeypatch.setattr(main, "_db_active_connections", 0)
+    monkeypatch.setattr(main, "_db_swap_in_progress", False)
+
+    opened = asyncio.Event()
+
+    async def late_reader():
+        async with main._db_connect() as db:
+            await db.execute("SELECT 1")
+            opened.set()
+
+    async with main._db_swap_barrier():
+        task = asyncio.create_task(late_reader())
+        await asyncio.sleep(0.1)
+        assert not opened.is_set(), "connection opened while a swap was in progress"
+
+    await asyncio.wait_for(task, timeout=5)
+    assert opened.is_set()
+
+
 def test_run_direct_import_produces_populated_db(tmp_path):
     gz_paths = _make_all_gz_files(tmp_path)
     live_db = tmp_path / "imdb.db"
 
-    from importer import run_direct_import
-
-    run_direct_import(gz_paths, live_db, min_rows_override=0)
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
 
     assert live_db.exists()
     conn = sqlite3.connect(live_db)
@@ -440,9 +557,7 @@ def test_run_direct_import_updates_only_changed_tables(tmp_path):
     gz_paths = _make_all_gz_files(tmp_path)
     live_db = tmp_path / "imdb.db"
 
-    from importer import run_direct_import
-
-    run_direct_import(gz_paths, live_db, min_rows_override=0)
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
 
     updated_ratings = _make_tsv_gz(
         "tconst\taverageRating\tnumVotes",
@@ -456,7 +571,7 @@ def test_run_direct_import_updates_only_changed_tables(tmp_path):
     )
     ratings_path = tmp_path / "gz" / "title.ratings.tsv.gz"
     ratings_path.write_bytes(updated_ratings)
-    run_direct_import(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
+    _import_and_publish(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
 
     conn = sqlite3.connect(live_db)
     rating_row = conn.execute(
@@ -471,8 +586,128 @@ def test_run_direct_import_updates_only_changed_tables(tmp_path):
     assert basics_row == ("Title 1", "Action")
 
 
+def test_import_does_not_touch_live_db_until_swap(tmp_path):
+    """The whole point of staging: the live DB is untouched during the import.
+
+    Previously the import wrote the live DB in one transaction, forcing its WAL
+    to hold the entire dataset and locking out readers.
+    """
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+
+    from importer import run_direct_import, staged_db_path, swap_staged_db
+
+    # Seed a live DB with recognisable content.
+    conn = sqlite3.connect(live_db)
+    conn.execute("CREATE TABLE sentinel (val TEXT)")
+    conn.execute("INSERT INTO sentinel VALUES ('before')")
+    conn.commit()
+    conn.close()
+    before = live_db.stat().st_mtime_ns
+
+    staged = run_direct_import(gz_paths, live_db, min_rows_override=0)
+
+    assert staged == staged_db_path(live_db)
+    assert staged.exists()
+    # Live DB untouched, and no database-sized WAL beside it.
+    assert live_db.stat().st_mtime_ns == before
+    assert not live_db.with_name(live_db.name + "-wal").exists()
+    conn = sqlite3.connect(live_db)
+    assert conn.execute("SELECT val FROM sentinel").fetchone()[0] == "before"
+    conn.close()
+
+    # Only after the swap does the new data become visible.
+    swap_staged_db(live_db)
+    conn = sqlite3.connect(live_db)
+    assert conn.execute("SELECT COUNT(*) FROM title_basics").fetchone()[0] == 5
+    conn.close()
+    assert not staged.exists()
+
+
+def test_published_db_is_in_wal_mode(tmp_path):
+    """The swapped-in DB must be WAL; the service's read concurrency needs it.
+
+    The staging import runs with journal_mode=OFF for speed, and WAL is the
+    only journal mode persisted in the file header -- so it has to be restored
+    before the file is published or readers lose concurrency.
+    """
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+
+    from importer import run_direct_import, swap_staged_db
+
+    staged = run_direct_import(gz_paths, live_db, min_rows_override=0)
+    assert not staged.with_name(staged.name + "-wal").exists()
+
+    swap_staged_db(live_db)
+
+    conn = sqlite3.connect(live_db)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        conn.close()
+
+
+def test_swap_removes_stale_wal_sidecars(tmp_path):
+    """A -wal left from the old file must not be applied to the new one."""
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+
+    from importer import run_direct_import, swap_staged_db
+
+    run_direct_import(gz_paths, live_db, min_rows_override=0)
+
+    # Simulate sidecars left behind by readers of the old database.
+    wal = live_db.with_name(live_db.name + "-wal")
+    shm = live_db.with_name(live_db.name + "-shm")
+    wal.write_bytes(b"stale wal")
+    shm.write_bytes(b"stale shm")
+
+    swap_staged_db(live_db)
+
+    assert not wal.exists()
+    assert not shm.exists()
+    conn = sqlite3.connect(live_db)
+    assert conn.execute("SELECT COUNT(*) FROM title_basics").fetchone()[0] == 5
+    conn.close()
+
+
+def test_failed_import_discards_staging_file(tmp_path):
+    """A failed import must not leave a DB-sized staging file on disk."""
+    live_db = tmp_path / "imdb.db"
+    gz_dir = tmp_path / "gz"
+    gz_dir.mkdir()
+    bad_gz = gz_dir / "title.basics.tsv.gz"
+    bad_gz.write_bytes(b"not valid gzip content")
+
+    from importer import run_direct_import, staged_db_path
+
+    with pytest.raises(Exception, match="."):  # noqa: B017
+        run_direct_import({"title.basics": bad_gz}, live_db, min_rows_override=0)
+
+    assert not staged_db_path(live_db).exists()
+
+
+def test_discard_staged_db_reclaims_interrupted_import(tmp_path):
+    """Startup clears a staging file left by a killed import."""
+    live_db = tmp_path / "imdb.db"
+
+    from importer import discard_staged_db, staged_db_path
+
+    staged = staged_db_path(live_db)
+    staged.write_bytes(b"partial import")
+    staged.with_name(staged.name + "-wal").write_bytes(b"x")
+
+    discard_staged_db(live_db)
+
+    assert not staged.exists()
+    assert not staged.with_name(staged.name + "-wal").exists()
+    # Safe to call when there is nothing staged.
+    discard_staged_db(live_db)
+
+
 def test_run_direct_import_leaves_live_db_on_failure(tmp_path):
-    """If import fails, the original live DB is untouched (WAL rollback)."""
+    """If import fails, the original live DB is untouched (staging discarded)."""
     live_db = tmp_path / "imdb.db"
     # Create a "live" DB with known content
     conn = sqlite3.connect(live_db)
@@ -4825,6 +5060,12 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     def fake_run_direct_import(gz_paths, live_db, changed_stems, *args):
         imported["changed_stems"] = changed_stems
+        return importer.staged_db_path(live_db)
+
+    swapped = {}
+
+    def fake_swap_staged_db(live_db):
+        swapped["db"] = live_db
 
     finalized = {}
 
@@ -4842,6 +5083,7 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(importer, "download_datasets", fake_download)
     monkeypatch.setattr(importer, "run_direct_import", fake_run_direct_import)
+    monkeypatch.setattr(importer, "swap_staged_db", fake_swap_staged_db)
     monkeypatch.setattr(importer, "finalize_imported_datasets", fake_finalize)
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
     monkeypatch.setattr(main, "DB_PATH", db_path)
@@ -4853,6 +5095,7 @@ async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
     assert downloaded["stems"] == ["title.ratings"]
     assert downloaded["allow_missing_imported"] is False
     assert imported["changed_stems"] == ["title.ratings"]
+    assert swapped["db"] == db_path
     assert finalized["stems"] == ["title.ratings"]
     assert rebuilt["done"] is True
     assert main.current_phase == "idle"

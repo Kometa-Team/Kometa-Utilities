@@ -3,6 +3,8 @@
 import asyncio
 import gzip
 import json
+import os
+import shutil
 import sqlite3
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -10,6 +12,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import httpx
+
+# SQLite fails a contended statement immediately at the default timeout of 0.
+# Shared by every module that opens one of the service's databases.
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "15000"))
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS title_basics (
@@ -533,6 +539,67 @@ def _delete_table(conn: sqlite3.Connection, table: str) -> None:
     conn.execute(f"DELETE FROM {table}")  # nosec B608 - table name validated against ALLOWED_TABLES
 
 
+def staged_db_path(live_db: Path) -> Path:
+    """Return the staging path used while an import is being built."""
+    return live_db.with_name(live_db.name + ".staging")
+
+
+def _sidecar_paths(db_path: Path) -> tuple[Path, Path]:
+    """Return the -wal and -shm sidecar paths for a SQLite database."""
+    return (
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    )
+
+
+def _reset_staging_files(staging_db: Path) -> None:
+    """Remove any staging database left behind by an interrupted import."""
+    for path in (staging_db, *_sidecar_paths(staging_db)):
+        if path.exists():
+            path.unlink()
+
+
+def _checkpoint(db_path: Path) -> None:
+    """Fold the WAL back into the main database file."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+
+def discard_staged_db(live_db: Path) -> None:
+    """Delete any staging database left behind by an interrupted import."""
+    staging_db = staged_db_path(live_db)
+    if staging_db.exists():
+        size_gb = staging_db.stat().st_size / 1024**3
+        _reset_staging_files(staging_db)
+        print(f"🧹 Discarded stale staged database ({size_gb:.1f} GiB)")
+
+
+def swap_staged_db(live_db: Path) -> None:
+    """Publish a completed staging DB over the live one.
+
+    Must be called with no open connections to live_db: the rename leaves the
+    live -wal/-shm describing the *old* file, and SQLite would try to apply
+    them to the new one. They are removed as part of the swap, which is only
+    safe once nothing holds them open.
+    """
+    staging_db = staged_db_path(live_db)
+    if not staging_db.exists():
+        raise FileNotFoundError(f"No staged database at {staging_db}")
+
+    os.replace(staging_db, live_db)
+    for sidecar in _sidecar_paths(live_db):
+        if sidecar.exists():
+            sidecar.unlink()
+    for sidecar in _sidecar_paths(staging_db):
+        if sidecar.exists():
+            sidecar.unlink()
+    print(f"Published staged database to {live_db.name}")
+
+
 def run_direct_import(
     gz_paths: dict[str, Path],
     live_db: Path,
@@ -541,20 +608,43 @@ def run_direct_import(
     on_table_start: Optional[Callable[[str], None]] = None,
     on_table_done: Optional[Callable[[str, int], None]] = None,
     on_table_progress: Optional[Callable[[str, int], None]] = None,
-) -> None:
+) -> Path:
     """
-    Import dataset files directly into the live DB using WAL mode.
+    Import dataset files into a staging copy of the DB, leaving the live DB alone.
 
-    Uses BEGIN IMMEDIATE so readers see the pre-import state until COMMIT.
-    On failure the transaction is rolled back and the live DB is untouched.
+    Writing the live DB in one transaction forced its WAL to hold the entire
+    import (~200M rows, ~24GB) because uncommitted frames cannot be
+    checkpointed, and the resulting lock contention made reads fail. Staging
+    keeps all of that off the live file: readers are untouched for the whole
+    import, and the result is published by swap_staged_db() renaming the
+    staging file over the live one.
+
+    The staging DB runs with journal_mode=OFF -- there is nothing to roll back
+    to, because a failed import just discards the staging file.
+
+    Returns the path to the completed staging DB; the caller is responsible for
+    calling swap_staged_db(). On failure the staging file is removed and the
+    live DB is untouched.
 
     gz_paths: dict mapping dataset stem → local .tsv.gz path
     live_db: path to the live SQLite DB
     """
     import_stems = changed_stems if changed_stems is not None else list(gz_paths.keys())
-    conn = sqlite3.connect(live_db)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    staging_db = staged_db_path(live_db)
+    _reset_staging_files(staging_db)
+
+    # Unchanged tables must survive the swap, so start from a copy of the live
+    # DB rather than an empty file. A checkpoint first keeps the copy honest --
+    # otherwise recent committed pages would still be sitting in the live WAL.
+    if live_db.exists():
+        _checkpoint(live_db)
+        print(f"Copying live DB to staging ({live_db.stat().st_size / 1024**3:.1f} GiB)...")
+        shutil.copyfile(live_db, staging_db)
+
+    conn = sqlite3.connect(staging_db)
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode=OFF")
+    conn.execute("PRAGMA synchronous=OFF")
     create_schema(conn)
 
     existing_counts: dict[str, int] = {}
@@ -615,7 +705,18 @@ def run_direct_import(
             ("table_updated", json.dumps(table_updated)),
         )
         conn.execute("COMMIT")
-        print("Direct import complete")
+
+        # Restore WAL before publishing. journal_mode=OFF is what makes the
+        # import fast, but WAL is the only mode that survives in the file
+        # header -- without this the swapped-in database would come up in
+        # rollback-journal mode and lose the read concurrency the service
+        # depends on. Checkpoint so no -wal is left beside the staging file.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+
+        print("Direct import complete (staged)")
+        return staging_db
 
     except Exception:
         try:
@@ -623,6 +724,13 @@ def run_direct_import(
         except Exception:  # nosec B110
             pass
         traceback.print_exc()
+        conn.close()
+        # The live DB was never touched, so the half-built staging file is the
+        # only thing to clean up.
+        _reset_staging_files(staging_db)
         raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # nosec B110
+            pass

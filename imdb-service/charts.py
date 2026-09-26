@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional, TypedDict, Union, cast
 
 import httpx
 from http_clients import GRAPHQL_HEADERS
+from importer import SQLITE_BUSY_TIMEOUT_MS
 
 # Module-level chart cache. Replaced atomically by rebuild_all_charts().
 chart_cache: dict[str, list[dict[str, Any]]] = {}
@@ -428,6 +429,13 @@ def _compute_graphql_chart(
     return _enrich_chart_ids(conn, ids)
 
 
+def _connect(db_path: Path) -> sqlite3.Connection:
+    """Open the dataset DB with a busy timeout so reads wait out a writer."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    return conn
+
+
 def _chart_refreshed_path(cache_path: Path) -> Path:
     """Return the sidecar path for chart refresh timestamps."""
     return cache_path.with_name(CHART_CACHE_REFRESHED_FILE)
@@ -490,10 +498,7 @@ def _cache_is_fresh(cache_path: Path, db_path: Path) -> bool:
         return False
 
     try:
-        import sqlite3
-        from datetime import datetime, timezone
-
-        conn = sqlite3.connect(db_path)
+        conn = _connect(db_path)
         cursor = conn.execute("SELECT value FROM import_meta WHERE key = 'last_refresh'")
         row = cursor.fetchone()
         conn.close()
@@ -510,10 +515,6 @@ def _cache_is_fresh(cache_path: Path, db_path: Path) -> bool:
 
         return cache_dt >= last_refresh_dt
     except Exception:
-        return False
-    try:
-        return cache_path.stat().st_mtime >= db_path.stat().st_mtime
-    except OSError:
         return False
 
 
@@ -539,7 +540,7 @@ def rebuild_all_charts(
     """
     global chart_cache, chart_refreshed_at, chart_source
 
-    conn = sqlite3.connect(db_path)
+    conn = _connect(db_path)
     client: Optional[httpx.Client] = None
     graphql_ids: dict[str, list[str]] = {}
     graphql_times: dict[str, str] = {}

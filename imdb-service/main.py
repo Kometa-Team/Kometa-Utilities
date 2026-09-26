@@ -103,6 +103,10 @@ PARENTAL_PREFETCH_MAX_DELAY_SECONDS = int(os.getenv("PARENTAL_PREFETCH_MAX_DELAY
 PARENTAL_PREFETCH_IDLE_SECONDS = int(os.getenv("PARENTAL_PREFETCH_IDLE_SECONDS", "60"))
 PARENTAL_PREFETCH_DAILY_BUDGET = int(os.getenv("PARENTAL_PREFETCH_DAILY_BUDGET", "100"))
 PARENTAL_PREFETCH_ORDER = os.getenv("PARENTAL_PREFETCH_ORDER", "weighted_random")
+# SQLite raises "database is locked" immediately at the default timeout of 0.
+# A non-zero busy timeout makes readers wait out a checkpoint or a writer
+# instead of failing the request outright.
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "15000"))
 
 # --- Global state ---
 last_refresh: Optional[str] = None  # ISO 8601 UTC string
@@ -140,6 +144,82 @@ PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid^="advisory-"]',
     "li.ipc-metadata-list-item--link",
 )
+
+
+# --- Database access ---
+#
+# Every connection to the dataset DB goes through _db_connect() so that two
+# things hold everywhere: a busy timeout is always set, and the import can take
+# the DB out from under readers atomically.
+#
+# The swap barrier is a read/write lock. Normal connections are "readers"; the
+# import's file swap is the single "writer". A swap waits for in-flight
+# connections to drain and blocks new ones until the new file is in place,
+# which is what makes os.replace() safe -- a connection opened mid-swap could
+# otherwise bind to the old inode or to a database with a stale -wal beside it.
+_db_swap_cond: Optional[asyncio.Condition] = None
+_db_active_connections: int = 0
+_db_swap_in_progress: bool = False
+
+
+def _get_db_swap_cond() -> asyncio.Condition:
+    """Return the swap condition, creating it on the running loop if needed."""
+    global _db_swap_cond
+    if _db_swap_cond is None:
+        _db_swap_cond = asyncio.Condition()
+    return _db_swap_cond
+
+
+async def _apply_sqlite_pragmas(db: aiosqlite.Connection) -> None:
+    """Apply per-connection pragmas that every caller should get."""
+    await db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+
+
+@asynccontextmanager
+async def _db_connect():
+    """Open the dataset DB, waiting out any in-progress import swap."""
+    global _db_active_connections
+    cond = _get_db_swap_cond()
+    async with cond:
+        while _db_swap_in_progress:
+            await cond.wait()
+        _db_active_connections += 1
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _apply_sqlite_pragmas(db)
+            yield db
+    finally:
+        async with cond:
+            _db_active_connections -= 1
+            cond.notify_all()
+
+
+@asynccontextmanager
+async def _cache_db_connect():
+    """Open the service-cache DB.
+
+    The cache DB is never swapped, so this only carries the busy timeout.
+    """
+    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        await _apply_sqlite_pragmas(db)
+        yield db
+
+
+@asynccontextmanager
+async def _db_swap_barrier():
+    """Block new dataset-DB connections and wait for in-flight ones to finish."""
+    global _db_swap_in_progress
+    cond = _get_db_swap_cond()
+    async with cond:
+        _db_swap_in_progress = True
+        while _db_active_connections > 0:
+            await cond.wait()
+    try:
+        yield
+    finally:
+        async with cond:
+            _db_swap_in_progress = False
+            cond.notify_all()
 
 
 def _set_phase(phase: str) -> None:
@@ -656,7 +736,7 @@ async def _ensure_db_schema() -> None:
     if not DB_PATH.exists():
         return
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         await db.execute(
             """
         CREATE TABLE IF NOT EXISTS imdb_parental (
@@ -688,7 +768,7 @@ async def _ensure_db_schema() -> None:
 
         await db.commit()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db_connect() as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA_SQL)
         await db.commit()
@@ -701,7 +781,7 @@ async def _ensure_cache_db_schema() -> None:
     keywords may be fetched and cached before the large dataset import finishes.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(CACHE_SCHEMA_SQL)
         await db.commit()
@@ -721,7 +801,7 @@ async def _migrate_cache_tables() -> None:
 
     for table in ("imdb_parental", "imdb_keywords"):
         try:
-            async with aiosqlite.connect(CACHE_DB_PATH) as db:
+            async with _cache_db_connect() as db:
                 # Only migrate when the cache table is still empty.
                 cursor = await db.execute(f"SELECT COUNT(*) FROM {table}")  # nosec B608
                 count_row = await cursor.fetchone()
@@ -758,6 +838,15 @@ async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("🔧 Initializing IMDB Service...")
 
+    # An import killed mid-flight leaves a DB-sized staging file behind; it is
+    # never valid to reuse, so reclaim the space at startup.
+    try:
+        from importer import discard_staged_db
+
+        discard_staged_db(DB_PATH)
+    except Exception as e:
+        print(f"⚠️  Could not clear staged database: {e}")
+
     # Ensure the service-cache DB exists and migrate any legacy rows out of imdb.db.
     try:
         await _migrate_cache_tables()
@@ -781,7 +870,7 @@ async def lifespan(app: FastAPI):
 
         # Load last refresh time from DB
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with _db_connect() as db:
                 cursor = await db.execute(
                     "SELECT value FROM import_meta WHERE key = 'last_refresh'"
                 )
@@ -840,6 +929,7 @@ async def _run_import_pipeline() -> None:
         download_datasets,
         finalize_imported_datasets,
         run_direct_import,
+        swap_staged_db,
     )
 
     print("🔄 Starting daily refresh...")
@@ -907,6 +997,10 @@ async def _run_import_pipeline() -> None:
         _on_table_done,
         _on_table_progress,
     )
+    # Publish the staged import. The barrier drains in-flight readers and holds
+    # off new ones so the rename and the -wal removal happen with nothing open.
+    async with _db_swap_barrier():
+        await asyncio.to_thread(swap_staged_db, DB_PATH)
     await asyncio.to_thread(
         finalize_imported_datasets,
         DATA_DIR,
@@ -916,7 +1010,7 @@ async def _run_import_pipeline() -> None:
     )
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'last_refresh'")
             row = await cursor.fetchone()
             if row:
@@ -957,6 +1051,7 @@ async def _refresh_single_table(stem: str) -> None:
         download_datasets,
         finalize_imported_datasets,
         run_direct_import,
+        swap_staged_db,
     )
 
     async with _refresh_lock:
@@ -1020,6 +1115,8 @@ async def _refresh_single_table(stem: str) -> None:
             _on_table_done,
             _on_table_progress,
         )
+        async with _db_swap_barrier():
+            await asyncio.to_thread(swap_staged_db, DB_PATH)
         await asyncio.to_thread(
             finalize_imported_datasets,
             DATA_DIR,
@@ -1029,7 +1126,7 @@ async def _refresh_single_table(stem: str) -> None:
         )
 
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with _db_connect() as db:
                 cursor = await db.execute(
                     "SELECT value FROM import_meta WHERE key = 'last_refresh'"
                 )
@@ -1155,7 +1252,7 @@ async def health_ready() -> JSONResponse:
         )
     try:
         required_core = set(ALLOWED_TABLES) | {"import_meta"}
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             core_tables = {row[0] for row in await cursor.fetchall()}
             cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'last_refresh'")
@@ -1166,7 +1263,7 @@ async def health_ready() -> JSONResponse:
             "imdb_interests",
             "imdb_constraint_cache",
         }
-        async with aiosqlite.connect(CACHE_DB_PATH) as db:
+        async with _cache_db_connect() as db:
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             cache_tables = {row[0] for row in await cursor.fetchall()}
         if not required_core.issubset(core_tables) or not last_completed_refresh:
@@ -1198,7 +1295,11 @@ def _db_is_ready() -> bool:
 
 
 def _ensure_import_disk_space() -> None:
-    """Ensure imports have room for downloads and a database-sized WAL."""
+    """Ensure imports have room for downloads and a database-sized staging copy.
+
+    The staging copy replaces what used to be a database-sized WAL, so the
+    requirement is unchanged: one extra DB's worth of free space.
+    """
     usage = shutil.disk_usage(DATA_DIR)
     db_size = DB_PATH.stat().st_size if DB_PATH.exists() else 0
     required = max(MIN_FREE_DISK_GB * 1024**3, db_size)
@@ -1991,7 +2092,7 @@ async def _query_parental_cache(
     """Read cached parental-guide data, expiry flag, and last-updated timestamp."""
     await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM imdb_parental WHERE imdb_id = ?", (imdb_id,))
         row = await cursor.fetchone()
@@ -2007,7 +2108,7 @@ async def _query_parental_cache(
 
             # Check the title's release year to determine if we should ever expire this
             ttl_days = PARENTAL_GUIDE_TTL_DAYS
-            async with aiosqlite.connect(DB_PATH) as core_db:
+            async with _db_connect() as core_db:
                 core_cursor = await core_db.execute(
                     "SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,)
                 )
@@ -2068,7 +2169,7 @@ async def _query_keywords_cache(
     """Read cached keyword data and expiry flag."""
     await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT keywords, expiration_date FROM imdb_keywords WHERE imdb_id = ?", (imdb_id,)
@@ -2169,7 +2270,7 @@ async def _update_keywords_cache(imdb_id: str, keywords: Dict[str, list[int]]) -
     await _ensure_cache_db_schema()
 
     expiration_date = (datetime.now(timezone.utc) + timedelta(days=KEYWORDS_TTL_DAYS)).isoformat()
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         await db.execute(
             """
             INSERT INTO imdb_keywords(imdb_id, keywords, expiration_date)
@@ -2199,7 +2300,7 @@ async def _update_parental_cache(imdb_id: str, parental: Dict[str, str]) -> str:
     await _ensure_cache_db_schema()
 
     updated_at = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         await db.execute(
             """
             INSERT INTO imdb_parental(imdb_id, nudity, violence, profanity, alcohol, frightening, updated_at)
@@ -2259,7 +2360,7 @@ async def _load_cache_stats() -> Dict[str, Any]:
         )
     )
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             f"SELECT {', '.join(expressions)} FROM imdb_parental"  # nosec B608
@@ -2318,7 +2419,7 @@ async def _load_parental_fetch_success_counts() -> None:
         return
     await _ensure_db_schema()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db_connect() as db:
         cursor = await db.execute(
             "SELECT value FROM import_meta WHERE key = ?", (PARENTAL_FETCH_COUNTS_KEY,)
         )
@@ -2339,7 +2440,7 @@ async def _save_parental_fetch_success_counts() -> None:
         return
     await _ensure_db_schema()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO import_meta(key, value)
@@ -2373,7 +2474,7 @@ async def _get_parental_prefetch_candidate() -> Optional[str]:
     await _ensure_db_schema()
     await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db_connect() as db:
         # The parental cache now lives in a separate DB file; attach it so we can
         # still exclude already-cached titles in a single query.
         await db.execute("ATTACH DATABASE ? AS cache", (str(CACHE_DB_PATH),))
@@ -3011,7 +3112,7 @@ async def search(
     params.append(limit)
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
     except Exception as e:
@@ -3749,7 +3850,7 @@ async def get_stats() -> Dict[str, Any]:
 
     try:
         cache_stats = await _get_cached_cache_stats()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             cursor = await db.execute("SELECT value FROM import_meta WHERE key = 'row_counts'")
             row = await cursor.fetchone()
             counts: Dict[str, Any] = json.loads(row[0]) if row else {}
@@ -3815,7 +3916,7 @@ async def get_ratings(imdb_id: str) -> Dict[str, Any]:
     """
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(sql, (imdb_id,))
             row = await cursor.fetchone()
@@ -3849,7 +3950,7 @@ async def get_genres(imdb_id: str) -> Dict[str, Any]:
     """
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(sql, (imdb_id,))
             row = await cursor.fetchone()
@@ -3887,7 +3988,7 @@ async def get_episode_rating(
     """
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(sql, (parent_imdb_id, season, episode))
             row = await cursor.fetchone()
@@ -3935,7 +4036,7 @@ async def get_episode_ratings(
     sql += " ORDER BY te.seasonNumber, te.episodeNumber"
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with _db_connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
@@ -4022,7 +4123,7 @@ async def _query_interests_cache(
     """Read cached interest data and expiry flag."""
     await _ensure_cache_db_schema()
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT interests, expiration_date FROM imdb_interests WHERE imdb_id = ?", (imdb_id,)
@@ -4053,7 +4154,7 @@ async def _update_interests_cache(imdb_id: str, interests: list[Dict[str, str]])
 
     # Determine TTL based on title age, same as parental guide
     ttl_days = KEYWORDS_TTL_DAYS
-    async with aiosqlite.connect(DB_PATH) as core_db:
+    async with _db_connect() as core_db:
         core_cursor = await core_db.execute(
             "SELECT startYear FROM title_basics WHERE tconst = ?", (imdb_id,)
         )
@@ -4068,7 +4169,7 @@ async def _update_interests_cache(imdb_id: str, interests: list[Dict[str, str]])
                 pass
 
     expiration_date = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         await db.execute(
             """
             INSERT INTO imdb_interests(imdb_id, interests, expiration_date)
@@ -4182,7 +4283,7 @@ async def get_title(imdb_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="Service initializing")
     imdb_id = _validate_imdb_id(imdb_id)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db_connect() as db:
         db.row_factory = aiosqlite.Row
 
         cursor = await db.execute(
@@ -4268,7 +4369,7 @@ async def get_person(imdb_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="Service initializing")
     imdb_id = _validate_imdb_id(imdb_id, prefix="nm")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _db_connect() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM name_basics WHERE nconst = ?", (imdb_id,))
         row = await cursor.fetchone()
@@ -4320,7 +4421,7 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):  # noqa: B
     updated_count = 0
     ignored_count = 0
 
-    async with aiosqlite.connect(CACHE_DB_PATH) as db:
+    async with _cache_db_connect() as db:
         cursor = await db.execute(f"SELECT imdb_id FROM {table_name}")  # nosec B608
         existing_ids = {row[0] for row in await cursor.fetchall()}
 

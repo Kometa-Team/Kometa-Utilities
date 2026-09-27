@@ -6,6 +6,20 @@ from weakref import WeakKeyDictionary
 
 import httpx
 
+# IMDb's GraphQL edge returns 403 for requests that do not look like a browser
+# client.  A browser User-Agent plus x-imdb-client-name is the minimum that gets
+# through; a descriptive bot User-Agent is rejected outright.
+GRAPHQL_HEADERS = {
+    "content-type": "application/json",
+    "user-agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "x-imdb-client-name": "imdb-web-next",
+    "origin": "https://www.imdb.com",
+    "referer": "https://www.imdb.com/",
+}
+
 _pools: WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[tuple[str, Optional[str]], httpx.AsyncClient]
 ] = WeakKeyDictionary()
@@ -33,10 +47,7 @@ def _get_client(kind: str, proxy_url: Optional[str] = None) -> httpx.AsyncClient
         client = httpx.AsyncClient(
             follow_redirects=True,
             timeout=30.0,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Kometa-Utilities/IMDb-Service)",
-                "content-type": "application/json",
-            },
+            headers=GRAPHQL_HEADERS,
             limits=httpx.Limits(
                 max_connections=20,
                 max_keepalive_connections=10,

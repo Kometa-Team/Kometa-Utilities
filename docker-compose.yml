@@ -218,27 +218,36 @@ services:
         reservations:
           memory: 64M
 
-  flicklist-oauth:
-    image: ghcr.io/kometa-team/flicklist-oauth:latest
-    container_name: flicklist-oauth
-    restart: unless-stopped
-    logging: *default-logging
-    env_file:
-      - ./flicklist-oauth/.env
-    environment:
-      - ROOT_PATH=/flicklist-oauth
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-        reservations:
-          memory: 64M
+  # DISABLED: ghcr.io/kometa-team/flicklist-oauth:latest does not exist
+  # (manifest unknown), and there is no build entry in
+  # docker-compose.override.yml, so this service cannot start and makes a
+  # plain `docker compose up -d` fail for the whole stack.
+  #
+  # Nothing depends on it: Caddy serves /flicklist-oauth* as static files
+  # from the bind mount below, and /flicklist-oauth/api/device/* proxies
+  # straight to https://flicklist.tv. No route points at this container.
+  # Re-enable once the image is published or a build entry is added.
+#  flicklist-oauth:
+#    image: ghcr.io/kometa-team/flicklist-oauth:latest
+#    container_name: flicklist-oauth
+#    restart: unless-stopped
+#    logging: *default-logging
+#    env_file:
+#      - ./flicklist-oauth/.env
+#    environment:
+#      - ROOT_PATH=/flicklist-oauth
+#    healthcheck:
+#      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3).read()"]
+#      interval: 15s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 10s
+#    deploy:
+#      resources:
+#        limits:
+#          memory: 128M
+#        reservations:
+#          memory: 64M
 
   simkl-service:
     image: ghcr.io/kometa-team/simkl-service:latest

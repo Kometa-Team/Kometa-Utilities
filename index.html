@@ -108,6 +108,9 @@
         .services.external .service-card {
             background: linear-gradient(135deg, #2980b9 0%, #16a085 100%);
         }
+        .services.deprecated .service-card {
+            background: linear-gradient(135deg, #7f6b4d 0%, #9a7b4f 100%);
+        }
         .footer {
             text-align: center;
             color: #95a5a6;
@@ -208,20 +211,6 @@
                 <div class="service-desc">Authenticate with Plex Media Server</div>
             </a>
 
-            <a href="/trakt-oauth" class="service-card">
-                <div class="service-icon">
-                    <!-- Trakt: red rounded square + bold white "t" -->
-                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Trakt">
-                        <rect width="48" height="48" rx="10" fill="#ED1C24"/>
-                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
-                              font-family="Arial, sans-serif" font-weight="700" font-size="28"
-                              fill="#ffffff">t</text>
-                    </svg>
-                </div>
-                <div class="service-title">Trakt OAuth</div>
-                <div class="service-desc">Get your Trakt access token</div>
-            </a>
-
             <a href="/mal-oauth" class="service-card">
                 <div class="service-icon">
                     <img src="/mal-oauth/logo.svg?v=6059f1a0" alt="">
@@ -260,6 +249,25 @@
                 </div>
                 <div class="service-title">IMDB Service</div>
                 <div class="service-desc">Cached IMDB charts &amp; metadata</div>
+            </a>
+        </div>
+
+        <hr class="section-divider">
+        <p class="section-title">Deprecated Services</p>
+
+        <div class="services deprecated">
+            <a href="/trakt-oauth" class="service-card">
+                <div class="service-icon">
+                    <!-- Trakt: red rounded square + bold white "t" -->
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Trakt">
+                        <rect width="48" height="48" rx="10" fill="#ED1C24"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="700" font-size="28"
+                              fill="#ffffff">t</text>
+                    </svg>
+                </div>
+                <div class="service-title">Trakt OAuth</div>
+                <div class="service-desc">Get your Trakt access token</div>
             </a>
         </div>
 
@@ -318,6 +326,20 @@
                 <div class="service-title">File Transfer</div>
                 <div class="service-desc">Temporary file sharing service</div>
             </a>
+
+            <a href="https://logscan.kometa.team/" class="service-card">
+                <div class="service-icon">
+                    <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="Logscan">
+                        <rect width="48" height="48" rx="10" fill="rgba(255,255,255,0.15)"/>
+                        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+                              font-family="Arial, sans-serif" font-weight="700" font-size="24"
+                              fill="#ffffff">📑</text>
+                    </svg>
+                </div>
+                <div class="service-title">Logscan +</div>
+                <div class="service-desc">Log scanning and related utilities</div>
+            </a>
+
         </div>
 
         <div class="footer">

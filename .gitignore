@@ -43,8 +43,9 @@ venv/
 .direnv
 
 # --- Local Configuration Files ---
-# Keep example files in git, but ignore customized versions
-Caddyfile
+# Caddyfile is tracked: hostnames come from {$KOMETA_DOMAIN} with the
+# production domain as the default, so the real file is portable and the
+# routing it defines gets history and review like any other code.
 
 # --- Reverse Proxy (Caddy) ---
 # Ignore the generated SSL certificates and internal Caddy state.

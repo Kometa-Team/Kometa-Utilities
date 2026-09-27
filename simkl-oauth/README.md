@@ -9,11 +9,19 @@ The browser talks directly to `api.simkl.com` (CORS-enabled); the user tokens ne
 2. Page requests a device code via `POST /oauth2/device` (`client_id`, `scope=media:read media:write`)
 3. User opens `verification_uri_complete` (`simkl.com/pin?user_code=...`), signs in, and approves.
    The code is also shown on the page for approving on a different device.
-4. Page polls `POST /oauth2/token` with
-   `grant_type=urn:ietf:params:oauth:grant-type:device_code` until SIMKL returns tokens
+4. Page polls `POST /simkl-oauth/api/official/token` (this service) with the
+   `device_code`; it forwards to SIMKL's `POST /oauth2/token` with the
+   `urn:ietf:params:oauth:grant-type:device_code` grant until SIMKL returns tokens
 5. Configuration is displayed for copying into Kometa's `config.yml`
 
-The device flow needs **no `client_secret` and no PKCE** — only the public `client_id`.
+The device flow needs no PKCE. It also needs no `client_secret` *at the device-code step* —
+but SIMKL rejects the final token exchange for the shared Kometa client with
+`invalid_client` / "Client authentication failed" unless the secret is supplied. A secret
+cannot live in a public static page, so step 4 is proxied through this service, which holds
+`CLIENT_SECRET` in its environment and passes SIMKL's status and body straight back.
+
+That means the user's tokens transit this server. They are not stored, and callers cannot
+supply their own client credentials — the proxy always injects the server's.
 
 ## Tokens
 
@@ -53,14 +61,20 @@ And mounted in docker-compose:
 - ./simkl-oauth/static:/var/www/html/simkl-oauth:ro
 ```
 
-## Legacy Flask app (dead code)
+## The Flask service
 
-`simkl_oauth/app.py` implements the AUTH V1 authorization-code flow (`/oauth/authorize`,
-`/oauth/token`) requiring `CLIENT_ID`, `CLIENT_SECRET` and `REDIRECT_URI`.
+`simkl_oauth/app.py` is now a single-purpose token-exchange proxy. It exposes:
 
-It is **not deployed and not reachable**: Caddy serves `/simkl-oauth*` as static files with
-no `reverse_proxy`, and no `simkl-oauth` container runs. It has not been migrated to AUTH V2
-and would stop working when SIMKL retires V1 (expected around April 2027).
+- `POST /api/official/token` — body `{"device_code": "..."}`; adds `client_id` and
+  `client_secret` and forwards to SIMKL, returning SIMKL's status and JSON unchanged
+- `GET /logo.svg`, `GET /api/health`, `GET /health/live`, `GET /health/ready`
+
+It no longer serves any HTML: the user-facing page is the static one above. The previous
+AUTH V1 authorization-code implementation (`/oauth/authorize`, `/oauth/token`, `REDIRECT_URI`)
+has been removed.
+
+Caddy routes only `/simkl-oauth/api/official/*` to this container; everything else under
+`/simkl-oauth` is served as static files.
 
 ## Files
 

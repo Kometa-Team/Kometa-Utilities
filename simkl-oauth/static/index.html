@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Privacy: the SIMKL user tokens are only ever sent to SIMKL itself
+    <!-- Privacy: the SIMKL user tokens are relayed by this site's token proxy
+         (SIMKL requires the app client_secret for the exchange) and are not stored
          (see CSP connect-src). -->
     <meta name="referrer" content="no-referrer">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://api.simkl.com; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.simkl.com; img-src 'self' data:; base-uri 'none'; form-action 'none'">
     <title>SIMKL OAuth - Kometa - Browser Version</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -199,7 +200,7 @@
         </div>
 
         <div class="footer">
-            <p>Your token never leaves your browser &mdash; this page talks directly to SIMKL and nothing is sent to this server.</p>
+            <p>Your tokens are never stored. The final exchange with SIMKL is relayed by this site because SIMKL requires the Kometa app's secret, which cannot be published in this page.</p>
             <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
             <p>The SIMKL logo is the sole property of SIMKL or its licensors, and is used here for identification purposes only.  No endorsement of or by SIMKL is implied.</p>
             <p><a href="/">← Back to Home</a></p>
@@ -209,17 +210,25 @@
     <script>
         'use strict';
 
-        // This page is fully client-side. All SIMKL API calls are made directly
-        // from the browser (api.simkl.com is CORS-enabled) using SIMKL's AUTH V2
-        // device flow (RFC 8628), which needs only the public client_id — no
-        // client_secret and no PKCE. The resulting user tokens never touch this
-        // server.
+        // The device flow (RFC 8628) runs in the browser: the device-code
+        // request goes straight to api.simkl.com, which is CORS-enabled and
+        // needs only the public client_id.
+        //
+        // The token exchange cannot. SIMKL rejects it with invalid_client
+        // unless the shared Kometa app's client_secret is supplied, so that one
+        // call is proxied through this site's own backend, which holds the
+        // secret. The user's tokens therefore transit this server -- they are
+        // passed straight back to the browser and never stored.
 
         // Public OAuth client identifier for the shared Kometa SIMKL app.
         // This is an identifier, not a secret. It must be an AUTH V2 client:
         // a v1 client_id is rejected by the /oauth2 endpoints.
-        const SIMKL_CLIENT_ID = 'REPLACE_WITH_V2_CLIENT_ID';
+        const SIMKL_CLIENT_ID = '1d2dc22b74616b53206f8dc1f65509abb9948b353a9a56b5554e234dde75c74a';
         const SIMKL_API = 'https://api.simkl.com/oauth2';
+        // Token exchange is proxied same-origin; see the comment in pollForAuth.
+        // Absolute: a relative path would resolve to /api/official/token if the
+        // page were ever reached without a trailing slash.
+        const SIMKL_TOKEN_PROXY = '/simkl-oauth/api/official/token';
         // Omitting scope would yield read-only access.
         const SIMKL_SCOPE = 'media:read media:write';
 
@@ -260,11 +269,6 @@
 
         async function startAuth() {
             const startBtn = document.getElementById('startBtn');
-
-            if (SIMKL_CLIENT_ID === 'REPLACE_WITH_V2_CLIENT_ID') {
-                showStatus('This page is not configured yet: no SIMKL AUTH V2 client ID.', 'error');
-                return;
-            }
 
             startBtn.disabled = true;
             showStatus('Requesting a code from SIMKL...', 'info');
@@ -315,17 +319,17 @@
         function pollForAuth(deviceCode, intervalMs) {
             const poll = async () => {
                 try {
-                    const checkResponse = await fetch(`${SIMKL_API}/token`, {
+                    // Same-origin proxy: SIMKL rejects this exchange with
+                    // invalid_client unless the client secret is supplied, and a
+                    // secret cannot live in a public static page. The proxy adds
+                    // it and passes SIMKL's status and body straight back.
+                    const checkResponse = await fetch(SIMKL_TOKEN_PROXY, {
                         method: 'POST',
                         headers: {
                             'Accept': 'application/json',
-                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Content-Type': 'application/json',
                         },
-                        body: new URLSearchParams({
-                            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-                            client_id: SIMKL_CLIENT_ID,
-                            device_code: deviceCode,
-                        }),
+                        body: JSON.stringify({ device_code: deviceCode }),
                     });
 
                     // The pending/denied/expired states arrive as HTTP 4xx with a

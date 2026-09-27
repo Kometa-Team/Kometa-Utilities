@@ -188,7 +188,7 @@
                 </ol>
             </div>
             <div class="notice">
-                <strong>Note:</strong> FlickList API keys don't expire and can't be revoked individually &mdash; running this flow again for the same account mints a fresh key and immediately invalidates the previous one, rather than creating a second key alongside it.
+                <strong>Note:</strong> FlickList API keys don't expire, and running this flow again for the same account mints a fresh key and immediately invalidates the previous one, rather than creating a second key alongside it. You can also revoke a key at any time from your FlickList Developer &rarr; Your Apps dashboard.
             </div>
             <button class="button primary" onclick="startAuth()" id="startBtn">Connect with FlickList</button>
         </div>
@@ -233,11 +233,8 @@
         // No client_secret is used anywhere in this flow, so nothing
         // sensitive ever reaches this server either way.
 
-        // Public OAuth client identifier for the FlickList app. This is the
-        // TEST registration used during API validation — not the one that
-        // ships. TODO: swap for the Kometa-Team app's client_id once that
-        // account exists and registers a production app (open item).
-        const FLICKLIST_CLIENT_ID = 'kometa_integration_test_9c51098d';
+        // Public OAuth client identifier for the FlickList app (production, registered under Chris's account).
+        const FLICKLIST_CLIENT_ID = 'kometa_195c41d0';
 
         const basePath = window.location.pathname.startsWith('/flicklist-oauth') ? '/flicklist-oauth' : '';
         const DEVICE_CODE_URL = window.location.origin + basePath + '/api/device/code';

@@ -17,9 +17,10 @@ never touches this server either way; no `client_secret` is used anywhere in thi
    `POST https://flicklist.tv/api/auth/device/token`) until FlickList returns the key
 5. Configuration is displayed for copying into Kometa's `config.yml`
 
-FlickList API keys are permanent (`expires_at: null`) and are not individually revocable — running
-this flow again for the same account rotates the key in place rather than minting a second one
-alongside it. The page says so before the user starts.
+FlickList API keys are permanent (`expires_at: null`); running this flow again for the same account
+rotates the key in place rather than minting a second one alongside it. Keys ARE individually
+revocable — from the FlickList Developer → Your Apps dashboard, deleting a key makes it return 401
+immediately. The page says so before the user starts.
 
 ## Configuration
 

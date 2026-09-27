@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Privacy: the SIMKL user token is only ever sent to SIMKL itself
+    <!-- Privacy: the SIMKL user tokens are only ever sent to SIMKL itself
          (see CSP connect-src). -->
     <meta name="referrer" content="no-referrer">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://api.simkl.com; img-src 'self' data:; base-uri 'none'; form-action 'none'">
@@ -160,7 +160,7 @@
 
         <div class="header">
             <h1>SIMKL OAuth</h1>
-            <p>Get your SIMKL access token for Kometa</p>
+            <p>Get your SIMKL refresh token for Kometa</p>
         </div>
 
         <div id="status" class="status"></div>
@@ -171,7 +171,7 @@
                 <ol>
                     <li>Click "Connect with SIMKL"</li>
                     <li>Click "Open SIMKL Authorization"</li>
-                    <li>Sign in to SIMKL and click <strong>YES</strong> (you'll be prompted twice &mdash; that's normal)</li>
+                    <li>Sign in to SIMKL and approve the request</li>
                     <li>The popup will close and your configuration will appear here</li>
                 </ol>
             </div>
@@ -181,6 +181,10 @@
         <div id="pinSection" class="pin-display">
             <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">Authorize Kometa on SIMKL</div>
             <button class="button primary" onclick="openAuthorizeWindow()" id="authBtn">Open SIMKL Authorization</button>
+            <div style="margin-top: 15px; font-size: 0.85rem; color: var(--text-muted);">
+                Or go to <a href="https://simkl.com/pin" target="_blank" rel="noopener noreferrer">simkl.com/pin</a> on any device and enter this code:
+            </div>
+            <div id="userCode" style="margin-top: 8px; font-size: 1.5rem; font-weight: 700; letter-spacing: 2px; color: var(--simkl-teal);"></div>
             <div style="margin-top: 15px; font-size: 0.85rem; color: var(--text-muted);">
                 After authorizing, close the SIMKL tab and return here for your configuration.
             </div>
@@ -206,16 +210,18 @@
         'use strict';
 
         // This page is fully client-side. All SIMKL API calls are made directly
-        // from the browser (api.simkl.com is CORS-enabled) using SIMKL's PIN
-        // (device) flow, which needs only the public client_id — the shared
-        // app's client_secret is never involved. The resulting user token
-        // never touches this server.
+        // from the browser (api.simkl.com is CORS-enabled) using SIMKL's AUTH V2
+        // device flow (RFC 8628), which needs only the public client_id — no
+        // client_secret and no PKCE. The resulting user tokens never touch this
+        // server.
 
         // Public OAuth client identifier for the shared Kometa SIMKL app.
-        // This is an identifier, not a secret; it is already visible in the
-        // authorize URL the legacy site renders to every visitor.
-        const SIMKL_CLIENT_ID = '4143188bcb37d40c45f25e97b90b5868c70f1d2cf5f240b127b65be77d0fb5ca';
-        const SIMKL_API = 'https://api.simkl.com/oauth';
+        // This is an identifier, not a secret. It must be an AUTH V2 client:
+        // a v1 client_id is rejected by the /oauth2 endpoints.
+        const SIMKL_CLIENT_ID = 'REPLACE_WITH_V2_CLIENT_ID';
+        const SIMKL_API = 'https://api.simkl.com/oauth2';
+        // Omitting scope would yield read-only access.
+        const SIMKL_SCOPE = 'media:read media:write';
 
         let pollInterval = null;
         let expiryTimer = null;
@@ -244,46 +250,61 @@
             }
         }
 
+        function expireCode(message) {
+            stopPolling();
+            showStatus(message, 'error');
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('welcomeSection').style.display = 'block';
+            document.getElementById('startBtn').disabled = false;
+        }
+
         async function startAuth() {
             const startBtn = document.getElementById('startBtn');
+
+            if (SIMKL_CLIENT_ID === 'REPLACE_WITH_V2_CLIENT_ID') {
+                showStatus('This page is not configured yet: no SIMKL AUTH V2 client ID.', 'error');
+                return;
+            }
+
             startBtn.disabled = true;
             showStatus('Requesting a code from SIMKL...', 'info');
 
             try {
-                const response = await fetch(`${SIMKL_API}/pin?client_id=${SIMKL_CLIENT_ID}`, {
-                    headers: { 'Accept': 'application/json' },
+                // RFC 8628 device authorization request. Form-encoded, not query
+                // string — the v2 endpoints reject the v1 GET-with-params style.
+                const response = await fetch(`${SIMKL_API}/device`, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: new URLSearchParams({
+                        client_id: SIMKL_CLIENT_ID,
+                        scope: SIMKL_SCOPE,
+                    }),
                 });
 
-                if (!response.ok) {
-                    throw new Error(`Failed to get a code (${response.status})`);
+                const data = await response.json().catch(() => ({}));
+
+                if (!response.ok || !data.device_code) {
+                    throw new Error(data.error_description || data.error || `Failed to get a code (${response.status})`);
                 }
 
-                const data = await response.json();
-                if (!data.user_code) {
-                    throw new Error('Unexpected response from SIMKL');
-                }
+                // verification_uri_complete pre-fills the code; fall back to the
+                // plain URI plus the code shown on screen.
+                simklAuthUrl = data.verification_uri_complete
+                    || `${data.verification_uri || 'https://simkl.com/pin'}?user_code=${encodeURIComponent(data.user_code)}`;
 
-                // Build the SIMKL authorize URL with response_type=pin.
-                // This sends the user directly to the OAuth consent screen;
-                // SIMKL handles the PIN confirmation server-side.
-                // redirect_uri must point to /pin/{code} so SIMKL activates the
-                // PIN server-side. Without this the token is never generated.
-                const redirectUri = btoa('/pin/' + data.user_code);
-                simklAuthUrl = 'https://simkl.com/oauth/authorize?response_type=pin&client_id=' + encodeURIComponent(SIMKL_CLIENT_ID) + '&redirect_uri=' + encodeURIComponent(redirectUri);
-
+                document.getElementById('userCode').textContent = data.user_code || '';
                 document.getElementById('welcomeSection').style.display = 'none';
                 document.getElementById('pinSection').style.display = 'block';
                 hideStatus();
 
-                pollForAuth(data.user_code, Math.max((data.interval || 5), 2) * 1000);
+                pollForAuth(data.device_code, Math.max((data.interval || 5), 1) * 1000);
 
-                // Give up when the code expires (default SIMKL TTL: 15 minutes)
+                // Give up when the device code expires (SIMKL default: 15 minutes)
                 expiryTimer = setTimeout(() => {
-                    stopPolling();
-                    showStatus('That code expired. Click below to get a new one.', 'error');
-                    document.getElementById('pinSection').style.display = 'none';
-                    document.getElementById('welcomeSection').style.display = 'block';
-                    startBtn.disabled = false;
+                    expireCode('That code expired. Click below to get a new one.');
                 }, (data.expires_in || 900) * 1000);
             } catch (error) {
                 showStatus('Error: ' + error.message, 'error');
@@ -291,40 +312,65 @@
             }
         }
 
-        function pollForAuth(userCode, intervalMs) {
-            const startBtn = document.getElementById('startBtn');
-            pollInterval = setInterval(async () => {
+        function pollForAuth(deviceCode, intervalMs) {
+            const poll = async () => {
                 try {
-                    const checkResponse = await fetch(`${SIMKL_API}/pin/check/${userCode}?client_id=${SIMKL_CLIENT_ID}`, {
-                        headers: { 'Accept': 'application/json' },
+                    const checkResponse = await fetch(`${SIMKL_API}/token`, {
+                        method: 'POST',
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: new URLSearchParams({
+                            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+                            client_id: SIMKL_CLIENT_ID,
+                            device_code: deviceCode,
+                        }),
                     });
 
-                    if (!checkResponse.ok) return; // transient; try again next tick
+                    // The pending/denied/expired states arrive as HTTP 4xx with a
+                    // JSON body, so the response must be parsed regardless of
+                    // status -- bailing out on !ok would swallow all of them.
+                    const checkData = await checkResponse.json().catch(() => ({}));
 
-                    const checkData = await checkResponse.json();
-
-                    if (checkData.access_token) {
+                    if (checkData.refresh_token || checkData.access_token) {
                         stopPolling();
-                        displayConfig(checkData.access_token);
-                    } else if (checkData.user_code) {
-                        // SIMKL returns a fresh PIN payload when the code
-                        // being checked is unknown or has expired.
-                        stopPolling();
-                        showStatus('That code is no longer valid. Click below to get a new one.', 'error');
-                        document.getElementById('pinSection').style.display = 'none';
-                        document.getElementById('welcomeSection').style.display = 'block';
-                        startBtn.disabled = false;
+                        displayConfig(checkData);
+                        return;
                     }
-                    // Otherwise {result: "KO"} — still waiting for the user.
+
+                    switch (checkData.error) {
+                        case 'authorization_pending':
+                            return; // user has not approved yet; keep waiting
+                        case 'slow_down':
+                            // RFC 8628: back off by 5s and re-arm at the new rate.
+                            intervalMs += 5000;
+                            stopPolling();
+                            pollInterval = setInterval(poll, intervalMs);
+                            return;
+                        case 'access_denied':
+                            expireCode('You declined the request on SIMKL.');
+                            return;
+                        case 'expired_token':
+                            expireCode('That code expired. Click below to get a new one.');
+                            return;
+                        default:
+                            return; // transient or unknown; try again next tick
+                    }
                 } catch (ignored) {
                     // Network hiccup; keep polling until expiry.
                 }
-            }, intervalMs);
+            };
+
+            pollInterval = setInterval(poll, intervalMs);
         }
 
-        function displayConfig(accessToken) {
+        function displayConfig(tokens) {
+            // AUTH V2 access tokens expire after 7 days, so the refresh token
+            // (180 days, sliding) is what belongs in config.yml -- Kometa
+            // exchanges it for access tokens itself.
             const config = `simkl:
-  user_token: ${accessToken}`;
+  refresh_token: ${tokens.refresh_token || tokens.access_token}`;
 
             document.getElementById('configOutput').textContent = config;
             document.getElementById('pinSection').style.display = 'none';

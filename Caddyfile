@@ -295,6 +295,38 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
         header X-Content-Type-Options "nosniff"
         file_server
     }
+
+    # WeTrakr device-code proxy - same-origin passthrough to WeTrakr.
+    # WeTrakr's /oauth/device/* endpoints send no CORS headers (confirmed via
+    # a live OPTIONS preflight during Phase 0, 2026-09-28), so the static
+    # page cannot fetch api.wetrakr.com directly from the browser; it POSTs
+    # here instead and Caddy forwards the request untouched. No client_secret
+    # is used anywhere in this flow, so nothing sensitive touches this server.
+    handle /wetrakr-oauth/api/device/code* {
+        rewrite * /oauth/device/code
+        reverse_proxy https://api.wetrakr.com {
+            header_up Host api.wetrakr.com
+        }
+    }
+
+    handle /wetrakr-oauth/api/device/token* {
+        rewrite * /oauth/device/token
+        reverse_proxy https://api.wetrakr.com {
+            header_up Host api.wetrakr.com
+        }
+    }
+
+    # Handle /wetrakr-oauth path
+    # Static browser-only WeTrakr OAuth (device-code flow): the browser
+    # polls through the same-origin proxy above; the resulting access and
+    # refresh tokens never touch this server, only the user's browser.
+    handle /wetrakr-oauth* {
+        root * /var/www/html
+        header Cache-Control "no-store"
+        header Referrer-Policy "no-referrer"
+        header X-Content-Type-Options "nosniff"
+        file_server
+    }
     # Handle /imdb-service path
     # NOTE: uri strip_prefix removes /imdb-service before sending to backend
     # FastAPI receives /stats instead of /imdb-service/stats

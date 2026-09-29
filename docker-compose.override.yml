@@ -23,6 +23,12 @@ services:
       context: ./mal-oauth
       dockerfile: Dockerfile
 
+  wetrakr-oauth:
+    pull_policy: build
+    build:
+      context: ./wetrakr-oauth
+      dockerfile: Dockerfile
+
   simkl-service:
     pull_policy: build
     build:

@@ -349,7 +349,7 @@ async def lifespan(app: FastAPI):
             print(f"❌ Background indexing failed: {e}")
 
     # Start background tasks
-    asyncio.create_task(index_seed_data_background())
+    index_task = asyncio.create_task(index_seed_data_background())
     worker_task = asyncio.create_task(anidb_worker())
 
     # Service is ready immediately
@@ -360,12 +360,10 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     print("🛑 Shutting down...")
-    if worker_task:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+    tasks = [t for t in (index_task, worker_task) if t]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(

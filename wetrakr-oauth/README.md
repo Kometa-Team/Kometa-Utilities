@@ -2,7 +2,7 @@
 
 A fully client-side WeTrakr auth page using WeTrakr's OAuth 2.0 device-code flow.
 The browser never talks to `api.wetrakr.com` directly — WeTrakr's `/oauth/device/*` endpoints send
-no CORS headers (confirmed via a live OPTIONS preflight during Phase 0, 2026-09-28; no
+no CORS headers (confirmed via a live OPTIONS preflight on 2026-09-28; no
 `Access-Control-Allow-Origin` in the response), so a direct `fetch()` from the browser would fail.
 The page instead POSTs to a same-origin path that Caddy forwards to WeTrakr untouched — see the
 Caddyfile block below. No `client_secret` is used anywhere in this flow, so nothing sensitive ever
@@ -28,8 +28,7 @@ special proxy configuration is needed for them beyond the passthrough itself.
 WeTrakr's device-flow polling is driven by HTTP status code, not by an `error` string in the body
 (FlickList's page checks `error`; this one switches on `response.status`): 200 is success, 400 with
 `error: "authorization_pending"` means keep waiting, 404/410/418 mean restart or stop, 409 means a
-token pair was already issued for that code, and 429 means slow down but keep polling. See
-`WETRAKR-API-CONTRACT.md` §4 for the full table this mirrors.
+token pair was already issued for that code, and 429 means slow down but keep polling.
 
 Unlike FlickList's permanent key, WeTrakr issues an access token (7 days) and a refresh token (180
 days, rotating on every refresh). Kometa refreshes both automatically and rewrites `config.yml`; if
@@ -46,8 +45,7 @@ not read from `CLIENT_IDS` or an env var.
 
 **Open item:** the constant currently holds `cf00ea6da77e7c20528ca2a8b6885271`, the app registered
 2026-09-27. Which WeTrakr account owns it long-term, and whether a separate production key is needed,
-are both still open (see the project's WeTrakr integration plan, decision Q1) — this is the id Kometa
-currently has, not necessarily the final one.
+are both still open — this is the id Kometa currently has, not necessarily the final one.
 
 ## Deployment
 

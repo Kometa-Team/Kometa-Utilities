@@ -298,7 +298,7 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
 
     # WeTrakr device-code proxy - same-origin passthrough to WeTrakr.
     # WeTrakr's /oauth/device/* endpoints send no CORS headers (confirmed via
-    # a live OPTIONS preflight during Phase 0, 2026-09-28), so the static
+    # a live OPTIONS preflight on 2026-09-28), so the static
     # page cannot fetch api.wetrakr.com directly from the browser; it POSTs
     # here instead and Caddy forwards the request untouched. No client_secret
     # is used anywhere in this flow, so nothing sensitive touches this server.

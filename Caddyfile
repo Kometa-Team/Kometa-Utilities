@@ -90,7 +90,7 @@ transfer.{$KOMETA_DOMAIN:kometa.wiki} {
 #             }
 #         }
 #     }
-# 
+#
 #     reverse_proxy image-compare:8000
 # }
 
@@ -337,7 +337,7 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
 #             }
 #         }
 #     }
-# 
+#
 #     # Proxy to FastAPI backend
 #     reverse_proxy anidb-mirror:8000
 # }
@@ -345,7 +345,7 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
 # ============================================================================
 # NOTES
 # ============================================================================
-# 
+#
 # Path-based routing:
 # - Set ROOT_PATH=/anidb-service in your .env file
 # - Access at: https://yourdomain.com/anidb-service

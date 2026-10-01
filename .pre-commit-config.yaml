@@ -56,7 +56,7 @@ repos:
       - id: bandit
         args: [-c, pyproject.toml, --recursive, --quiet]
         additional_dependencies: ["bandit[toml]"]
-        exclude: ^tests/
+        exclude: (^|/)(tests?/|test_[^/]+\.py$)
 
   # Type checking with mypy (root level)
   - repo: https://github.com/pre-commit/mirrors-mypy

@@ -67,7 +67,7 @@ repos:
         args: [--ignore-missing-imports, --no-strict-optional]
         additional_dependencies:
           - types-aiofiles
-        exclude: ^(tests/|anidb-service/|plex-oauth/|mal-oauth/|trakt-oauth/|simkl-service/|imdb-service/)
+        exclude: ^(tests/|anidb-service/|plex-oauth/|mal-oauth/|trakt-oauth/|simkl-service/|imdb-service/|wetrakr-oauth/)
 
   # Type checking with mypy (anidb-service)
   - repo: https://github.com/pre-commit/mirrors-mypy
@@ -120,3 +120,10 @@ repos:
           - httpx
         files: ^imdb-service/.*\.py$
         exclude: ^imdb-service/tests?/
+
+      - id: mypy
+        name: mypy (wetrakr_oauth)
+        args: [--ignore-missing-imports, --no-strict-optional]
+        additional_dependencies:
+          - types-aiofiles
+        files: ^wetrakr-oauth/wetrakr_oauth/.*\.py$

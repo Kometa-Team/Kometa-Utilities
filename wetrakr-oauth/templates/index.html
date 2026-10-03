@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WeTrakr OAuth - Kometa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /* --- WeTrakr accent tokens ---
+             Real brand colors, taken from WeTrakr's own logo gradient. */
+        :root {
+            --wt-accent:       #4835E8;
+            --wt-accent-dark:  #3527B8;
+            --wt-accent-glow:  rgba(72, 53, 232, 0.2);
+            --bg-page:         #0d0d1a;
+            --bg-card:         #16161e;
+            --bg-inset:        #0a0a13;
+            --border-subtle:   rgba(255, 255, 255, 0.07);
+            --text-primary:    #f0f0f0;
+            --text-muted:      #888;
+            --text-dim:        #444;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: var(--bg-card);
+            border-radius: 12px;
+            border-top: 3px solid var(--wt-accent);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+            padding: 40px;
+            max-width: 520px;
+            width: 100%;
+        }
+
+        .wt-logo { display: block; width: 48px; height: 48px; margin: 0 auto 20px; }
+
+        .header { text-align: center; margin-bottom: 28px; }
+        .header h1 { font-size: 1.75rem; font-weight: 700; color: var(--wt-accent); margin-bottom: 8px; letter-spacing: -0.2px; }
+        .header p { color: var(--text-muted); font-size: 0.95rem; }
+
+        .status {
+            margin: 18px 0;
+            padding: 12px 15px;
+            border-radius: 6px;
+            text-align: center;
+            display: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        .status.info    { background: rgba(100,149,237,.1);  color: #88aee0; border: 1px solid rgba(100,149,237,.25); }
+        .status.success { background: rgba(255,122,69,.1);   color: #f5a98f; border: 1px solid rgba(255,122,69,.25);  }
+        .status.error   { background: rgba(220,53,69,.12);   color: #f08090; border: 1px solid rgba(220,53,69,.3);   }
+
+        .button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 7px;
+            font-size: 0.95rem;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+            margin: 10px 0;
+        }
+        .button.primary { background: var(--wt-accent); color: #0a0a13; }
+        .button.primary:hover { background: var(--wt-accent-dark); transform: translateY(-1px); box-shadow: 0 5px 18px var(--wt-accent-glow); }
+        .button.primary:disabled { background: #1f1f2a; color: var(--text-dim); cursor: not-allowed; transform: none; box-shadow: none; }
+        .button.secondary { background: rgba(255,255,255,.05); color: var(--text-muted); border: 1px solid var(--border-subtle); }
+        .button.secondary:hover { background: rgba(255,255,255,.09); color: var(--text-primary); }
+
+        .instructions {
+            background: rgba(255, 122, 69, 0.06);
+            border-left: 4px solid var(--wt-accent);
+            padding: 14px 16px;
+            margin: 20px 0;
+            border-radius: 0 6px 6px 0;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .instructions strong { color: var(--text-primary); }
+        .instructions ol { margin-left: 20px; }
+        .instructions li { margin: 6px 0; color: var(--text-muted); }
+        .instructions a { color: var(--wt-accent); }
+
+        .notice {
+            background: rgba(255, 193, 7, 0.07);
+            border-left: 4px solid #ffc107;
+            padding: 12px 16px;
+            margin: 16px 0;
+            border-radius: 0 6px 6px 0;
+            font-size: 0.85rem;
+            line-height: 1.55;
+            color: var(--text-muted);
+        }
+        .notice strong { color: #e0b030; }
+
+        .pin-display { background: var(--bg-inset); border: 1px solid var(--border-subtle); padding: 24px 20px; border-radius: 10px; margin: 20px 0; text-align: center; display: none; }
+        .pin-code { font-size: 2rem; font-weight: 700; color: var(--wt-accent); font-family: "Courier New", monospace; margin: 10px 0; letter-spacing: 4px; }
+        .pin-instructions { font-size: 0.88rem; color: var(--text-muted); margin-top: 10px; line-height: 1.6; }
+        .pin-instructions a { color: var(--wt-accent); text-decoration: underline; }
+
+        .result-section { display: none; margin-top: 20px; }
+        .result-section h3 { color: var(--text-primary); margin-bottom: 10px; font-size: 1rem; font-weight: 700; }
+        .result-section p { color: var(--text-muted); margin-bottom: 10px; font-size: 0.9rem; }
+
+        .config-output {
+            background: var(--bg-inset);
+            border: 1px solid var(--border-subtle);
+            padding: 14px 16px;
+            border-radius: 7px;
+            margin: 10px 0;
+            font-family: "Courier New", monospace;
+            font-size: 0.85rem;
+            color: var(--wt-accent);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.55;
+        }
+
+        .copy-btn {
+            background: var(--wt-accent);
+            color: #0a0a13;
+            padding: 10px 22px;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 0.88rem;
+            font-weight: 700;
+            font-family: inherit;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+        .copy-btn:hover { background: var(--wt-accent-dark); box-shadow: 0 4px 12px var(--wt-accent-glow); }
+
+        .footer { text-align: center; margin-top: 28px; font-size: 0.82rem; color: var(--text-dim); line-height: 1.8; }
+        .footer a { color: var(--wt-accent); text-decoration: none; opacity: 0.8; }
+        .footer a:hover { opacity: 1; }
+
+        @media (max-width: 600px) {
+            .container { padding: 26px 16px; }
+            .header h1 { font-size: 1.4rem; }
+            .pin-code { font-size: 1.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- WeTrakr's real logo mark -->
+        <svg class="wt-logo" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-label="WeTrakr">
+            <defs>
+                <linearGradient id="wtLogoGradient" x1="22.21" y1="16.78" x2="504.92" y2="502.42" gradientUnits="userSpaceOnUse">
+                    <stop offset="0" stop-color="#4835e8"/>
+                    <stop offset="1" stop-color="#666afe"/>
+                </linearGradient>
+            </defs>
+            <rect x="-6" y="-10" width="527" height="527" fill="url(#wtLogoGradient)"/>
+            <path fill="#fff" d="m367.79,149.02c-45.74.92-84.43,30.54-98.81,71.58l-.04-.02-.34,1.08c-.58,1.7-1.11,3.43-1.6,5.17l-13.14,42.51c-.81,2.91-4.93,2.94-5.78.04l-29.61-101.06c-1.28-4.38-5.31-7.4-9.87-7.4h-32.69c-4.5,0-8.47,2.92-9.82,7.21l-32.08,102.47c-.89,2.85-4.94,2.79-5.76-.08l-28.95-102.13c-1.26-4.43-5.3-7.48-9.9-7.48h-46.98c-2.66,0-4.54,2.59-3.73,5.12l58.7,183.09c1.37,4.26,5.33,7.15,9.8,7.15h37.22c4.46,0,8.41-2.87,9.78-7.11l34.32-105.55c.9-2.78,4.84-2.76,5.72.02l33.55,105.47c1.36,4.27,5.32,7.17,9.8,7.17h33.37c4.56,0,8.58-3,9.87-7.37l6.72-23.81c13.73,16.47,32.44,28.65,53.85,34.19,42.41,10.99,82.27-3.38,107.65-31.19,3.77-4.14,3.61-10.51-.4-14.42l-18.78-18.33c-4.19-4.09-11-3.95-14.89.44-11.47,12.94-28.4,20.92-47.18,20.34-32.03-.99-57.95-27.25-58.54-59.29-.08-4.28.29-8.45,1.05-12.49l.4-1.41-.08-.05c5.95-27.61,30.73-48.21,60.24-47.67,24.8.46,46.15,16.1,54.98,38.02h-73.72c-6.81,0-12.34,5.52-12.34,12.34v17.83c0,6.81,5.52,12.34,12.34,12.34h94.63c.7,0,1.37-.07,2.04-.18l17.23.24c5.42.07,9.94-4.04,10.46-9.44.36-3.76.53-7.58.49-11.44-.58-59.27-49.92-107.1-109.18-105.91Z"/>
+        </svg>
+
+        <div class="header">
+            <h1>WeTrakr OAuth</h1>
+            <p>Get your WeTrakr tokens for Kometa</p>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div id="welcomeSection">
+            <div class="instructions">
+                <strong>How it works:</strong>
+                <ol>
+                    <li>Click "Connect with WeTrakr"</li>
+                    <li>A code will appear &mdash; open the WeTrakr link and enter it</li>
+                    <li>Sign in and approve the request</li>
+                    <li>Your access and refresh tokens will be displayed here for copying into Kometa's <code style="color: var(--wt-accent); font-size: 0.95em;">config.yml</code></li>
+                </ol>
+            </div>
+            <div class="notice">
+                <strong>Note:</strong> WeTrakr access tokens last 7 days and refresh tokens last 180 days &mdash; Kometa refreshes both automatically and rewrites its config each time. If Kometa's config is set to <code style="font-size: 0.95em;">read_only</code>, it can't do that, and you'll need to come back here every 7 days instead. Requesting a new code is limited to 5 per 15 minutes, so give it a moment if you've just tried.
+            </div>
+            <button class="button primary" onclick="startAuth()" id="startBtn">Connect with WeTrakr</button>
+        </div>
+
+        <div id="pinSection" class="pin-display">
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">Your Code</div>
+            <div class="pin-code" id="pinCode">-</div>
+            <div class="pin-instructions">
+                Open this link and enter the code above:<br>
+                <a id="authLink" href="#" target="_blank">Authenticate with WeTrakr</a>
+            </div>
+            <div style="margin-top: 15px; font-size: 0.85rem; color: var(--text-muted);">
+                Waiting for approval&hellip;
+            </div>
+        </div>
+
+        <div id="resultSection" class="result-section">
+            <h3>Configuration Ready</h3>
+            <p>Copy and paste this into your Kometa <code style="color: var(--wt-accent); font-size: 0.85em;">config.yml</code>:</p>
+            <div class="config-output" id="configOutput"></div>
+            <button class="copy-btn" onclick="copyConfig()">Copy Configuration</button>
+            <p style="margin-top: 14px; font-size: 0.82rem;">Kometa refreshes this automatically and rewrites your config. If <code style="font-size: 0.95em;">read_only</code> is on, you'll need to come back here every 7 days.</p>
+            <button class="button secondary" onclick="resetApp()" style="margin-top: 15px;">Get Another Pair</button>
+        </div>
+
+        <div class="footer">
+            <p>Your tokens are sent only to WeTrakr and to this page's own same-origin proxy &mdash; never stored on this server.</p>
+            <p>For use with <a href="https://kometa.wiki" target="_blank" rel="noopener noreferrer">Kometa</a></p>
+            <p>The WeTrakr logo is the sole property of WeTrakr or its licensors, and is used here for identification purposes only. No endorsement of or by WeTrakr is implied.</p>
+            <p><a href="/">&larr; Back to Home</a></p>
+        </div>
+    </div>
+
+    <script>
+        'use strict';
+
+        // WeTrakr's /oauth/device/* endpoints send no CORS headers (confirmed
+        // via a live OPTIONS preflight against /oauth/device/code — no
+        // Access-Control-Allow-Origin in the response), so this page cannot
+        // fetch api.wetrakr.com directly from the browser. It POSTs to the
+        // same-origin path below instead, which Caddy forwards to WeTrakr
+        // untouched (see the Caddyfile's /wetrakr-oauth/api/device/* block).
+        // No client_secret is used anywhere in this flow, so nothing
+        // sensitive ever reaches this server either way.
+
+        // Public OAuth client identifier for the WeTrakr app, registered
+        // 2026-09-27. Which WeTrakr account owns it long-term is still an
+        // open item — this is the id Kometa currently has, not necessarily
+        // the final one.
+        const WETRAKR_CLIENT_ID = 'cf00ea6da77e7c20528ca2a8b6885271';
+
+        const basePath = window.location.pathname.startsWith('/wetrakr-oauth') ? '/wetrakr-oauth' : '';
+        const DEVICE_CODE_URL = window.location.origin + basePath + '/api/device/code';
+        const DEVICE_TOKEN_URL = window.location.origin + basePath + '/api/device/token';
+
+        // Every WeTrakr request needs these two headers, even the device-flow
+        // ones. Caddy's same-origin proxy forwards whatever headers the
+        // browser sets, so they're just set directly here.
+        const API_HEADERS = {
+            'Content-Type': 'application/json',
+            'wetrakr-api-key': WETRAKR_CLIENT_ID,
+            'wetrakr-api-version': '1',
+        };
+
+        let pollTimer = null;
+        let expiryTimer = null;
+
+        function showStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            statusEl.style.display = 'block';
+        }
+
+        function hideStatus() {
+            document.getElementById('status').style.display = 'none';
+        }
+
+        function stopPolling() {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+        }
+
+        function backToWelcome(startBtn) {
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('welcomeSection').style.display = 'block';
+            startBtn.disabled = false;
+        }
+
+        async function startAuth() {
+            const startBtn = document.getElementById('startBtn');
+            startBtn.disabled = true;
+            showStatus('Requesting a code from WeTrakr...', 'info');
+
+            try {
+                const response = await fetch(DEVICE_CODE_URL, {
+                    method: 'POST',
+                    headers: API_HEADERS,
+                    body: JSON.stringify({ client_id: WETRAKR_CLIENT_ID }),
+                });
+
+                const data = await response.json().catch(() => null);
+
+                if (!response.ok || !data || !data.device_code || !data.user_code) {
+                    if (response.status === 429) {
+                        throw new Error('Too many codes requested — WeTrakr allows 5 per 15 minutes. Wait a bit and try again.');
+                    }
+                    const detail = data && (data.message || data.error);
+                    throw new Error(detail ? `WeTrakr error: ${detail}` : `Failed to get a code (${response.status})`);
+                }
+
+                document.getElementById('pinCode').textContent = data.user_code;
+                const verificationBase = data.verification_url || 'https://wetrakr.com/activate';
+                document.getElementById('authLink').href = verificationBase + '?code=' + encodeURIComponent(data.user_code);
+
+                document.getElementById('welcomeSection').style.display = 'none';
+                document.getElementById('pinSection').style.display = 'block';
+                hideStatus();
+
+                const intervalMs = Math.max((data.interval || 5), 2) * 1000;
+                const expiresInMs = (data.expires_in || 900) * 1000;
+
+                pollForAuth(data.device_code, intervalMs);
+
+                expiryTimer = setTimeout(() => {
+                    stopPolling();
+                    showStatus('That code expired. Click below to get a new one.', 'error');
+                    backToWelcome(startBtn);
+                }, expiresInMs);
+            } catch (error) {
+                showStatus('Error: ' + error.message, 'error');
+                startBtn.disabled = false;
+            }
+        }
+
+        function pollForAuth(deviceCode, intervalMs) {
+            const startBtn = document.getElementById('startBtn');
+
+            const tick = async () => {
+                try {
+                    const response = await fetch(DEVICE_TOKEN_URL, {
+                        method: 'POST',
+                        headers: API_HEADERS,
+                        body: JSON.stringify({ code: deviceCode, client_id: WETRAKR_CLIENT_ID }),
+                    });
+                    const data = await response.json().catch(() => null);
+
+                    // WeTrakr signals device-flow progress by status code, not
+                    // by an error string in the body (unlike FlickList) — see
+                    // the contract's device-flow table.
+                    if (response.status === 200 && data && data.access_token && data.refresh_token) {
+                        stopPolling();
+                        displayConfig(data);
+                        return;
+                    } else if (response.status === 400) {
+                        if (!(data && data.error === 'authorization_pending')) {
+                            // A 400 that isn't "still pending" is a malformed request, not a wait-and-retry case.
+                            stopPolling();
+                            showStatus('WeTrakr rejected the request: ' + ((data && (data.message || data.error)) || 'unknown error'), 'error');
+                            backToWelcome(startBtn);
+                            return;
+                        }
+                        // else: authorization_pending — keep polling below.
+                    } else if (response.status === 404) {
+                        stopPolling();
+                        showStatus('That code is no longer valid. Click below to get a new one.', 'error');
+                        backToWelcome(startBtn);
+                        return;
+                    } else if (response.status === 409) {
+                        stopPolling();
+                        showStatus('That code was already used. Click below to get a new one.', 'error');
+                        backToWelcome(startBtn);
+                        return;
+                    } else if (response.status === 410) {
+                        stopPolling();
+                        showStatus('That code expired. Click below to get a new one.', 'error');
+                        backToWelcome(startBtn);
+                        return;
+                    } else if (response.status === 418) {
+                        stopPolling();
+                        showStatus('Authorization was denied. Click below to try again.', 'error');
+                        backToWelcome(startBtn);
+                        return;
+                    } else if (response.status === 429) {
+                        showStatus('WeTrakr asked us to slow down — still waiting...', 'info');
+                        // keep polling at the same interval below.
+                    }
+                    // Any other status (5xx etc.): transient, keep polling until expiry.
+                } catch (ignored) {
+                    // Network hiccup; keep polling until expiry.
+                }
+                pollTimer = setTimeout(tick, intervalMs);
+            };
+
+            pollTimer = setTimeout(tick, intervalMs);
+        }
+
+        function displayConfig(data) {
+            const expiresAt = new Date(Date.now() + (data.expires_in || 604800) * 1000).toISOString();
+            const config = `wetrakr:
+  authorization:
+    access_token: ${data.access_token}
+    refresh_token: ${data.refresh_token}
+    expires_at: ${expiresAt}`;
+
+            document.getElementById('configOutput').textContent = config;
+
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('welcomeSection').style.display = 'none';
+            document.getElementById('resultSection').style.display = 'block';
+            showStatus('Successfully authenticated!', 'success');
+        }
+
+        function copyConfig() {
+            const configText = document.getElementById('configOutput').textContent;
+            navigator.clipboard.writeText(configText).then(() => {
+                showStatus('Configuration copied to clipboard!', 'success');
+                setTimeout(hideStatus, 3000);
+            }).catch(() => {
+                showStatus('Error copying configuration', 'error');
+            });
+        }
+
+        function resetApp() {
+            stopPolling();
+            document.getElementById('welcomeSection').style.display = 'block';
+            document.getElementById('pinSection').style.display = 'none';
+            document.getElementById('resultSection').style.display = 'none';
+            document.getElementById('startBtn').disabled = false;
+            hideStatus();
+        }
+    </script>
+</body>
+</html>

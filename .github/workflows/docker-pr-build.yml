@@ -12,7 +12,6 @@ on:
       - plex-oauth/**
       - trakt-oauth/**
       - mal-oauth/**
-      - simkl-oauth/**
       - simkl-service/**
       - imdb-service/**
 
@@ -39,9 +38,6 @@ jobs:
           - image: mal-oauth
             context: ./mal-oauth
             file: ./mal-oauth/Dockerfile
-          - image: simkl-oauth
-            context: ./simkl-oauth
-            file: ./simkl-oauth/Dockerfile
           - image: simkl-service
             context: ./simkl-service
             file: ./simkl-service/Dockerfile

@@ -23,12 +23,6 @@ services:
       context: ./mal-oauth
       dockerfile: Dockerfile
 
-  simkl-oauth:
-    pull_policy: build
-    build:
-      context: ./simkl-oauth
-      dockerfile: Dockerfile
-
   simkl-service:
     pull_policy: build
     build:

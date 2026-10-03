@@ -242,19 +242,10 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
         reverse_proxy trakt-mal-oauth:5000
     }
 
-    # SIMKL token exchange proxy: the static page runs the AUTH V2 device flow
-    # in the browser, but SIMKL rejects the final /oauth2/token exchange with
-    # invalid_client unless the Kometa app's client_secret is supplied. The
-    # secret cannot live in a public page, so that one call goes here and the
-    # Flask service adds it from its environment. Nothing is stored.
-    handle /simkl-oauth/api/official/* {
-        uri strip_prefix /simkl-oauth
-        reverse_proxy simkl-oauth:5000
-    }
-
     # Handle /simkl-oauth path
     # Static browser-only SIMKL OAuth (PIN flow): the browser talks directly to
-    # api.simkl.com, which is CORS-enabled; the token never touches this server.
+    # api.simkl.com, which is CORS-enabled; this client needs no secret, so the
+    # token never touches this server.
     handle /simkl-oauth* {
         root * /var/www/html
         header Cache-Control "no-store"

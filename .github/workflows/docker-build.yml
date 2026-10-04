@@ -84,18 +84,27 @@ jobs:
           - image: anidb-mirror
             context: ./anidb-service
             file: ./anidb-service/Dockerfile
+          - image: flicklist-oauth
+            context: ./flicklist-oauth
+            file: ./flicklist-oauth/Dockerfile
+          - image: imdb-service
+            context: ./imdb-service
+            file: ./imdb-service/Dockerfile
           - image: plex-oauth
             context: ./plex-oauth
             file: ./plex-oauth/Dockerfile
-          - image: trakt-oauth
-            context: ./trakt-oauth
-            file: ./trakt-oauth/Dockerfile
           - image: mal-oauth
             context: ./mal-oauth
             file: ./mal-oauth/Dockerfile
           - image: simkl-service
             context: ./simkl-service
             file: ./simkl-service/Dockerfile
+          - image: transfer-service
+            context: ./transfer-service
+            file: ./transfer-service/Dockerfile
+          - image: wetrakr-oauth
+            context: ./wetrakr-oauth
+            file: ./wetrakr-oauth/Dockerfile
 
     steps:
       - name: Check out repository

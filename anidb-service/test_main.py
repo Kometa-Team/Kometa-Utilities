@@ -1758,3 +1758,80 @@ async def test_hourly_and_daily_limits_can_be_disabled_independently(
         third = {"X-Forwarded-For": "192.0.2.44"}
         for aid in range(721, 731):
             assert test_client.get(f"/anime/{aid}", headers=third).status_code == 202
+
+
+# ============================================================================
+# AniDB Error Response Tests
+# ============================================================================
+
+
+def _anidb_replies(text):
+    response = MagicMock(text=text)
+    response.raise_for_status = MagicMock()
+    return AsyncMock(return_value=response)
+
+
+@pytest.mark.asyncio
+async def test_not_found_response_is_returned_for_caching(clean_test_env):
+    """A genuine "Anime not found" answer is cached like any other result."""
+    from main import fetch_from_anidb
+
+    with patch("httpx.AsyncClient") as mock_client:
+        mock_client.return_value.__aenter__.return_value.get = _anidb_replies(
+            "<error>Anime not found</error>"
+        )
+        assert await fetch_from_anidb(14847) == "<error>Anime not found</error>"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<error>client version missing or invalid</error>",
+        '<error code="500">Internal server error</error>',
+        "  <error>Misc error</error>\n",
+    ],
+)
+@pytest.mark.asyncio
+async def test_other_error_responses_are_not_cached(clean_test_env, body):
+    """Any other <error> document is a failure: it raises, is logged as failed, and is not stored."""
+    import aiosqlite
+
+    from main import fetch_from_anidb
+
+    with patch("httpx.AsyncClient") as mock_client:
+        mock_client.return_value.__aenter__.return_value.get = _anidb_replies(body)
+        with pytest.raises(HTTPException) as exc_info:
+            await fetch_from_anidb(1)
+
+    assert exc_info.value.status_code == 503
+    assert "AniDB returned an error" in exc_info.value.detail
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        cursor = await db.execute("SELECT success FROM api_logs WHERE aid = 1")
+        assert await cursor.fetchall() == [(0,)]
+
+
+def test_not_found_entries_get_a_long_lifetime():
+    """Cached not-found answers are rechecked rarely; real anime keep their tiered lifetimes."""
+    import main
+
+    assert main.refresh_threshold("<error>Anime not found</error>") == timedelta(days=180)
+    assert main.refresh_threshold(_dated_xml("2024-01-01")) == timedelta(days=14)
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_write_file_for_failed_error_response(
+    clean_test_env, clean_priority_state
+):
+    """When AniDB returns a non-not-found error, nothing is cached and the queue row is dropped."""
+    import main
+
+    await main.enqueue_aid(77, is_new=True)
+    with patch("httpx.AsyncClient") as mock_client:
+        mock_client.return_value.__aenter__.return_value.get = _anidb_replies(
+            "<error>client version missing or invalid</error>"
+        )
+        with patch("main.THROTTLE_SECONDS", 0):
+            await _run_worker()
+
+    assert not Path("/tmp/test_anidb/data/77.xml").exists()
+    assert await _pending_rows() == []

@@ -32,6 +32,7 @@ REFRESH_UNKNOWN = timedelta(days=int(os.getenv("REFRESH_DAYS_UNKNOWN", "30")))  
 REFRESH_ENDED_UNDER_1Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_UNDER_1Y", "30")))
 REFRESH_ENDED_1_3Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_1_3Y", "90")))
 REFRESH_ENDED_3_10Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_3_10Y", "180")))
+REFRESH_NOT_FOUND = timedelta(days=int(os.getenv("REFRESH_DAYS_NOT_FOUND", "180")))  # AniDB: no such AID
 REFRESH_ENDED_10Y_PLUS = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_10Y_PLUS", "365")))
 ROOT_PATH = os.getenv("ROOT_PATH", "")  # Set to /anidb-service for path-based routing
 
@@ -184,6 +185,9 @@ def refresh_threshold(xml_text: str, now: Optional[datetime] = None) -> timedelt
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return UPDATE_THRESHOLD
+
+    if root.tag == "error":
+        return REFRESH_NOT_FOUND  # only "Anime not found" responses are ever cached
 
     start = parse_anidb_date(root.findtext("startdate"))
     end = parse_anidb_date(root.findtext("enddate"))
@@ -469,6 +473,17 @@ async def fetch_from_anidb(aid: int) -> str:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="AniDB API access temporarily banned",
+                )
+
+            # AniDB reports problems as a bare <error> document. "Anime not found" is a real
+            # answer and is cached (with a long lifetime); anything else (bad client version,
+            # server trouble, ...) must not be stored as if it were anime data.
+            body = response.text.strip()
+            if body.startswith("<error") and "not found" not in body.lower():
+                await log_api_request(aid, success=False)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"AniDB returned an error: {body[:200]}",
                 )
 
             await log_api_request(aid, success=True)

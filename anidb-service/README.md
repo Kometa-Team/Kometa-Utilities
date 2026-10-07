@@ -168,8 +168,13 @@ and the AID is added to the refresh queue, which the worker only works on once t
 | Ended 1-3 years ago | `REFRESH_DAYS_ENDED_1_3Y` | 90 |
 | Ended 3-10 years ago | `REFRESH_DAYS_ENDED_3_10Y` | 180 |
 | Ended 10+ years ago | `REFRESH_DAYS_ENDED_10Y_PLUS` | 365 |
+| AniDB answered "Anime not found" | `REFRESH_DAYS_NOT_FOUND` | 180 |
 
 `UPDATE_THRESHOLD_DAYS` is only the fallback for XML that can't be parsed.
+
+A "not found" answer is cached (and served as a 200 `<error>` document, as before) so repeat
+requests don't cost API calls. Any other `<error>` response from AniDB is treated as a failed
+fetch and is never cached.
 
 ## Mature Content Filtering
 

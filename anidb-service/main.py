@@ -21,7 +21,15 @@ SEED_DATA_DIR = Path(os.getenv("SEED_DATA_DIR", "/app/seed_data"))
 LOGO_PATH = Path(__file__).resolve().parent / "static" / "anidb-logo.png"
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "200"))
 THROTTLE_SECONDS = int(os.getenv("THROTTLE_SECONDS", "4"))
+# Cache lifetime depends on how likely an entry is to change, judged from its start/end dates.
+# UPDATE_THRESHOLD is the fallback when an entry's XML can't be parsed.
 UPDATE_THRESHOLD = timedelta(days=int(os.getenv("UPDATE_THRESHOLD_DAYS", "14")))
+REFRESH_ACTIVE = timedelta(days=int(os.getenv("REFRESH_DAYS_ACTIVE", "14")))  # airing/upcoming
+REFRESH_UNKNOWN = timedelta(days=int(os.getenv("REFRESH_DAYS_UNKNOWN", "30")))  # no start date
+REFRESH_ENDED_UNDER_1Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_UNDER_1Y", "30")))
+REFRESH_ENDED_1_3Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_1_3Y", "90")))
+REFRESH_ENDED_3_10Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_3_10Y", "180")))
+REFRESH_ENDED_10Y_PLUS = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_10Y_PLUS", "365")))
 ROOT_PATH = os.getenv("ROOT_PATH", "")  # Set to /anidb-service for path-based routing
 
 # AniDB API Configuration
@@ -34,6 +42,7 @@ ANIDB_PASSWORD = os.getenv("ANIDB_PASSWORD", "")  # For accessing mature content
 # Global state
 update_queue: Optional[asyncio.Queue] = None
 pending_aids: set = set()
+new_aids: set = set()  # queued AIDs with no cached copy; these outrank refreshes of stale entries
 worker_task: Optional[asyncio.Task] = None
 rate_limit_until: Optional[datetime] = None  # set when AniDB returns 429
 
@@ -62,6 +71,15 @@ async def init_database() -> None:
                 timestamp TEXT NOT NULL,
                 aid INTEGER,
                 success INTEGER DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS pending_queue (
+                aid INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                queued_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS service_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_tags_aid ON tags(aid);
             CREATE INDEX IF NOT EXISTS idx_tags_tag_id ON tags(tag_id);
@@ -112,6 +130,139 @@ async def index_xml_to_db(aid: int, xml_text: str) -> None:
     except Exception as e:
         print(f"❌ Database Error for AID {aid}: {e}")
         raise
+
+
+def parse_anidb_date(value: Optional[str]) -> Optional[datetime]:
+    """Parse an AniDB date, which may be partial (YYYY-MM-DD, YYYY-MM or YYYY)."""
+    if not value:
+        return None
+    value = value.strip()
+    for fmt, length in (("%Y-%m-%d", 10), ("%Y-%m", 7), ("%Y", 4)):
+        try:
+            return datetime.strptime(value[:length], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def refresh_threshold(xml_text: str, now: Optional[datetime] = None) -> timedelta:
+    """Return how long a cached entry stays fresh, based on its airing dates.
+
+    Finished shows rarely change, so they are refreshed far less often than airing or
+    upcoming ones. This keeps the daily API budget for entries that actually change.
+    """
+    now = now or datetime.now()
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return UPDATE_THRESHOLD
+
+    start = parse_anidb_date(root.findtext("startdate"))
+    end = parse_anidb_date(root.findtext("enddate"))
+    if start is None:
+        return REFRESH_UNKNOWN
+    if start > now or end is None or end > now:
+        return REFRESH_ACTIVE  # upcoming, airing or open-ended
+
+    years_ended = (now - end).days / 365.25
+    if years_ended < 1:
+        return REFRESH_ENDED_UNDER_1Y
+    if years_ended < 3:
+        return REFRESH_ENDED_1_3Y
+    if years_ended < 10:
+        return REFRESH_ENDED_3_10Y
+    return REFRESH_ENDED_10Y_PLUS
+
+
+def cached_xml_path(aid: int) -> Path:
+    """Return the existing cache file for an AID, or the path a new one should use.
+
+    Seed data is stored as AnimeDoc_{aid}.xml, live fetches as {aid}.xml. Refreshes
+    overwrite whichever exists so an AID never ends up with two copies.
+    """
+    for name in (f"{aid}.xml", f"AnimeDoc_{aid}.xml"):
+        path = XML_DIR / name
+        if path.exists():
+            return path
+    return XML_DIR / f"{aid}.xml"
+
+
+# The update queue is mirrored in the pending_queue table (best effort) so a restart doesn't
+# lose the backlog. kind is "new" (no cached copy) or "refresh" (stale cached copy).
+async def persist_pending(aid: int, kind: str) -> None:
+    """Record a queued AID, replacing any earlier row for it."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO pending_queue VALUES (?, ?, ?)",
+                (aid, kind, datetime.now().isoformat()),
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"⚠️ Could not persist queued AID {aid}: {e}")
+
+
+async def forget_pending(aid: int) -> None:
+    """Remove an AID from the persisted queue once it has been handled or dropped."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM pending_queue WHERE aid = ?", (aid,))
+            await db.commit()
+    except Exception as e:
+        print(f"⚠️ Could not clear queued AID {aid}: {e}")
+
+
+async def enqueue_aid(aid: int, is_new: bool) -> None:
+    """Queue an AID for fetching and persist it."""
+    pending_aids.add(aid)
+    if is_new:
+        new_aids.add(aid)
+    await update_queue.put(aid)
+    await persist_pending(aid, "new" if is_new else "refresh")
+
+
+async def save_rate_limit(until: Optional[datetime]) -> None:
+    """Persist (or clear) the 429 back-off so a restart doesn't reset it."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if until is None:
+                await db.execute("DELETE FROM service_state WHERE key = 'rate_limit_until'")
+            else:
+                await db.execute(
+                    "INSERT OR REPLACE INTO service_state VALUES ('rate_limit_until', ?)",
+                    (until.isoformat(),),
+                )
+            await db.commit()
+    except Exception as e:
+        print(f"⚠️ Could not persist rate limit state: {e}")
+
+
+async def restore_queue() -> None:
+    """Reload the persisted backlog (uncached AIDs first) and any active 429 back-off."""
+    global rate_limit_until
+    pending_aids.clear()
+    new_aids.clear()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT aid, kind FROM pending_queue ORDER BY kind = 'new' DESC, queued_at"
+        )
+        rows = await cursor.fetchall()
+        cursor = await db.execute("SELECT value FROM service_state WHERE key = 'rate_limit_until'")
+        state = await cursor.fetchone()
+
+    for aid, kind in rows:
+        pending_aids.add(aid)
+        if kind == "new":
+            new_aids.add(aid)
+        update_queue.put_nowait(aid)
+    if rows:
+        print(f"♻️ Restored {len(rows)} queued AIDs ({len(new_aids)} new)")
+
+    if state:
+        until = datetime.fromisoformat(state[0])
+        if until > datetime.now():
+            rate_limit_until = until
+            print(f"⏸️ Restored AniDB back-off until {until.isoformat()}")
 
 
 async def check_daily_limit() -> bool:
@@ -231,6 +382,7 @@ async def anidb_worker() -> None:
 
     while True:
         aid = 0
+        is_new = False
         try:
             # Honour any active 429 back-off before pulling from the queue
             if rate_limit_until is not None:
@@ -242,11 +394,22 @@ async def anidb_worker() -> None:
                     )
                     await asyncio.sleep(delay)
                 rate_limit_until = None
+                await save_rate_limit(None)
 
             aid = await update_queue.get()
 
             if aid in pending_aids:
                 pending_aids.remove(aid)
+            is_new = aid in new_aids
+            new_aids.discard(aid)
+
+            # Uncached AIDs take priority: skip refreshes while any are waiting. The stale
+            # entry is re-queued by its next request, so nothing is lost.
+            if not is_new and new_aids:
+                print(f"⏭️ Deferring refresh of AID {aid} (uncached AIDs waiting)")
+                await forget_pending(aid)
+                update_queue.task_done()
+                continue
 
             print(f"⏳ Processing AID {aid}...")
 
@@ -254,12 +417,12 @@ async def anidb_worker() -> None:
             xml_text = await fetch_from_anidb(aid)
 
             # Save to file
-            xml_file = XML_DIR / f"{aid}.xml"
-            xml_file.write_text(xml_text, encoding="utf-8")
+            cached_xml_path(aid).write_text(xml_text, encoding="utf-8")
 
             # Index to database
             await index_xml_to_db(aid, xml_text)
 
+            await forget_pending(aid)
             print(f"✅ Cached AID {aid}")
 
             # Mandatory throttle
@@ -273,11 +436,13 @@ async def anidb_worker() -> None:
             if isinstance(e, HTTPException) and e.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
                 rate_limit_until = datetime.now() + timedelta(hours=24)
                 print(f"🚫 AniDB 429 — suspending requests until {rate_limit_until.isoformat()}")
+                await save_rate_limit(rate_limit_until)
                 if aid:
-                    pending_aids.add(aid)
-                    await update_queue.put(aid)
+                    await enqueue_aid(aid, is_new)
             else:
                 print(f"❌ Worker error for AID {aid}: {e}")
+                if aid:
+                    await forget_pending(aid)
             update_queue.task_done()
 
 
@@ -302,6 +467,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize database
     await init_database()
+    await restore_queue()
 
     # Start background indexing if database is empty
     async def index_seed_data_background():
@@ -639,11 +805,16 @@ async def get_stats() -> Dict[str, Any]:
             row = await cursor.fetchone()
             daily = row[0] if row else 0
 
+            cursor = await db.execute("SELECT kind, COUNT(*) FROM pending_queue GROUP BY kind")
+            queued = dict(await cursor.fetchall())
+
         return {
             "status": "online",
             "cached_anime": total,
             "api_calls_last_24h": daily,
             "queue_size": update_queue.qsize(),
+            "queued_new": queued.get("new", 0),
+            "queued_refresh": queued.get("refresh", 0),
             "daily_limit": DAILY_LIMIT,
             "rate_limit_until": rate_limit_until.isoformat() if rate_limit_until else None,
         }
@@ -672,9 +843,7 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
         )
 
     # Check for both naming formats: {aid}.xml and AnimeDoc_{aid}.xml
-    xml_file = XML_DIR / f"{aid}.xml"
-    if not xml_file.exists():
-        xml_file = XML_DIR / f"AnimeDoc_{aid}.xml"
+    xml_file = cached_xml_path(aid)
 
     # Check if cached and fresh
     if xml_file.exists():
@@ -686,12 +855,11 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                 if row:
                     last_updated = datetime.fromisoformat(row[0])
                     age = datetime.now() - last_updated
+                    content = xml_file.read_text(encoding="utf-8")
+                    threshold = refresh_threshold(content)
 
-                    if age < UPDATE_THRESHOLD:
-                        # Serve from cache
-                        content = xml_file.read_text(encoding="utf-8")
-
-                        # Filter mature content if requested
+                    if age < threshold:
+                        # Serve from cache; filter mature content if requested
                         if not mature:
                             content = filter_mature_content(content)
 
@@ -701,16 +869,15 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                             headers={
                                 "X-Cache": "HIT",
                                 "X-Age-Days": str(age.days),
+                                "X-Refresh-After-Days": str(threshold.days),
                                 "X-Mature-Filter": "disabled" if mature else "enabled",
                             },
                         )
                     else:
                         # Cache exists but is stale - queue for update and return stale content
-                        if aid not in pending_aids:
-                            pending_aids.add(aid)
-                            await update_queue.put(aid)
+                        if aid not in pending_aids and not new_aids:
+                            await enqueue_aid(aid, False)
 
-                        content = xml_file.read_text(encoding="utf-8")
                         if not mature:
                             content = filter_mature_content(content)
 
@@ -722,13 +889,13 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                                 "X-Status": "Refreshing",
                                 "X-Mature-Filter": "disabled" if mature else "enabled",
                                 "X-Age-Days": str(age.days),
+                                "X-Refresh-After-Days": str(threshold.days),
                             },
                         )
                 else:
                     # File exists but no DB entry - treat as stale
-                    if aid not in pending_aids:
-                        pending_aids.add(aid)
-                        await update_queue.put(aid)
+                    if aid not in pending_aids and not new_aids:
+                        await enqueue_aid(aid, False)
 
                     content = xml_file.read_text(encoding="utf-8")
                     if not mature:
@@ -748,8 +915,11 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
 
     # Queue for update if not in cache
     if aid not in pending_aids:
-        pending_aids.add(aid)
-        await update_queue.put(aid)
+        await enqueue_aid(aid, True)
+    elif aid not in new_aids:
+        # Already queued as a refresh but the cached copy is gone: promote it
+        new_aids.add(aid)
+        await persist_pending(aid, "new")
 
     # No cache available
     raise HTTPException(

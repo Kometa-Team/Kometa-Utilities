@@ -68,6 +68,7 @@ curl "http://localhost/anime/123?mature=true"
 - `X-Cache`: `HIT`, `STALE`, or not present (queued)
 - `X-Mature-Filter`: `enabled` or `disabled`
 - `X-Age-Days`: Cache age in days
+- `X-Refresh-After-Days`: How long this entry stays fresh (see Refresh Tiers)
 
 ### GET /search/tags
 Search for anime by tags.
@@ -119,12 +120,36 @@ Get service statistics.
   "cached_anime": 1500,
   "api_calls_last_24h": 45,
   "queue_size": 2,
+  "queued_new": 1,
+  "queued_refresh": 1,
   "daily_limit": 200
 }
 ```
 
+- `queued_new`: queued AIDs with no cached copy. These are fetched first.
+- `queued_refresh`: queued AIDs with a stale cached copy. They are only queued, and only fetched, when no uncached AIDs are waiting.
+
+The queue and any 429 back-off are stored in the database, so a restart does not lose the backlog.
+
 ### GET /tags
 List all known tags with usage statistics (HTML page).
+
+## Refresh Tiers
+
+How long a cached entry stays fresh depends on its AniDB `startdate`/`enddate`, so the daily
+API budget goes to entries that actually change. Past the threshold, the stale copy is served
+and a refresh is queued, but only when no uncached AIDs are waiting.
+
+| Entry | Env var | Default |
+|---|---|---|
+| Airing, open-ended, upcoming, or end date in the future | `REFRESH_DAYS_ACTIVE` | 14 |
+| No start date | `REFRESH_DAYS_UNKNOWN` | 30 |
+| Ended under 1 year ago | `REFRESH_DAYS_ENDED_UNDER_1Y` | 30 |
+| Ended 1-3 years ago | `REFRESH_DAYS_ENDED_1_3Y` | 90 |
+| Ended 3-10 years ago | `REFRESH_DAYS_ENDED_3_10Y` | 180 |
+| Ended 10+ years ago | `REFRESH_DAYS_ENDED_10Y_PLUS` | 365 |
+
+`UPDATE_THRESHOLD_DAYS` is only the fallback for XML that can't be parsed.
 
 ## Mature Content Filtering
 

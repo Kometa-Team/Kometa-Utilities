@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,7 @@ os.environ["DB_PATH"] = "/tmp/test_anidb/test.db"
 os.environ["ANIDB_USERNAME"] = "test_anidb"
 os.environ["ANIDB_PASSWORD"] = "test_anidb_pass"
 os.environ["DAILY_LIMIT"] = "10"
-os.environ["UPDATE_THRESHOLD_DAYS"] = "7"  # Make 10-day cache properly stale
+os.environ["UPDATE_THRESHOLD_DAYS"] = "7"  # Fallback threshold for unparseable XML
 
 from main import (  # noqa: E402
     app,
@@ -32,6 +33,9 @@ from main import (  # noqa: E402
 def test_client(clean_test_env):
     """Provide a test client for the FastAPI app."""
     with TestClient(app) as client:
+        # Let startup's background seed indexing run against the empty data dir, so it
+        # can't index (and freshen) files that tests write afterwards
+        time.sleep(0.3)
         yield client
 
 
@@ -479,7 +483,7 @@ async def test_stale_cache_handling(test_client, clean_test_env, sample_anime_xm
     import aiosqlite
 
     async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
-        old_date = (datetime.now() - timedelta(days=10)).isoformat()
+        old_date = (datetime.now() - timedelta(days=30)).isoformat()
         await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1, old_date))
         await db.commit()
 
@@ -1160,3 +1164,311 @@ def test_root_endpoint_constructs_base_url(test_client):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ============================================================================
+# Queue Priority Tests
+# ============================================================================
+
+
+@pytest.fixture
+def clean_priority_state():
+    """Reset module-level queue bookkeeping around a test."""
+    import main
+
+    main.pending_aids.clear()
+    main.new_aids.clear()
+    yield
+    main.pending_aids.clear()
+    main.new_aids.clear()
+
+
+@pytest.mark.asyncio
+async def test_uncached_aid_is_marked_new(test_client, clean_test_env, clean_priority_state):
+    """A request for an uncached AID queues it as high priority."""
+    import main
+
+    queue = asyncio.Queue()  # private queue so the app's worker can't consume it
+    with patch("main.update_queue", queue):
+        assert test_client.get("/anime/777").status_code == 202
+    assert 777 in main.new_aids
+    assert queue.get_nowait() == 777
+
+
+@pytest.mark.asyncio
+async def test_stale_refresh_not_queued_while_new_pending(
+    test_client, clean_test_env, clean_priority_state, sample_anime_xml
+):
+    """Stale refreshes are not queued while uncached AIDs are waiting."""
+    import aiosqlite
+
+    import main
+
+    Path("/tmp/test_anidb/data/1.xml").write_text(sample_anime_xml, encoding="utf-8")
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        old = (datetime.now() - timedelta(days=30)).isoformat()
+        await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1, old))
+        await db.commit()
+
+    queue = asyncio.Queue()  # private queue so the app's worker can't consume it
+    with patch("main.update_queue", queue):
+        main.new_aids.add(999)
+        response = test_client.get("/anime/1")
+        assert response.status_code == 200
+        assert response.headers["X-Cache"] == "STALE"
+        assert queue.empty()
+
+        # Once no uncached AIDs are waiting, the refresh is queued as before
+        main.new_aids.clear()
+        r2 = test_client.get("/anime/1")
+        assert queue.get_nowait() == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_defers_refresh_while_new_pending(clean_test_env, clean_priority_state):
+    """The worker skips a queued refresh without an API call while uncached AIDs wait."""
+    import main
+
+    test_queue = asyncio.Queue()
+    fetch = AsyncMock(return_value="<anime/>")
+    main.new_aids.add(2)  # uncached AID still waiting
+    main.pending_aids.update({1, 2})
+    await test_queue.put(1)  # refresh queued first
+
+    with patch("main.fetch_from_anidb", fetch), patch("main.update_queue", test_queue):
+        task = asyncio.create_task(main.anidb_worker())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    fetch.assert_not_called()
+    assert 1 not in main.pending_aids
+
+
+def test_cached_xml_path_prefers_existing_file(clean_test_env):
+    """Refreshes target the existing cache file (seed or live) instead of adding a copy."""
+    import main
+
+    data = Path("/tmp/test_anidb/data")
+    assert main.cached_xml_path(5) == data / "5.xml"  # nothing cached: new live-fetch name
+
+    (data / "AnimeDoc_5.xml").write_text("<anime/>")
+    assert main.cached_xml_path(5) == data / "AnimeDoc_5.xml"  # seed file is reused
+
+    (data / "5.xml").write_text("<anime/>")
+    assert main.cached_xml_path(5) == data / "5.xml"  # existing duplicates: newer name wins
+
+
+@pytest.mark.asyncio
+async def test_worker_overwrites_seed_file(clean_test_env):
+    """A refresh of a seed-only AID rewrites AnimeDoc_{aid}.xml and creates no new file."""
+    import main
+
+    seed = Path("/tmp/test_anidb/data/AnimeDoc_9.xml")
+    seed.write_text("<anime id='9'>old</anime>")
+    queue = asyncio.Queue()
+    await queue.put(9)
+
+    with patch("main.fetch_from_anidb", AsyncMock(return_value="<anime id='9'>new</anime>")):
+        with patch("main.update_queue", queue), patch("main.THROTTLE_SECONDS", 0):
+            task = asyncio.create_task(main.anidb_worker())
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    assert "new" in seed.read_text()
+    assert not Path("/tmp/test_anidb/data/9.xml").exists()
+
+
+# ============================================================================
+# Durable Queue and Queue Stats Tests
+# ============================================================================
+
+
+async def _pending_rows():
+    import aiosqlite
+
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        cursor = await db.execute("SELECT aid, kind FROM pending_queue ORDER BY aid")
+        return await cursor.fetchall()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_persists_and_forget_removes(clean_test_env, clean_priority_state):
+    """Queued AIDs are mirrored to the DB with their kind and removed when handled."""
+    import main
+
+    with patch("main.update_queue", asyncio.Queue()):
+        await main.enqueue_aid(1, is_new=True)
+        await main.enqueue_aid(2, is_new=False)
+    assert await _pending_rows() == [(1, "new"), (2, "refresh")]
+
+    await main.forget_pending(1)
+    assert await _pending_rows() == [(2, "refresh")]
+
+
+@pytest.mark.asyncio
+async def test_uncached_request_promotes_queued_refresh(
+    test_client, clean_test_env, clean_priority_state
+):
+    """A refresh already queued becomes 'new' if its cached copy disappears."""
+    import main
+
+    with patch("main.update_queue", asyncio.Queue()):
+        await main.enqueue_aid(31, is_new=False)
+        assert test_client.get("/anime/31").status_code == 202
+    assert 31 in main.new_aids
+    assert await _pending_rows() == [(31, "new")]
+
+
+@pytest.mark.asyncio
+async def test_restore_queue_loads_new_before_refresh(clean_test_env, clean_priority_state):
+    """After a restart the backlog is reloaded with uncached AIDs first."""
+    import main
+
+    with patch("main.update_queue", asyncio.Queue()):
+        await main.enqueue_aid(10, is_new=False)
+        await main.enqueue_aid(20, is_new=True)
+        await main.enqueue_aid(30, is_new=False)
+
+    restored = asyncio.Queue()
+    main.pending_aids.clear()
+    main.new_aids.clear()
+    with patch("main.update_queue", restored):
+        await main.restore_queue()
+
+    assert [restored.get_nowait() for _ in range(restored.qsize())] == [20, 10, 30]
+    assert main.new_aids == {20}
+    assert main.pending_aids == {10, 20, 30}
+
+
+@pytest.mark.asyncio
+async def test_worker_clears_persisted_row_after_caching(clean_test_env, clean_priority_state):
+    """A processed AID leaves the persisted queue."""
+    import main
+
+    queue = asyncio.Queue()
+    with patch("main.update_queue", queue):
+        await main.enqueue_aid(4, is_new=True)
+        with patch("main.fetch_from_anidb", AsyncMock(return_value="<anime id='4'/>")):
+            with patch("main.THROTTLE_SECONDS", 0):
+                task = asyncio.create_task(main.anidb_worker())
+                await asyncio.sleep(0.3)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+    assert await _pending_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_429_keeps_row_and_persists_backoff(clean_test_env, clean_priority_state):
+    """A 429 leaves the AID persisted and the back-off survives a restart."""
+    import main
+
+    queue = asyncio.Queue()
+    with patch("main.update_queue", queue), patch.object(main, "rate_limit_until", None):
+        await main.enqueue_aid(5, is_new=True)
+        limited = HTTPException(status_code=429, detail="limit")
+        with patch("main.fetch_from_anidb", side_effect=limited):
+            task = asyncio.create_task(main.anidb_worker())
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        assert await _pending_rows() == [(5, "new")]
+        paused_until = main.rate_limit_until
+        assert paused_until is not None
+
+    # Simulate a restart: module state is gone, the DB still has it
+    with patch("main.update_queue", asyncio.Queue()), patch.object(main, "rate_limit_until", None):
+        await main.restore_queue()
+        assert main.rate_limit_until == paused_until
+
+
+@pytest.mark.asyncio
+async def test_stats_reports_new_vs_refresh(test_client, clean_test_env, clean_priority_state):
+    """/stats breaks the backlog down into uncached and refresh entries."""
+    import main
+
+    with patch("main.update_queue", asyncio.Queue()):
+        await main.enqueue_aid(1, is_new=True)
+        await main.enqueue_aid(2, is_new=True)
+        await main.enqueue_aid(3, is_new=False)
+    data = test_client.get("/stats").json()
+    assert data["queued_new"] == 2
+    assert data["queued_refresh"] == 1
+
+
+# ============================================================================
+# Tiered Refresh Threshold Tests
+# ============================================================================
+
+
+def _dated_xml(start=None, end=None):
+    parts = []
+    if start:
+        parts.append(f"<startdate>{start}</startdate>")
+    if end:
+        parts.append(f"<enddate>{end}</enddate>")
+    return f"<anime id='1'>{''.join(parts)}</anime>"
+
+
+@pytest.mark.parametrize(
+    "start,end,days",
+    [
+        (None, None, 30),  # no start date
+        ("2099-01-01", None, 14),  # not yet started
+        ("2024-01-01", None, 14),  # airing / open-ended
+        ("2024-01-01", "2099-01-01", 14),  # end date in the future
+        ("2024-01-01", "2026-06-01", 30),  # ended < 1 year ago
+        ("2020-01-01", "2024-10-01", 90),  # ended 1-3 years ago
+        ("2010-01-01", "2020-10-01", 180),  # ended 3-10 years ago
+        ("1990-01-01", "2000-10-01", 365),  # ended 10+ years ago
+        ("1990", "2000-10", 365),  # partial dates
+    ],
+)
+def test_refresh_threshold_tiers(start, end, days):
+    """Entries are refreshed less often the longer ago they finished airing."""
+    import main
+
+    now = datetime(2026, 10, 7)
+    assert main.refresh_threshold(_dated_xml(start, end), now) == timedelta(days=days)
+
+
+def test_refresh_threshold_unparseable_uses_fallback():
+    """Broken XML falls back to UPDATE_THRESHOLD_DAYS."""
+    import main
+
+    assert main.refresh_threshold("<anime>", datetime(2026, 10, 7)) == main.UPDATE_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_old_finished_anime_stays_fresh(test_client, clean_test_env, clean_priority_state):
+    """A long-finished entry 30 days old is a cache hit and is not queued for refresh."""
+    import aiosqlite
+
+    import main
+
+    Path("/tmp/test_anidb/data/1.xml").write_text(
+        _dated_xml("1990-01-01", "1991-01-01"), encoding="utf-8"
+    )
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        old = (datetime.now() - timedelta(days=30)).isoformat()
+        await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1, old))
+        await db.commit()
+
+    with patch("main.update_queue", asyncio.Queue()) as queue:
+        response = test_client.get("/anime/1")
+        assert response.headers["X-Cache"] == "HIT"
+        assert response.headers["X-Refresh-After-Days"] == "365"
+        assert queue.empty()

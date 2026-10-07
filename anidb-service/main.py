@@ -37,8 +37,10 @@ ROOT_PATH = os.getenv("ROOT_PATH", "")  # Set to /anidb-service for path-based r
 
 # Abuse protection: only lookups that would add a NEW AID to the queue are limited. Cached
 # entries and refreshes of cached entries are never limited.
-NEW_LOOKUPS_PER_IP = int(os.getenv("NEW_LOOKUPS_PER_IP", "50"))  # 0 disables
+NEW_LOOKUPS_PER_IP = int(os.getenv("NEW_LOOKUPS_PER_IP", "50"))  # per window; 0 disables
 NEW_LOOKUP_WINDOW = int(os.getenv("NEW_LOOKUP_WINDOW_SECONDS", "3600"))
+NEW_LOOKUPS_PER_IP_DAILY = int(os.getenv("NEW_LOOKUPS_PER_IP_DAILY", "100"))  # per 24h; 0 disables
+DAILY_WINDOW = 86400
 MAX_QUEUED_NEW = int(os.getenv("MAX_QUEUED_NEW", "5000"))  # 0 disables
 MAX_AID = int(os.getenv("MAX_AID", "50000"))  # reject uncached AIDs above this; 0 disables
 # Header carrying the client IP; the LAST value is used, since that is the one the nearest
@@ -62,7 +64,13 @@ pending_aids: set = set()  # AIDs waiting in either lane (prevents duplicates)
 new_aids: set = set()  # the subset of pending_aids waiting in the new lane
 in_flight_aid: Optional[int] = None  # AID the worker is fetching right now
 new_lookups: Dict[str, deque] = {}  # client key -> monotonic times of recent new-AID lookups
-rejected_lookups: Dict[str, int] = {"out_of_range": 0, "rate_limited": 0, "queue_full": 0}
+last_limit_warning: Dict[str, float] = {}  # client key -> monotonic time of last log line
+rejected_lookups: Dict[str, int] = {
+    "out_of_range": 0,
+    "rate_limited": 0,
+    "daily_limited": 0,
+    "queue_full": 0,
+}
 worker_task: Optional[asyncio.Task] = None
 rate_limit_until: Optional[datetime] = None  # set when AniDB returns 429
 
@@ -266,28 +274,47 @@ def admit_new_lookup(request: Request, aid: int) -> None:
             headers={"Retry-After": "3600"},
         )
 
-    if not NEW_LOOKUPS_PER_IP:
+    if not NEW_LOOKUPS_PER_IP and not NEW_LOOKUPS_PER_IP_DAILY:
         return
     key = client_key(request)
     now = time.monotonic()
-    recent = new_lookups.setdefault(key, deque())
-    while recent and now - recent[0] > NEW_LOOKUP_WINDOW:
+    horizon = max(
+        NEW_LOOKUP_WINDOW if NEW_LOOKUPS_PER_IP else 0,
+        DAILY_WINDOW if NEW_LOOKUPS_PER_IP_DAILY else 0,
+    )
+    recent = new_lookups.setdefault(key, deque())  # times of lookups this caller had admitted
+    while recent and now - recent[0] > horizon:
         recent.popleft()
-    if len(recent) >= NEW_LOOKUPS_PER_IP:
-        rejected_lookups["rate_limited"] += 1
-        if len(recent) == NEW_LOOKUPS_PER_IP:  # log once per window, not per request
-            print(f"🚧 {key} hit the new-lookup limit ({NEW_LOOKUPS_PER_IP}/{NEW_LOOKUP_WINDOW}s)")
-            recent.append(now)  # marker so the warning isn't repeated
+
+    # Retry-After is when the entry that currently blocks the caller leaves its window
+    if NEW_LOOKUPS_PER_IP_DAILY and len(recent) >= NEW_LOOKUPS_PER_IP_DAILY:
+        retry = recent[len(recent) - NEW_LOOKUPS_PER_IP_DAILY] + DAILY_WINDOW - now
+        limited, reason, limit = "daily_limited", "daily", f"{NEW_LOOKUPS_PER_IP_DAILY}/day"
+    else:
+        in_window = [t for t in recent if now - t <= NEW_LOOKUP_WINDOW]
+        if NEW_LOOKUPS_PER_IP and len(in_window) >= NEW_LOOKUPS_PER_IP:
+            retry = in_window[len(in_window) - NEW_LOOKUPS_PER_IP] + NEW_LOOKUP_WINDOW - now
+            limited, reason = "rate_limited", "hourly"
+            limit = f"{NEW_LOOKUPS_PER_IP}/{NEW_LOOKUP_WINDOW}s"
+        else:
+            limited = None
+
+    if limited:
+        rejected_lookups[limited] += 1
+        if now - last_limit_warning.get(key, -horizon - 1) > NEW_LOOKUP_WINDOW:  # once per window
+            last_limit_warning[key] = now
+            print(f"🚧 {key} hit the {reason} new-lookup limit ({limit})")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many lookups for uncached anime. Try again later.",
-            headers={"Retry-After": str(int(NEW_LOOKUP_WINDOW - (now - recent[0])) + 1)},
+            headers={"Retry-After": str(max(int(retry) + 1, 1))},
         )
     recent.append(now)
 
     if len(new_lookups) > 10000:  # bound memory: drop callers with nothing recent
-        for stale_key in [k for k, v in new_lookups.items() if not v or now - v[-1] > NEW_LOOKUP_WINDOW]:
+        for stale_key in [k for k, v in new_lookups.items() if not v or now - v[-1] > horizon]:
             del new_lookups[stale_key]
+            last_limit_warning.pop(stale_key, None)
 
 
 def is_queued(aid: int) -> bool:

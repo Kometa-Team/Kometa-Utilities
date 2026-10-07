@@ -143,13 +143,14 @@ refreshes of cached entries are never limited.
 |---|---|---|---|
 | AID above the real range | `MAX_AID` | 50000 | 404 |
 | New AIDs queued per IP per window | `NEW_LOOKUPS_PER_IP` / `NEW_LOOKUP_WINDOW_SECONDS` | 50 / 3600 | 429 + `Retry-After` |
+| New AIDs queued per IP per rolling 24h | `NEW_LOOKUPS_PER_IP_DAILY` | 100 | 429 + `Retry-After` |
 | New queue already full | `MAX_QUEUED_NEW` | 5000 | 503 + `Retry-After` |
 
 - A request for an AID that is already queued doesn't count against the caller.
 - Callers are identified by the last `X-Forwarded-For` value (the one Caddy adds), falling back
   to the socket address. IPv6 callers are grouped by /64. See `CLIENT_IP_HEADER` in `.env.example`
   before putting a CDN in front of Caddy.
-- `/stats` has `rejected_new_lookups` (`out_of_range`, `rate_limited`, `queue_full`), counted since
+- `/stats` has `rejected_new_lookups` (`out_of_range`, `rate_limited` for the hourly limit, `daily_limited`, `queue_full`), counted since
   the last restart. The first rejection for an IP in each window is logged.
 - Limits are in memory and reset on restart. Setting any value to `0` turns that check off.
 

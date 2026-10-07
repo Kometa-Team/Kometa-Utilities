@@ -1179,6 +1179,7 @@ def clean_priority_state():
     main.pending_aids.clear()
     main.new_aids.clear()
     main.new_lookups.clear()
+    main.last_limit_warning.clear()
     for reason in main.rejected_lookups:
         main.rejected_lookups[reason] = 0
     # A fresh event keeps the app's own startup worker (blocked on the old one) asleep
@@ -1685,4 +1686,75 @@ async def test_stats_reports_rejections(test_client, clean_test_env, clean_prior
     """/stats shows how many lookups were turned away and why."""
     test_client.get("/anime/999999999")
     data = test_client.get("/stats").json()
-    assert data["rejected_new_lookups"] == {"out_of_range": 1, "rate_limited": 0, "queue_full": 0}
+    assert data["rejected_new_lookups"] == {
+        "out_of_range": 1,
+        "rate_limited": 0,
+        "daily_limited": 0,
+        "queue_full": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_blocks_after_hourly_limit_would_reset(
+    test_client, clean_test_env, clean_priority_state
+):
+    """The daily cap holds even when each hour's own limit is never reached."""
+    import main
+
+    caller = {"X-Forwarded-For": "198.51.100.7"}
+    with patch("main.NEW_LOOKUPS_PER_IP_DAILY", 3), patch("main.NEW_LOOKUPS_PER_IP", 50):
+        for aid in (501, 502, 503):
+            assert test_client.get(f"/anime/{aid}", headers=caller).status_code == 202
+
+        blocked = test_client.get("/anime/504", headers=caller)
+        assert blocked.status_code == 429
+        # the entry blocking the caller is hours from expiring, not minutes
+        assert int(blocked.headers["Retry-After"]) > 3600
+        assert 504 not in main.pending_aids
+
+        # another caller still has their own budget
+        other = {"X-Forwarded-For": "203.0.113.5"}
+        assert test_client.get("/anime/504", headers=other).status_code == 202
+
+    assert main.rejected_lookups["daily_limited"] == 1
+    assert main.rejected_lookups["rate_limited"] == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_counts_across_hours(test_client, clean_test_env, clean_priority_state):
+    """Lookups from earlier in the day still count toward the cap, but not after 24h."""
+    import main
+
+    now = main.time.monotonic()
+    caller = {"X-Forwarded-For": "198.51.100.7"}
+    with patch("main.NEW_LOOKUPS_PER_IP_DAILY", 3), patch("main.NEW_LOOKUPS_PER_IP", 50):
+        # three lookups 5 hours ago: outside the hourly window, inside the daily one
+        main.new_lookups["198.51.100.7"] = main.deque([now - 18000] * 3)
+        assert test_client.get("/anime/601", headers=caller).status_code == 429
+
+        # the same three lookups 25 hours ago have aged out
+        main.new_lookups["198.51.100.7"] = main.deque([now - 90000] * 3)
+        assert test_client.get("/anime/601", headers=caller).status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_hourly_and_daily_limits_can_be_disabled_independently(
+    test_client, clean_test_env, clean_priority_state
+):
+    """Setting a limit to 0 turns only that check off."""
+    caller = {"X-Forwarded-For": "198.51.100.7"}
+    with patch("main.NEW_LOOKUPS_PER_IP", 0), patch("main.NEW_LOOKUPS_PER_IP_DAILY", 2):
+        assert test_client.get("/anime/701", headers=caller).status_code == 202
+        assert test_client.get("/anime/702", headers=caller).status_code == 202
+        assert test_client.get("/anime/703", headers=caller).status_code == 429
+
+    with patch("main.NEW_LOOKUPS_PER_IP", 2), patch("main.NEW_LOOKUPS_PER_IP_DAILY", 0):
+        other = {"X-Forwarded-For": "203.0.113.5"}
+        assert test_client.get("/anime/711", headers=other).status_code == 202
+        assert test_client.get("/anime/712", headers=other).status_code == 202
+        assert test_client.get("/anime/713", headers=other).status_code == 429
+
+    with patch("main.NEW_LOOKUPS_PER_IP", 0), patch("main.NEW_LOOKUPS_PER_IP_DAILY", 0):
+        third = {"X-Forwarded-For": "192.0.2.44"}
+        for aid in range(721, 731):
+            assert test_client.get(f"/anime/{aid}", headers=third).status_code == 202

@@ -1484,3 +1484,69 @@ async def test_old_finished_anime_stays_fresh(test_client, clean_test_env, clean
     assert response.headers["X-Cache"] == "HIT"
     assert response.headers["X-Refresh-After-Days"] == "365"
     assert new_q.empty() and refresh_q.empty()
+
+
+# ============================================================================
+# Queue De-duplication Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_repeat_requests_queue_a_stale_aid_once(
+    test_client, clean_test_env, clean_priority_state, sample_anime_xml
+):
+    """Many requests for the same stale AID produce a single queue entry."""
+    import aiosqlite
+
+    new_q, refresh_q = clean_priority_state
+    Path("/tmp/test_anidb/data/1234.xml").write_text(sample_anime_xml, encoding="utf-8")
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        old = (datetime.now() - timedelta(days=30)).isoformat()
+        await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1234, old))
+        await db.commit()
+
+    for _ in range(5):
+        assert test_client.get("/anime/1234").headers["X-Cache"] == "STALE"
+    assert refresh_q.qsize() == 1
+    assert await _pending_rows() == [(1234, "refresh")]
+
+
+@pytest.mark.asyncio
+async def test_requests_during_fetch_do_not_requeue(
+    test_client, clean_test_env, clean_priority_state, sample_anime_xml
+):
+    """While the worker is fetching an AID, further requests for it are not re-queued."""
+    import aiosqlite
+
+    import main
+
+    new_q, refresh_q = clean_priority_state
+    Path("/tmp/test_anidb/data/1234.xml").write_text(sample_anime_xml, encoding="utf-8")
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        old = (datetime.now() - timedelta(days=30)).isoformat()
+        await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1234, old))
+        await db.commit()
+
+    fetching = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_fetch(aid):
+        fetching.set()
+        await release.wait()
+        return "<anime id='1234'/>"
+
+    await main.enqueue_aid(1234, is_new=False)
+    with patch("main.fetch_from_anidb", slow_fetch), patch("main.THROTTLE_SECONDS", 0):
+        task = asyncio.create_task(main.anidb_worker())
+        await asyncio.wait_for(fetching.wait(), timeout=2)  # worker is mid-fetch
+
+        assert test_client.get("/anime/1234").headers["X-Cache"] == "STALE"
+        assert refresh_q.empty() and new_q.empty()
+
+        release.set()
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

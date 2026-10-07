@@ -47,6 +47,7 @@ refresh_queue: Optional[asyncio.Queue] = None
 work_event: Optional[asyncio.Event] = None  # set when either lane gets an item
 pending_aids: set = set()  # AIDs waiting in either lane (prevents duplicates)
 new_aids: set = set()  # the subset of pending_aids waiting in the new lane
+in_flight_aid: Optional[int] = None  # AID the worker is fetching right now
 worker_task: Optional[asyncio.Task] = None
 rate_limit_until: Optional[datetime] = None  # set when AniDB returns 429
 
@@ -214,6 +215,11 @@ async def forget_pending(aid: int) -> None:
             await db.commit()
     except Exception as e:
         print(f"⚠️ Could not clear queued AID {aid}: {e}")
+
+
+def is_queued(aid: int) -> bool:
+    """True if the AID is waiting in either lane or is being fetched right now."""
+    return aid in pending_aids or aid == in_flight_aid
 
 
 async def enqueue_aid(aid: int, is_new: bool) -> None:
@@ -403,7 +409,7 @@ async def next_queued_aid() -> tuple:
 
 async def anidb_worker() -> None:
     """Background worker: drains new AIDs first, then refreshes, with throttling."""
-    global rate_limit_until, work_event
+    global rate_limit_until, work_event, in_flight_aid
     work_event = asyncio.Event()  # bound to this worker's event loop
     print("🚀 AniDB worker started")
 
@@ -436,6 +442,7 @@ async def anidb_worker() -> None:
                 source.task_done()
                 continue
 
+            in_flight_aid = aid
             print(f"⏳ Processing AID {aid}...")
 
             # Fetch from AniDB
@@ -470,6 +477,8 @@ async def anidb_worker() -> None:
                     await forget_pending(aid)
             if source is not None:
                 source.task_done()
+        finally:
+            in_flight_aid = None
 
 
 @asynccontextmanager
@@ -902,7 +911,7 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                         )
                     else:
                         # Cache exists but is stale - queue for update and return stale content
-                        if aid not in pending_aids:
+                        if not is_queued(aid):
                             await enqueue_aid(aid, False)
 
                         if not mature:
@@ -921,7 +930,7 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                         )
                 else:
                     # File exists but no DB entry - treat as stale
-                    if aid not in pending_aids:
+                    if not is_queued(aid):
                         await enqueue_aid(aid, False)
 
                     content = xml_file.read_text(encoding="utf-8")
@@ -941,9 +950,9 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
             print(f"⚠️ Cache check error for AID {aid}: {e}")
 
     # Queue for update if not in cache
-    if aid not in pending_aids:
+    if not is_queued(aid):
         await enqueue_aid(aid, True)
-    elif aid not in new_aids:
+    elif aid in pending_aids and aid not in new_aids:
         # Queued as a refresh but the cached copy is gone: also queue it as new. The worker
         # takes the new-lane entry first and skips the leftover refresh entry.
         new_aids.add(aid)

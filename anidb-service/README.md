@@ -150,8 +150,10 @@ refreshes of cached entries are never limited.
 - Callers are identified by the last `X-Forwarded-For` value (the one Caddy adds), falling back
   to the socket address. IPv6 callers are grouped by /64. See `CLIENT_IP_HEADER` in `.env.example`
   before putting a CDN in front of Caddy.
-- `/stats` has `rejected_new_lookups` (`out_of_range`, `rate_limited` for the hourly limit, `daily_limited`, `queue_full`), counted since
-  the last restart. The first rejection for an IP in each window is logged.
+- `/stats` shows only a total in `rejected_new_lookups` (since the last restart). The breakdown by reason
+  (`out_of_range`, `rate_limited`, `daily_limited`, `queue_full`) is at `/stats/limits`, which needs HTTP
+  Basic auth with `API_USER`/`API_PASS` and returns 404 if either is unset. The first rejection for an IP
+  in each window is logged.
 - Limits are in memory and reset on restart. Setting any value to `0` turns that check off.
 
 ## Refresh Tiers

@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import os
+import secrets
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -14,7 +15,8 @@ from typing import Any, Dict, Optional
 import aiosqlite
 import httpx
 from common import extract_seed_data
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 # --- CONFIG ---
@@ -47,6 +49,10 @@ MAX_AID = int(os.getenv("MAX_AID", "50000"))  # reject uncached AIDs above this;
 # Header carrying the client IP; the LAST value is used, since that is the one the nearest
 # proxy (Caddy) added. Falls back to the socket peer when absent.
 CLIENT_IP_HEADER = os.getenv("CLIENT_IP_HEADER", "X-Forwarded-For")
+
+# Credentials for the operator-only /stats/limits endpoint (disabled if either is unset)
+API_USER = os.getenv("API_USER", "")
+API_PASS = os.getenv("API_PASS", "")
 
 # AniDB API Configuration
 ANIDB_CLIENT = os.getenv("ANIDB_CLIENT", "kometa")
@@ -972,7 +978,7 @@ async def get_stats() -> Dict[str, Any]:
             "queue_size": update_queue.qsize() + (refresh_queue.qsize() if refresh_queue else 0),
             "queued_new": queued.get("new", 0),
             "queued_refresh": queued.get("refresh", 0),
-            "rejected_new_lookups": dict(rejected_lookups),  # since last restart
+            "rejected_new_lookups": sum(rejected_lookups.values()),  # since last restart
             "daily_limit": DAILY_LIMIT,
             "rate_limit_until": rate_limit_until.isoformat() if rate_limit_until else None,
         }
@@ -981,6 +987,32 @@ async def get_stats() -> Dict[str, Any]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error: {str(e)}",
         )
+
+
+basic_auth = HTTPBasic(auto_error=False)
+
+
+@app.get("/stats/limits", include_in_schema=False)
+async def get_limit_stats(credentials: Optional[HTTPBasicCredentials] = Depends(basic_auth)):
+    """Operator view of why lookups were rejected. Not public, so probes can't read it."""
+    if not API_USER or not API_PASS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    # Compare as bytes: compare_digest rejects non-ASCII str
+    valid = (
+        credentials is not None
+        and secrets.compare_digest(credentials.username.encode(), API_USER.encode())
+        & secrets.compare_digest(credentials.password.encode(), API_PASS.encode())
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return {
+        "rejected_new_lookups": dict(rejected_lookups),  # since last restart
+        "tracked_ips": len(new_lookups),
+    }
 
 
 @app.get("/anime/{aid}")

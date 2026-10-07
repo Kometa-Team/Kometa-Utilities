@@ -1682,16 +1682,11 @@ async def test_full_queue_rejects_new_aids(test_client, clean_test_env, clean_pr
 
 
 @pytest.mark.asyncio
-async def test_stats_reports_rejections(test_client, clean_test_env, clean_priority_state):
-    """/stats shows how many lookups were turned away and why."""
+async def test_stats_reports_rejection_total(test_client, clean_test_env, clean_priority_state):
+    """/stats shows only how many lookups were turned away, not why."""
     test_client.get("/anime/999999999")
     data = test_client.get("/stats").json()
-    assert data["rejected_new_lookups"] == {
-        "out_of_range": 1,
-        "rate_limited": 0,
-        "daily_limited": 0,
-        "queue_full": 0,
-    }
+    assert data["rejected_new_lookups"] == 1  # a total only; the breakdown is not public
 
 
 @pytest.mark.asyncio
@@ -1835,3 +1830,39 @@ async def test_worker_does_not_write_file_for_failed_error_response(
 
     assert not Path("/tmp/test_anidb/data/77.xml").exists()
     assert await _pending_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_limit_breakdown_requires_credentials(
+    test_client, clean_test_env, clean_priority_state
+):
+    """/stats/limits shows the breakdown only to the operator."""
+    test_client.get("/anime/999999999")  # out of range
+    with patch("main.API_USER", "ops"), patch("main.API_PASS", "s3cret"):
+        denied = test_client.get("/stats/limits")
+        assert denied.status_code == 401
+        assert denied.headers["WWW-Authenticate"] == "Basic"
+        assert test_client.get("/stats/limits", auth=("ops", "wrong")).status_code == 401
+        assert test_client.get("/stats/limits", auth=("wrong", "s3cret")).status_code == 401
+
+        ok = test_client.get("/stats/limits", auth=("ops", "s3cret"))
+        assert ok.status_code == 200
+        assert ok.json()["rejected_new_lookups"] == {
+            "out_of_range": 1,
+            "rate_limited": 0,
+            "daily_limited": 0,
+            "queue_full": 0,
+        }
+
+
+def test_limit_breakdown_disabled_without_credentials(test_client):
+    """With no operator credentials configured, the endpoint doesn't exist."""
+    with patch("main.API_USER", ""), patch("main.API_PASS", ""):
+        assert test_client.get("/stats/limits").status_code == 404
+        assert test_client.get("/stats/limits", auth=("", "")).status_code == 404
+
+
+def test_limit_breakdown_handles_non_ascii_credentials(test_client):
+    """Odd credentials are rejected cleanly instead of raising."""
+    with patch("main.API_USER", "ops"), patch("main.API_PASS", "s3cret"):
+        assert test_client.get("/stats/limits", auth=("ōps", "pässword")).status_code == 401

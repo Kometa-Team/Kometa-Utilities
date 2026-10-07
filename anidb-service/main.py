@@ -785,6 +785,12 @@ async def root(request: Request):
         <h1><img class="service-logo" src="{base_url}/logo.png" alt="">AniDB Mirror Service</h1>
         <p>A caching service for AniDB anime metadata with rate limiting and background updates.</p>
 
+        <p>NOTE:</p>
+        <p>This is not a complete mirror of AniDB and is not intended to be.  It is a cache of IDs requested by Kometa users.</p>
+        <p>When an ID is requested, the existing data is returned and depending on a variety of thresholds a refresh of the data might be queued.  Note that this means the data retrieved from this service may be somewhat out of date.  This is unavoidable due to limitations on the AniDB API and the wish not to get this service banned.</p>
+        <p>If a new ID unknown to the cache is requested, that new ID is queued for retrieval.  New IDs take precedence over refreshing existing IDs.</p>
+        <p>There are throttles on how many IDs a given IP can request daily.</p>
+
         <h2>API Endpoints</h2>
 
         <div class="endpoint">

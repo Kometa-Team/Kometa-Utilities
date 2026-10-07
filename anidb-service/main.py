@@ -1,8 +1,11 @@
 """AniDB Mirror Service - FastAPI-based caching service for AniDB anime metadata."""
 
 import asyncio
+import ipaddress
 import os
+import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +35,16 @@ REFRESH_ENDED_3_10Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_3_10Y", "
 REFRESH_ENDED_10Y_PLUS = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_10Y_PLUS", "365")))
 ROOT_PATH = os.getenv("ROOT_PATH", "")  # Set to /anidb-service for path-based routing
 
+# Abuse protection: only lookups that would add a NEW AID to the queue are limited. Cached
+# entries and refreshes of cached entries are never limited.
+NEW_LOOKUPS_PER_IP = int(os.getenv("NEW_LOOKUPS_PER_IP", "50"))  # 0 disables
+NEW_LOOKUP_WINDOW = int(os.getenv("NEW_LOOKUP_WINDOW_SECONDS", "3600"))
+MAX_QUEUED_NEW = int(os.getenv("MAX_QUEUED_NEW", "5000"))  # 0 disables
+MAX_AID = int(os.getenv("MAX_AID", "50000"))  # reject uncached AIDs above this; 0 disables
+# Header carrying the client IP; the LAST value is used, since that is the one the nearest
+# proxy (Caddy) added. Falls back to the socket peer when absent.
+CLIENT_IP_HEADER = os.getenv("CLIENT_IP_HEADER", "X-Forwarded-For")
+
 # AniDB API Configuration
 ANIDB_CLIENT = os.getenv("ANIDB_CLIENT", "kometa")
 ANIDB_VERSION = os.getenv("ANIDB_VERSION", "1")
@@ -48,6 +61,8 @@ work_event: Optional[asyncio.Event] = None  # set when either lane gets an item
 pending_aids: set = set()  # AIDs waiting in either lane (prevents duplicates)
 new_aids: set = set()  # the subset of pending_aids waiting in the new lane
 in_flight_aid: Optional[int] = None  # AID the worker is fetching right now
+new_lookups: Dict[str, deque] = {}  # client key -> monotonic times of recent new-AID lookups
+rejected_lookups: Dict[str, int] = {"out_of_range": 0, "rate_limited": 0, "queue_full": 0}
 worker_task: Optional[asyncio.Task] = None
 rate_limit_until: Optional[datetime] = None  # set when AniDB returns 429
 
@@ -215,6 +230,64 @@ async def forget_pending(aid: int) -> None:
             await db.commit()
     except Exception as e:
         print(f"⚠️ Could not clear queued AID {aid}: {e}")
+
+
+def client_key(request: Request) -> str:
+    """Identify the caller by IP (IPv6 grouped by /64 so one host can't rotate addresses)."""
+    raw = None
+    if CLIENT_IP_HEADER:
+        value = request.headers.get(CLIENT_IP_HEADER)
+        if value:
+            raw = value.split(",")[-1].strip()
+    if not raw and request.client:
+        raw = request.client.host
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw or "unknown"
+    if ip.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
+def admit_new_lookup(request: Request, aid: int) -> None:
+    """Raise unless this caller may add another uncached AID to the queue."""
+    if MAX_AID and aid > MAX_AID:
+        rejected_lookups["out_of_range"] += 1
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"AID {aid} is out of range."
+        )
+
+    if MAX_QUEUED_NEW and len(new_aids) >= MAX_QUEUED_NEW:
+        rejected_lookups["queue_full"] += 1
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Fetch queue is full. Try again later.",
+            headers={"Retry-After": "3600"},
+        )
+
+    if not NEW_LOOKUPS_PER_IP:
+        return
+    key = client_key(request)
+    now = time.monotonic()
+    recent = new_lookups.setdefault(key, deque())
+    while recent and now - recent[0] > NEW_LOOKUP_WINDOW:
+        recent.popleft()
+    if len(recent) >= NEW_LOOKUPS_PER_IP:
+        rejected_lookups["rate_limited"] += 1
+        if len(recent) == NEW_LOOKUPS_PER_IP:  # log once per window, not per request
+            print(f"🚧 {key} hit the new-lookup limit ({NEW_LOOKUPS_PER_IP}/{NEW_LOOKUP_WINDOW}s)")
+            recent.append(now)  # marker so the warning isn't repeated
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many lookups for uncached anime. Try again later.",
+            headers={"Retry-After": str(int(NEW_LOOKUP_WINDOW - (now - recent[0])) + 1)},
+        )
+    recent.append(now)
+
+    if len(new_lookups) > 10000:  # bound memory: drop callers with nothing recent
+        for stale_key in [k for k, v in new_lookups.items() if not v or now - v[-1] > NEW_LOOKUP_WINDOW]:
+            del new_lookups[stale_key]
 
 
 def is_queued(aid: int) -> bool:
@@ -851,6 +924,7 @@ async def get_stats() -> Dict[str, Any]:
             "queue_size": update_queue.qsize() + (refresh_queue.qsize() if refresh_queue else 0),
             "queued_new": queued.get("new", 0),
             "queued_refresh": queued.get("refresh", 0),
+            "rejected_new_lookups": dict(rejected_lookups),  # since last restart
             "daily_limit": DAILY_LIMIT,
             "rate_limit_until": rate_limit_until.isoformat() if rate_limit_until else None,
         }
@@ -862,7 +936,7 @@ async def get_stats() -> Dict[str, Any]:
 
 
 @app.get("/anime/{aid}")
-async def get_anime(aid: int, mature: bool = False) -> Response:
+async def get_anime(aid: int, request: Request, mature: bool = False) -> Response:
     """
     Fetch anime metadata by AniDB ID.
 
@@ -951,6 +1025,7 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
 
     # Queue for update if not in cache
     if not is_queued(aid):
+        admit_new_lookup(request, aid)
         await enqueue_aid(aid, True)
     elif aid in pending_aids and aid not in new_aids:
         # Queued as a refresh but the cached copy is gone: also queue it as new. The worker

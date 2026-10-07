@@ -1178,6 +1178,9 @@ def clean_priority_state():
 
     main.pending_aids.clear()
     main.new_aids.clear()
+    main.new_lookups.clear()
+    for reason in main.rejected_lookups:
+        main.rejected_lookups[reason] = 0
     # A fresh event keeps the app's own startup worker (blocked on the old one) asleep
     with patch("main.update_queue", asyncio.Queue()) as new_q:
         with patch("main.refresh_queue", asyncio.Queue()) as refresh_q:
@@ -1550,3 +1553,136 @@ async def test_requests_during_fetch_do_not_requeue(
             await task
         except asyncio.CancelledError:
             pass
+
+
+# ============================================================================
+# Abuse Protection Tests
+# ============================================================================
+
+
+def _req(headers=None, host="10.0.0.9"):
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+        "client": (host, 1234),
+    }
+    return Request(scope)
+
+
+def test_client_key_uses_last_forwarded_value():
+    """The entry added by the nearest proxy wins, so client-supplied values can't spoof it."""
+    import main
+
+    assert main.client_key(_req({"X-Forwarded-For": "6.6.6.6, 203.0.113.5"})) == "203.0.113.5"
+    assert main.client_key(_req({"X-Forwarded-For": "203.0.113.5"})) == "203.0.113.5"
+
+
+def test_client_key_fallbacks_and_ipv6():
+    """Falls back to the socket peer; IPv6 callers share a /64 bucket."""
+    import main
+
+    assert main.client_key(_req()) == "10.0.0.9"
+    assert main.client_key(_req({"X-Forwarded-For": "not-an-ip"})) == "not-an-ip"
+    a = main.client_key(_req({"X-Forwarded-For": "2001:db8:1:2::1"}))
+    b = main.client_key(_req({"X-Forwarded-For": "2001:db8:1:2:ffff::9"}))
+    assert a == b == "2001:db8:1:2::/64"
+
+
+@pytest.mark.asyncio
+async def test_new_lookups_are_limited_per_ip(test_client, clean_test_env, clean_priority_state):
+    """An IP over its new-lookup limit gets 429; other IPs, cached and queued AIDs are unaffected."""
+    import main
+
+    new_q, _ = clean_priority_state
+    scraper = {"X-Forwarded-For": "198.51.100.7"}
+    other = {"X-Forwarded-For": "203.0.113.5"}
+
+    with patch("main.NEW_LOOKUPS_PER_IP", 3):
+        for aid in (101, 102, 103):
+            assert test_client.get(f"/anime/{aid}", headers=scraper).status_code == 202
+
+        blocked = test_client.get("/anime/104", headers=scraper)
+        assert blocked.status_code == 429
+        assert int(blocked.headers["Retry-After"]) > 0
+        assert 104 not in main.pending_aids
+        assert new_q.qsize() == 3
+
+        # Asking again for an AID that is already queued costs nothing and isn't blocked
+        assert test_client.get("/anime/101", headers=scraper).status_code == 202
+        # A different caller is unaffected
+        assert test_client.get("/anime/104", headers=other).status_code == 202
+
+    assert main.rejected_lookups["rate_limited"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_ip_still_gets_cached_data(
+    test_client, clean_test_env, clean_priority_state, sample_anime_xml
+):
+    """The limit only applies to uncached AIDs; cache hits and stale refreshes are unlimited."""
+    import aiosqlite
+
+    Path("/tmp/test_anidb/data/1.xml").write_text(sample_anime_xml, encoding="utf-8")
+    async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO anime VALUES (?, ?)", (1, datetime.now().isoformat())
+        )
+        await db.commit()
+
+    headers = {"X-Forwarded-For": "198.51.100.7"}
+    with patch("main.NEW_LOOKUPS_PER_IP", 1):
+        assert test_client.get("/anime/201", headers=headers).status_code == 202
+        assert test_client.get("/anime/202", headers=headers).status_code == 429
+        assert test_client.get("/anime/1", headers=headers).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_lookup_window_expires(test_client, clean_test_env, clean_priority_state):
+    """Lookups older than the window no longer count against the caller."""
+    import main
+
+    old = main.time.monotonic() - 7200
+    main.new_lookups["198.51.100.7"] = main.deque([old, old, old])
+    with patch("main.NEW_LOOKUPS_PER_IP", 3):
+        response = test_client.get("/anime/301", headers={"X-Forwarded-For": "198.51.100.7"})
+    assert response.status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_aid_is_rejected(test_client, clean_test_env, clean_priority_state):
+    """AIDs beyond MAX_AID are never queued or fetched."""
+    import main
+
+    new_q, _ = clean_priority_state
+    with patch("main.MAX_AID", 50000):
+        assert test_client.get("/anime/999999999").status_code == 404
+        assert test_client.get("/anime/50001").status_code == 404
+        assert test_client.get("/anime/50000").status_code == 202
+    assert new_q.qsize() == 1
+    assert main.rejected_lookups["out_of_range"] == 2
+
+
+@pytest.mark.asyncio
+async def test_full_queue_rejects_new_aids(test_client, clean_test_env, clean_priority_state):
+    """When the new queue is at its cap, further uncached AIDs get 503 with Retry-After."""
+    import main
+
+    new_q, _ = clean_priority_state
+    with patch("main.MAX_QUEUED_NEW", 2):
+        assert test_client.get("/anime/401").status_code == 202
+        assert test_client.get("/anime/402").status_code == 202
+        full = test_client.get("/anime/403")
+    assert full.status_code == 503
+    assert full.headers["Retry-After"] == "3600"
+    assert new_q.qsize() == 2
+    assert main.rejected_lookups["queue_full"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stats_reports_rejections(test_client, clean_test_env, clean_priority_state):
+    """/stats shows how many lookups were turned away and why."""
+    test_client.get("/anime/999999999")
+    data = test_client.get("/stats").json()
+    assert data["rejected_new_lookups"] == {"out_of_range": 1, "rate_limited": 0, "queue_full": 0}

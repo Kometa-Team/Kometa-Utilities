@@ -126,8 +126,8 @@ Get service statistics.
 }
 ```
 
-- `queued_new`: queued AIDs with no cached copy. These are fetched first.
-- `queued_refresh`: queued AIDs with a stale cached copy. They are only queued, and only fetched, when no uncached AIDs are waiting.
+- `queued_new`: queued AIDs with no cached copy (the new queue). The worker always drains this first.
+- `queued_refresh`: queued AIDs with a stale cached copy (the refresh queue). The worker only takes from it when the new queue is empty.
 
 The queue and any 429 back-off are stored in the database, so a restart does not lose the backlog.
 
@@ -138,7 +138,7 @@ List all known tags with usage statistics (HTML page).
 
 How long a cached entry stays fresh depends on its AniDB `startdate`/`enddate`, so the daily
 API budget goes to entries that actually change. Past the threshold, the stale copy is served
-and a refresh is queued, but only when no uncached AIDs are waiting.
+and the AID is added to the refresh queue, which the worker only works on once the new queue is empty.
 
 | Entry | Env var | Default |
 |---|---|---|

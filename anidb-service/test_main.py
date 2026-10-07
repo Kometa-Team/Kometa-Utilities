@@ -1167,76 +1167,103 @@ if __name__ == "__main__":
 
 
 # ============================================================================
-# Queue Priority Tests
+# Queue Lane Tests
 # ============================================================================
 
 
 @pytest.fixture
 def clean_priority_state():
-    """Reset module-level queue bookkeeping around a test."""
+    """Give a test fresh new/refresh queues and bookkeeping; yields (new_queue, refresh_queue)."""
     import main
 
     main.pending_aids.clear()
     main.new_aids.clear()
-    yield
+    # A fresh event keeps the app's own startup worker (blocked on the old one) asleep
+    with patch("main.update_queue", asyncio.Queue()) as new_q:
+        with patch("main.refresh_queue", asyncio.Queue()) as refresh_q:
+            with patch("main.work_event", asyncio.Event()):
+                yield new_q, refresh_q
     main.pending_aids.clear()
     main.new_aids.clear()
+
+
+async def _run_worker(seconds=0.3):
+    import main
+
+    task = asyncio.create_task(main.anidb_worker())
+    await asyncio.sleep(seconds)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @pytest.mark.asyncio
-async def test_uncached_aid_is_marked_new(test_client, clean_test_env, clean_priority_state):
-    """A request for an uncached AID queues it as high priority."""
+async def test_uncached_aid_goes_to_new_lane(test_client, clean_test_env, clean_priority_state):
+    """A request for an uncached AID is queued in the new lane."""
     import main
 
-    queue = asyncio.Queue()  # private queue so the app's worker can't consume it
-    with patch("main.update_queue", queue):
-        assert test_client.get("/anime/777").status_code == 202
+    new_q, refresh_q = clean_priority_state
+    assert test_client.get("/anime/777").status_code == 202
+    assert new_q.get_nowait() == 777
+    assert refresh_q.empty()
     assert 777 in main.new_aids
-    assert queue.get_nowait() == 777
 
 
 @pytest.mark.asyncio
-async def test_stale_refresh_not_queued_while_new_pending(
+async def test_stale_request_queues_refresh_even_while_new_waiting(
     test_client, clean_test_env, clean_priority_state, sample_anime_xml
 ):
-    """Stale refreshes are not queued while uncached AIDs are waiting."""
+    """A stale entry is always added to the refresh lane, behind any new AIDs."""
     import aiosqlite
 
     import main
 
+    new_q, refresh_q = clean_priority_state
     Path("/tmp/test_anidb/data/1.xml").write_text(sample_anime_xml, encoding="utf-8")
     async with aiosqlite.connect("/tmp/test_anidb/test.db") as db:
         old = (datetime.now() - timedelta(days=30)).isoformat()
         await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1, old))
         await db.commit()
 
-    queue = asyncio.Queue()  # private queue so the app's worker can't consume it
-    with patch("main.update_queue", queue):
-        main.new_aids.add(999)
-        response = test_client.get("/anime/1")
-        assert response.status_code == 200
-        assert response.headers["X-Cache"] == "STALE"
-        assert queue.empty()
-
-        # Once no uncached AIDs are waiting, the refresh is queued as before
-        main.new_aids.clear()
-        r2 = test_client.get("/anime/1")
-        assert queue.get_nowait() == 1
+    await main.enqueue_aid(999, is_new=True)  # uncached AID already waiting
+    response = test_client.get("/anime/1")
+    assert response.status_code == 200
+    assert response.headers["X-Cache"] == "STALE"
+    assert refresh_q.get_nowait() == 1
+    assert new_q.get_nowait() == 999
 
 
 @pytest.mark.asyncio
-async def test_worker_defers_refresh_while_new_pending(clean_test_env, clean_priority_state):
-    """The worker skips a queued refresh without an API call while uncached AIDs wait."""
+async def test_worker_drains_new_lane_before_refresh_lane(clean_test_env, clean_priority_state):
+    """Refreshes wait until the new lane is empty, even if they were queued first."""
     import main
 
-    test_queue = asyncio.Queue()
-    fetch = AsyncMock(return_value="<anime/>")
-    main.new_aids.add(2)  # uncached AID still waiting
-    main.pending_aids.update({1, 2})
-    await test_queue.put(1)  # refresh queued first
+    await main.enqueue_aid(1, is_new=False)
+    await main.enqueue_aid(2, is_new=True)
+    await main.enqueue_aid(3, is_new=False)
+    await main.enqueue_aid(4, is_new=True)
 
-    with patch("main.fetch_from_anidb", fetch), patch("main.update_queue", test_queue):
+    fetch = AsyncMock(return_value="<anime/>")
+    with patch("main.fetch_from_anidb", fetch), patch("main.THROTTLE_SECONDS", 0):
+        await _run_worker()
+
+    assert [c.args[0] for c in fetch.call_args_list] == [2, 4, 1, 3]
+
+
+@pytest.mark.asyncio
+async def test_worker_wakes_for_work_queued_while_idle(clean_test_env, clean_priority_state):
+    """An idle worker picks up an AID queued later, from either lane."""
+    import main
+
+    fetch = AsyncMock(return_value="<anime/>")
+    with patch("main.fetch_from_anidb", fetch), patch("main.THROTTLE_SECONDS", 0):
         task = asyncio.create_task(main.anidb_worker())
+        await asyncio.sleep(0.1)  # worker is now waiting on empty queues
+        await main.enqueue_aid(8, is_new=False)
+        await asyncio.sleep(0.2)
+        await main.enqueue_aid(9, is_new=True)
         await asyncio.sleep(0.2)
         task.cancel()
         try:
@@ -1244,8 +1271,27 @@ async def test_worker_defers_refresh_while_new_pending(clean_test_env, clean_pri
         except asyncio.CancelledError:
             pass
 
-    fetch.assert_not_called()
-    assert 1 not in main.pending_aids
+    assert [c.args[0] for c in fetch.call_args_list] == [8, 9]
+
+
+@pytest.mark.asyncio
+async def test_promoted_refresh_is_fetched_once(
+    test_client, clean_test_env, clean_priority_state
+):
+    """A queued refresh whose cache file vanished is fetched once, as a new AID."""
+    import main
+
+    new_q, refresh_q = clean_priority_state
+    await main.enqueue_aid(31, is_new=False)
+    assert test_client.get("/anime/31").status_code == 202  # no cache file: promoted
+    assert 31 in main.new_aids
+    assert await _pending_rows() == [(31, "new")]
+
+    fetch = AsyncMock(return_value="<anime/>")
+    with patch("main.fetch_from_anidb", fetch), patch("main.THROTTLE_SECONDS", 0):
+        await _run_worker()
+
+    assert fetch.await_count == 1  # the leftover refresh-lane entry is skipped
 
 
 def test_cached_xml_path_prefers_existing_file(clean_test_env):
@@ -1263,24 +1309,17 @@ def test_cached_xml_path_prefers_existing_file(clean_test_env):
 
 
 @pytest.mark.asyncio
-async def test_worker_overwrites_seed_file(clean_test_env):
+async def test_worker_overwrites_seed_file(clean_test_env, clean_priority_state):
     """A refresh of a seed-only AID rewrites AnimeDoc_{aid}.xml and creates no new file."""
     import main
 
     seed = Path("/tmp/test_anidb/data/AnimeDoc_9.xml")
     seed.write_text("<anime id='9'>old</anime>")
-    queue = asyncio.Queue()
-    await queue.put(9)
+    await main.enqueue_aid(9, is_new=False)
 
     with patch("main.fetch_from_anidb", AsyncMock(return_value="<anime id='9'>new</anime>")):
-        with patch("main.update_queue", queue), patch("main.THROTTLE_SECONDS", 0):
-            task = asyncio.create_task(main.anidb_worker())
-            await asyncio.sleep(0.3)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        with patch("main.THROTTLE_SECONDS", 0):
+            await _run_worker()
 
     assert "new" in seed.read_text()
     assert not Path("/tmp/test_anidb/data/9.xml").exists()
@@ -1304,9 +1343,8 @@ async def test_enqueue_persists_and_forget_removes(clean_test_env, clean_priorit
     """Queued AIDs are mirrored to the DB with their kind and removed when handled."""
     import main
 
-    with patch("main.update_queue", asyncio.Queue()):
-        await main.enqueue_aid(1, is_new=True)
-        await main.enqueue_aid(2, is_new=False)
+    await main.enqueue_aid(1, is_new=True)
+    await main.enqueue_aid(2, is_new=False)
     assert await _pending_rows() == [(1, "new"), (2, "refresh")]
 
     await main.forget_pending(1)
@@ -1314,36 +1352,22 @@ async def test_enqueue_persists_and_forget_removes(clean_test_env, clean_priorit
 
 
 @pytest.mark.asyncio
-async def test_uncached_request_promotes_queued_refresh(
-    test_client, clean_test_env, clean_priority_state
-):
-    """A refresh already queued becomes 'new' if its cached copy disappears."""
+async def test_restore_queue_rebuilds_both_lanes(clean_test_env, clean_priority_state):
+    """After a restart each persisted AID returns to its own lane."""
     import main
 
-    with patch("main.update_queue", asyncio.Queue()):
-        await main.enqueue_aid(31, is_new=False)
-        assert test_client.get("/anime/31").status_code == 202
-    assert 31 in main.new_aids
-    assert await _pending_rows() == [(31, "new")]
+    await main.enqueue_aid(10, is_new=False)
+    await main.enqueue_aid(20, is_new=True)
+    await main.enqueue_aid(30, is_new=False)
 
-
-@pytest.mark.asyncio
-async def test_restore_queue_loads_new_before_refresh(clean_test_env, clean_priority_state):
-    """After a restart the backlog is reloaded with uncached AIDs first."""
-    import main
-
-    with patch("main.update_queue", asyncio.Queue()):
-        await main.enqueue_aid(10, is_new=False)
-        await main.enqueue_aid(20, is_new=True)
-        await main.enqueue_aid(30, is_new=False)
-
-    restored = asyncio.Queue()
+    new_q, refresh_q = asyncio.Queue(), asyncio.Queue()
     main.pending_aids.clear()
     main.new_aids.clear()
-    with patch("main.update_queue", restored):
+    with patch("main.update_queue", new_q), patch("main.refresh_queue", refresh_q):
         await main.restore_queue()
 
-    assert [restored.get_nowait() for _ in range(restored.qsize())] == [20, 10, 30]
+    assert [new_q.get_nowait() for _ in range(new_q.qsize())] == [20]
+    assert [refresh_q.get_nowait() for _ in range(refresh_q.qsize())] == [10, 30]
     assert main.new_aids == {20}
     assert main.pending_aids == {10, 20, 30}
 
@@ -1353,46 +1377,34 @@ async def test_worker_clears_persisted_row_after_caching(clean_test_env, clean_p
     """A processed AID leaves the persisted queue."""
     import main
 
-    queue = asyncio.Queue()
-    with patch("main.update_queue", queue):
-        await main.enqueue_aid(4, is_new=True)
-        with patch("main.fetch_from_anidb", AsyncMock(return_value="<anime id='4'/>")):
-            with patch("main.THROTTLE_SECONDS", 0):
-                task = asyncio.create_task(main.anidb_worker())
-                await asyncio.sleep(0.3)
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+    await main.enqueue_aid(4, is_new=True)
+    with patch("main.fetch_from_anidb", AsyncMock(return_value="<anime id='4'/>")):
+        with patch("main.THROTTLE_SECONDS", 0):
+            await _run_worker()
     assert await _pending_rows() == []
 
 
 @pytest.mark.asyncio
 async def test_429_keeps_row_and_persists_backoff(clean_test_env, clean_priority_state):
-    """A 429 leaves the AID persisted and the back-off survives a restart."""
+    """A 429 leaves the AID persisted in its lane and the back-off survives a restart."""
     import main
 
-    queue = asyncio.Queue()
-    with patch("main.update_queue", queue), patch.object(main, "rate_limit_until", None):
-        await main.enqueue_aid(5, is_new=True)
+    new_q, refresh_q = clean_priority_state
+    with patch.object(main, "rate_limit_until", None):
+        await main.enqueue_aid(5, is_new=False)
         limited = HTTPException(status_code=429, detail="limit")
         with patch("main.fetch_from_anidb", side_effect=limited):
-            task = asyncio.create_task(main.anidb_worker())
-            await asyncio.sleep(0.3)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        assert await _pending_rows() == [(5, "new")]
+            await _run_worker()
+        assert await _pending_rows() == [(5, "refresh")]
+        assert refresh_q.qsize() == 1 and new_q.empty()
         paused_until = main.rate_limit_until
         assert paused_until is not None
 
     # Simulate a restart: module state is gone, the DB still has it
-    with patch("main.update_queue", asyncio.Queue()), patch.object(main, "rate_limit_until", None):
-        await main.restore_queue()
-        assert main.rate_limit_until == paused_until
+    with patch("main.update_queue", asyncio.Queue()), patch("main.refresh_queue", asyncio.Queue()):
+        with patch.object(main, "rate_limit_until", None):
+            await main.restore_queue()
+            assert main.rate_limit_until == paused_until
 
 
 @pytest.mark.asyncio
@@ -1400,13 +1412,13 @@ async def test_stats_reports_new_vs_refresh(test_client, clean_test_env, clean_p
     """/stats breaks the backlog down into uncached and refresh entries."""
     import main
 
-    with patch("main.update_queue", asyncio.Queue()):
-        await main.enqueue_aid(1, is_new=True)
-        await main.enqueue_aid(2, is_new=True)
-        await main.enqueue_aid(3, is_new=False)
+    await main.enqueue_aid(1, is_new=True)
+    await main.enqueue_aid(2, is_new=True)
+    await main.enqueue_aid(3, is_new=False)
     data = test_client.get("/stats").json()
     assert data["queued_new"] == 2
     assert data["queued_refresh"] == 1
+    assert data["queue_size"] == 3
 
 
 # ============================================================================
@@ -1467,8 +1479,8 @@ async def test_old_finished_anime_stays_fresh(test_client, clean_test_env, clean
         await db.execute("INSERT OR REPLACE INTO anime VALUES (?, ?)", (1, old))
         await db.commit()
 
-    with patch("main.update_queue", asyncio.Queue()) as queue:
-        response = test_client.get("/anime/1")
-        assert response.headers["X-Cache"] == "HIT"
-        assert response.headers["X-Refresh-After-Days"] == "365"
-        assert queue.empty()
+    new_q, refresh_q = clean_priority_state
+    response = test_client.get("/anime/1")
+    assert response.headers["X-Cache"] == "HIT"
+    assert response.headers["X-Refresh-After-Days"] == "365"
+    assert new_q.empty() and refresh_q.empty()

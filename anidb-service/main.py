@@ -40,9 +40,13 @@ ANIDB_USERNAME = os.getenv("ANIDB_USERNAME", "")  # For accessing mature content
 ANIDB_PASSWORD = os.getenv("ANIDB_PASSWORD", "")  # For accessing mature content
 
 # Global state
+# Two lanes: update_queue holds new AIDs (no cached copy); refresh_queue holds stale entries.
+# The worker only takes from refresh_queue when update_queue is empty.
 update_queue: Optional[asyncio.Queue] = None
-pending_aids: set = set()
-new_aids: set = set()  # queued AIDs with no cached copy; these outrank refreshes of stale entries
+refresh_queue: Optional[asyncio.Queue] = None
+work_event: Optional[asyncio.Event] = None  # set when either lane gets an item
+pending_aids: set = set()  # AIDs waiting in either lane (prevents duplicates)
+new_aids: set = set()  # the subset of pending_aids waiting in the new lane
 worker_task: Optional[asyncio.Task] = None
 rate_limit_until: Optional[datetime] = None  # set when AniDB returns 429
 
@@ -217,7 +221,11 @@ async def enqueue_aid(aid: int, is_new: bool) -> None:
     pending_aids.add(aid)
     if is_new:
         new_aids.add(aid)
-    await update_queue.put(aid)
+        await update_queue.put(aid)
+    else:
+        await refresh_queue.put(aid)
+    if work_event is not None:
+        work_event.set()
     await persist_pending(aid, "new" if is_new else "refresh")
 
 
@@ -254,9 +262,13 @@ async def restore_queue() -> None:
         pending_aids.add(aid)
         if kind == "new":
             new_aids.add(aid)
-        update_queue.put_nowait(aid)
+            update_queue.put_nowait(aid)
+        else:
+            refresh_queue.put_nowait(aid)
     if rows:
         print(f"♻️ Restored {len(rows)} queued AIDs ({len(new_aids)} new)")
+    if work_event is not None and rows:
+        work_event.set()
 
     if state:
         until = datetime.fromisoformat(state[0])
@@ -375,14 +387,30 @@ async def fetch_from_anidb(aid: int) -> str:
         )
 
 
+async def next_queued_aid() -> tuple:
+    """Wait for work and return (aid, is_new, queue); new AIDs always come before refreshes."""
+    global work_event
+    if work_event is None:
+        work_event = asyncio.Event()
+    while True:
+        if update_queue is not None and not update_queue.empty():
+            return update_queue.get_nowait(), True, update_queue
+        if refresh_queue is not None and not refresh_queue.empty():
+            return refresh_queue.get_nowait(), False, refresh_queue
+        work_event.clear()
+        await work_event.wait()
+
+
 async def anidb_worker() -> None:
-    """Background worker that processes the update queue with throttling."""
-    global rate_limit_until
+    """Background worker: drains new AIDs first, then refreshes, with throttling."""
+    global rate_limit_until, work_event
+    work_event = asyncio.Event()  # bound to this worker's event loop
     print("🚀 AniDB worker started")
 
     while True:
         aid = 0
         is_new = False
+        source: Optional[asyncio.Queue] = None
         try:
             # Honour any active 429 back-off before pulling from the queue
             if rate_limit_until is not None:
@@ -396,19 +424,16 @@ async def anidb_worker() -> None:
                 rate_limit_until = None
                 await save_rate_limit(None)
 
-            aid = await update_queue.get()
+            aid, is_new, source = await next_queued_aid()
 
-            if aid in pending_aids:
-                pending_aids.remove(aid)
-            is_new = aid in new_aids
+            was_pending = aid in pending_aids
+            pending_aids.discard(aid)
             new_aids.discard(aid)
 
-            # Uncached AIDs take priority: skip refreshes while any are waiting. The stale
-            # entry is re-queued by its next request, so nothing is lost.
-            if not is_new and new_aids:
-                print(f"⏭️ Deferring refresh of AID {aid} (uncached AIDs waiting)")
-                await forget_pending(aid)
-                update_queue.task_done()
+            # A refresh whose AID was since promoted to the new lane has already been
+            # handled there (it is no longer pending), so skip the leftover copy
+            if not is_new and not was_pending:
+                source.task_done()
                 continue
 
             print(f"⏳ Processing AID {aid}...")
@@ -428,7 +453,7 @@ async def anidb_worker() -> None:
             # Mandatory throttle
             await asyncio.sleep(THROTTLE_SECONDS)
 
-            update_queue.task_done()
+            source.task_done()
         except asyncio.CancelledError:
             # Worker is being shut down, don't call task_done
             break
@@ -443,13 +468,14 @@ async def anidb_worker() -> None:
                 print(f"❌ Worker error for AID {aid}: {e}")
                 if aid:
                     await forget_pending(aid)
-            update_queue.task_done()
+            if source is not None:
+                source.task_done()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage FastAPI lifespan context for startup/shutdown."""
-    global worker_task, update_queue
+    global worker_task, update_queue, refresh_queue
 
     # Startup
     print("🔧 Initializing AniDB Service...")
@@ -458,6 +484,7 @@ async def lifespan(app: FastAPI):
 
     # Create the queue in this event loop
     update_queue = asyncio.Queue()
+    refresh_queue = asyncio.Queue()
 
     # Set startup flag for healthcheck
     app.state.starting_up = True
@@ -812,7 +839,7 @@ async def get_stats() -> Dict[str, Any]:
             "status": "online",
             "cached_anime": total,
             "api_calls_last_24h": daily,
-            "queue_size": update_queue.qsize(),
+            "queue_size": update_queue.qsize() + (refresh_queue.qsize() if refresh_queue else 0),
             "queued_new": queued.get("new", 0),
             "queued_refresh": queued.get("refresh", 0),
             "daily_limit": DAILY_LIMIT,
@@ -875,7 +902,7 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                         )
                     else:
                         # Cache exists but is stale - queue for update and return stale content
-                        if aid not in pending_aids and not new_aids:
+                        if aid not in pending_aids:
                             await enqueue_aid(aid, False)
 
                         if not mature:
@@ -894,7 +921,7 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
                         )
                 else:
                     # File exists but no DB entry - treat as stale
-                    if aid not in pending_aids and not new_aids:
+                    if aid not in pending_aids:
                         await enqueue_aid(aid, False)
 
                     content = xml_file.read_text(encoding="utf-8")
@@ -917,8 +944,12 @@ async def get_anime(aid: int, mature: bool = False) -> Response:
     if aid not in pending_aids:
         await enqueue_aid(aid, True)
     elif aid not in new_aids:
-        # Already queued as a refresh but the cached copy is gone: promote it
+        # Queued as a refresh but the cached copy is gone: also queue it as new. The worker
+        # takes the new-lane entry first and skips the leftover refresh entry.
         new_aids.add(aid)
+        await update_queue.put(aid)
+        if work_event is not None:
+            work_event.set()
         await persist_pending(aid, "new")
 
     # No cache available

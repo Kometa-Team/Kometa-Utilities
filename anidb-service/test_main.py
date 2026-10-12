@@ -1279,9 +1279,7 @@ async def test_worker_wakes_for_work_queued_while_idle(clean_test_env, clean_pri
 
 
 @pytest.mark.asyncio
-async def test_promoted_refresh_is_fetched_once(
-    test_client, clean_test_env, clean_priority_state
-):
+async def test_promoted_refresh_is_fetched_once(test_client, clean_test_env, clean_priority_state):
     """A queued refresh whose cache file vanished is fetched once, as a new AID."""
     import main
 
@@ -1473,8 +1471,6 @@ async def test_old_finished_anime_stays_fresh(test_client, clean_test_env, clean
     """A long-finished entry 30 days old is a cache hit and is not queued for refresh."""
     import aiosqlite
 
-    import main
-
     Path("/tmp/test_anidb/data/1.xml").write_text(
         _dated_xml("1990-01-01", "1991-01-01"), encoding="utf-8"
     )
@@ -1653,7 +1649,7 @@ async def test_lookup_window_expires(test_client, clean_test_env, clean_priority
 
 @pytest.mark.asyncio
 async def test_out_of_range_aid_is_rejected(test_client, clean_test_env, clean_priority_state):
-    """AIDs beyond MAX_AID are never queued or fetched."""
+    """Anime IDs beyond MAX_AID are never queued or fetched."""
     import main
 
     new_q, _ = clean_priority_state

@@ -44,13 +44,13 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
+        uses: useblacksmith/setup-docker-builder@v1.13.0
 
       - name: Build ${{ matrix.image }}
-        uses: useblacksmith/build-push-action@v2
+        uses: useblacksmith/build-push-action@v2.3.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
@@ -65,10 +65,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
+        uses: useblacksmith/setup-docker-builder@v1.13.0
 
       - name: Build imdb-service-base
         run: |

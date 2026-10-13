@@ -5372,7 +5372,7 @@ def test_get_episode_ratings_returns_500_on_db_error(tmp_path, monkeypatch):
 
 
 def _chart_titles_client(*imdb_ids):
-    """A mock httpx client whose chartTitles queries return the given IDs."""
+    """Return a mock httpx client whose chartTitles queries return the given IDs."""
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {
@@ -5467,6 +5467,7 @@ def test_fetch_imdb_chart_ids_honours_ttl(tmp_path):
 
 async def test_refresh_imdb_charts_once_updates_served_charts(tmp_path, monkeypatch):
     import charts
+
     import main
 
     db_path = tmp_path / "imdb.db"
@@ -5501,6 +5502,7 @@ async def test_refresh_imdb_charts_once_does_nothing_without_db(tmp_path, monkey
 
 async def test_chart_refresh_worker_reuses_saved_ids_only_at_startup(monkeypatch):
     import charts
+
     import main
 
     ttls = []

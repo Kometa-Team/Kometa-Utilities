@@ -5369,3 +5369,181 @@ def test_get_episode_ratings_returns_500_on_db_error(tmp_path, monkeypatch):
     response = client.get("/episode-ratings/tt0096697")
     assert response.status_code == 500
     assert "Episode ratings error" in response.json()["detail"]
+
+
+def _chart_titles_client(*imdb_ids):
+    """Return a mock httpx client whose chartTitles queries return the given IDs."""
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "data": {"chartTitles": {"edges": [{"node": {"id": i}} for i in imdb_ids]}}
+    }
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_resp
+    return mock_client
+
+
+def test_apply_imdb_chart_ids_replaces_only_charts_with_ids(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+
+    charts.chart_cache = {}
+    charts.rebuild_all_charts(db_path, min_votes=25000)
+    before_top = charts.chart_cache["top_movies"]
+    assert charts.chart_source["top_movies"] == "local"
+
+    fetched = "2026-10-13T00:00:00+00:00"
+    updated = charts.apply_imdb_chart_ids(
+        db_path,
+        {"popular_movies": ["tt0000002", "tt0000001"], "top_movies": []},
+        {"popular_movies": fetched},
+        cache_path,
+    )
+
+    assert updated == ["popular_movies"]
+    popular = charts.chart_cache["popular_movies"]
+    assert [item["tconst"] for item in popular] == ["tt0000002", "tt0000001"]
+    assert popular[0]["primaryTitle"] == "Beta"
+    assert charts.chart_source["popular_movies"] == "imdb"
+    assert charts.chart_refreshed_at["popular_movies"] == fetched
+    # A chart IMDb returned nothing for keeps what was being served.
+    assert charts.chart_cache["top_movies"] == before_top
+    assert charts.chart_source["top_movies"] == "local"
+    assert json.loads(cache_path.read_text())["popular_movies"] == popular
+
+
+def test_apply_imdb_chart_ids_skips_charts_from_the_same_fetch(tmp_path):
+    import charts
+
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    _seed_db_for_charts(db_path)
+    charts.chart_cache = {}
+    charts.chart_refreshed_at = {}
+    charts.chart_source = {}
+
+    ids = {"popular_movies": ["tt0000001"]}
+    times = {"popular_movies": "2026-10-13T00:00:00+00:00"}
+    assert charts.apply_imdb_chart_ids(db_path, ids, times) == ["popular_movies"]
+    assert charts.apply_imdb_chart_ids(db_path, ids, times, cache_path) == []
+    assert not cache_path.exists()
+
+    # A newer fetch of the same chart is applied.
+    times = {"popular_movies": "2026-10-13T03:00:00+00:00"}
+    assert charts.apply_imdb_chart_ids(db_path, ids, times) == ["popular_movies"]
+
+
+def test_fetch_imdb_chart_ids_honours_ttl(tmp_path):
+    import charts
+
+    graphql_cache_path = tmp_path / "graphql_chart_cache.json"
+    _write_graphql_id_cache(
+        graphql_cache_path,
+        datetime.now(timezone.utc) - timedelta(hours=1),
+        {name: ["tt0000009"] for name in charts.GRAPHQL_CHART_CONFIGS},
+    )
+
+    # Younger than the TTL: reused without touching the network.
+    client = _chart_titles_client("tt0000001")
+    with patch("charts.httpx.Client", return_value=client):
+        ids, _times = charts.fetch_imdb_chart_ids(graphql_cache_path, ttl_seconds=7200)
+    assert client.post.call_count == 0
+    assert ids["popular_movies"] == ["tt0000009"]
+    client.close.assert_called_once()
+
+    # Older than the TTL (and always, with a TTL of zero): refetched.
+    for ttl in (1800, 0):
+        client = _chart_titles_client("tt0000001")
+        with patch("charts.httpx.Client", return_value=client):
+            ids, times = charts.fetch_imdb_chart_ids(graphql_cache_path, ttl_seconds=ttl)
+        assert client.post.call_count == len(charts.GRAPHQL_CHART_CONFIGS)
+        assert ids["popular_movies"] == ["tt0000001"]
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(times["popular_movies"])
+        assert age < timedelta(minutes=1)
+
+
+async def test_refresh_imdb_charts_once_updates_served_charts(tmp_path, monkeypatch):
+    import charts
+
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    _seed_db_for_charts(db_path)
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "CHART_CACHE_PATH", tmp_path / "chart_cache.json")
+    monkeypatch.setattr(main, "GRAPHQL_CHART_CACHE_PATH", tmp_path / "graphql_chart_cache.json")
+    charts.chart_cache = {"popular_movies": [{"tconst": "ttOLD", "rank": 1}]}
+    charts.chart_refreshed_at = {"popular_movies": "2026-10-10T00:00:00+00:00"}
+    charts.chart_source = {"popular_movies": "imdb"}
+
+    with patch("charts.httpx.Client", return_value=_chart_titles_client("tt0000003")):
+        updated = await main._refresh_imdb_charts_once(0)
+
+    assert "popular_movies" in updated
+    assert [i["tconst"] for i in charts.chart_cache["popular_movies"]] == ["tt0000003"]
+    assert charts.chart_refreshed_at["popular_movies"] > "2026-10-10"
+    assert main._db_active_connections == 0
+
+
+async def test_refresh_imdb_charts_once_does_nothing_without_db(tmp_path, monkeypatch):
+    import main
+
+    db_path = tmp_path / "imdb.db"
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = _chart_titles_client("tt0000001")
+    with patch("charts.httpx.Client", return_value=client):
+        assert await main._refresh_imdb_charts_once(0) == []
+    assert client.post.call_count == 0
+    assert not db_path.exists()
+
+
+async def test_chart_refresh_worker_reuses_saved_ids_only_at_startup(monkeypatch):
+    import charts
+
+    import main
+
+    ttls = []
+
+    async def fake_refresh(ttl_seconds):
+        ttls.append(ttl_seconds)
+        if len(ttls) == 2:
+            raise RuntimeError("imdb down")
+        return ["popular_movies"]
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main, "_refresh_imdb_charts_once", fake_refresh)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._chart_refresh_worker()
+
+    # The failed second tick must not stop the loop.
+    assert ttls == [charts.CHART_REFRESH_SECONDS, 0, 0]
+    assert sleeps == [charts.CHART_REFRESH_SECONDS] * 3
+
+
+async def test_db_read_slot_holds_off_swap(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "_db_swap_cond", None)
+    swapped = asyncio.Event()
+
+    async def swap():
+        async with main._db_swap_barrier():
+            swapped.set()
+
+    async with main._db_read_slot():
+        task = asyncio.create_task(swap())
+        await asyncio.sleep(0.05)
+        assert not swapped.is_set()
+    await asyncio.wait_for(task, timeout=2)
+    assert swapped.is_set()

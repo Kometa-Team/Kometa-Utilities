@@ -157,6 +157,11 @@ MIN_ROWS: dict[str, int] = {
 
 BATCH_SIZE = 10_000
 
+# Page cache for the import connection.  SQLite's default is 2 MB, which sends
+# nearly every page touch of a multi-GB staging file to disk.  This also bounds
+# the memory CREATE INDEX uses to sort before spilling to temp files.
+IMPORT_CACHE_MB = int(os.getenv("IMPORT_CACHE_MB", "256"))
+
 
 def _null(value: str) -> Optional[str]:
     """Convert IMDB null sentinel to Python None."""
@@ -539,6 +544,34 @@ def _delete_table(conn: sqlite3.Connection, table: str) -> None:
     conn.execute(f"DELETE FROM {table}")  # nosec B608 - table name validated against ALLOWED_TABLES
 
 
+def _drop_secondary_indexes(conn: sqlite3.Connection, table: str) -> list[str]:
+    """Drop a table's explicit indexes and return the SQL that recreates them.
+
+    Loading rows into an indexed table updates a random page of every index per
+    row; rebuilding each index in one sorted pass afterwards is far cheaper.
+    Indexes that back a PRIMARY KEY or UNIQUE constraint have no SQL of their
+    own and are left in place.
+    """
+    if table not in ALLOWED_TABLES:
+        raise ValueError(f"Unexpected table: {table}")
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+        (table,),
+    ).fetchall()
+    for name, _sql in rows:
+        quoted = name.replace('"', '""')
+        conn.execute(f'DROP INDEX "{quoted}"')
+    return [sql for _name, sql in rows]
+
+
+def _rebuild_indexes(conn: sqlite3.Connection, table: str, index_sql: list[str]) -> None:
+    """Recreate the indexes dropped by _drop_secondary_indexes."""
+    for position, sql in enumerate(index_sql, start=1):
+        print(f"   🔧 {table}: building index {position}/{len(index_sql)}...")
+        conn.execute(sql)
+
+
 def staged_db_path(live_db: Path) -> Path:
     """Return the staging path used while an import is being built."""
     return live_db.with_name(live_db.name + ".staging")
@@ -645,6 +678,7 @@ def run_direct_import(
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=OFF")
     conn.execute("PRAGMA synchronous=OFF")
+    conn.execute(f"PRAGMA cache_size=-{IMPORT_CACHE_MB * 1024}")
     create_schema(conn)
 
     existing_counts: dict[str, int] = {}
@@ -683,10 +717,12 @@ def run_direct_import(
 
             if on_table_start:
                 on_table_start(table)
+            index_sql = _drop_secondary_indexes(conn, table)
             _delete_table(conn, table)
             _t, _cb = table, on_table_progress
             _progress_cb = (lambda t, cb: lambda n: cb(t, n))(_t, _cb) if _cb else None
             count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
+            _rebuild_indexes(conn, table, index_sql)
             row_counts[table] = count
             table_updated[table] = datetime.now(timezone.utc).isoformat()
             if on_table_done:

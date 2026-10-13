@@ -5369,3 +5369,115 @@ def test_get_episode_ratings_returns_500_on_db_error(tmp_path, monkeypatch):
     response = client.get("/episode-ratings/tt0096697")
     assert response.status_code == 500
     assert "Episode ratings error" in response.json()["detail"]
+
+
+def _index_names(db_path, table=None):
+    conn = sqlite3.connect(db_path)
+    try:
+        sql = "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL"
+        params = ()
+        if table:
+            sql += " AND tbl_name = ?"
+            params = (table,)
+        return {row[0] for row in conn.execute(sql, params)}
+    finally:
+        conn.close()
+
+
+def test_import_restores_every_index(tmp_path):
+    """Indexes are dropped for the load, so each one must be back afterwards."""
+    from importer import create_schema
+
+    reference_db = tmp_path / "reference.db"
+    conn = sqlite3.connect(reference_db)
+    create_schema(conn)
+    conn.close()
+    expected = _index_names(reference_db)
+    assert "idx_tb_type" in expected and "idx_ep_parent" in expected
+
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
+    assert _index_names(live_db) == expected
+
+    # An index that is not part of the schema must survive a re-import too.
+    conn = sqlite3.connect(live_db)
+    conn.execute("CREATE INDEX idx_custom_runtime ON title_basics(runtimeMinutes)")
+    conn.commit()
+    conn.close()
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
+    assert _index_names(live_db) == expected | {"idx_custom_runtime"}
+
+    conn = sqlite3.connect(live_db)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT tconst FROM title_basics WHERE titleType = 'movie'"
+        ).fetchall()
+        assert any("idx_tb_type" in row[-1] for row in plan)
+        indexed = conn.execute(
+            "SELECT COUNT(*) FROM title_basics INDEXED BY idx_tb_type WHERE titleType IS NOT NULL"
+        ).fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM title_basics NOT INDEXED WHERE titleType IS NOT NULL"
+        ).fetchone()[0]
+        assert indexed == total > 0
+    finally:
+        conn.close()
+
+
+def test_import_loads_rows_with_indexes_dropped(tmp_path, monkeypatch):
+    """Rows must go into a table whose secondary indexes are gone for the load."""
+    import importer
+
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
+
+    seen = {}
+    real_import_table = importer.import_table
+
+    def spying_import_table(conn, gz_path, table, *args, **kwargs):
+        seen[table] = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+            (table,),
+        ).fetchone()[0]
+        return real_import_table(conn, gz_path, table, *args, **kwargs)
+
+    monkeypatch.setattr(importer, "import_table", spying_import_table)
+    _import_and_publish(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
+
+    assert seen == {"title_ratings": 0}
+    assert _index_names(live_db, "title_ratings") == {"idx_tr_votes", "idx_tr_rating"}
+    # Tables that were not reloaded keep their indexes untouched.
+    assert "idx_tb_type" in _index_names(live_db, "title_basics")
+
+
+def test_import_connection_uses_configured_cache(tmp_path, monkeypatch):
+    import importer
+
+    monkeypatch.setattr(importer, "IMPORT_CACHE_MB", 64)
+    cache_sizes = []
+    real_import_table = importer.import_table
+
+    def spying_import_table(conn, *args, **kwargs):
+        cache_sizes.append(conn.execute("PRAGMA cache_size").fetchone()[0])
+        return real_import_table(conn, *args, **kwargs)
+
+    monkeypatch.setattr(importer, "import_table", spying_import_table)
+    gz_paths = _make_all_gz_files(tmp_path)
+    importer.run_direct_import(gz_paths, tmp_path / "imdb.db", min_rows_override=0)
+
+    assert cache_sizes and set(cache_sizes) == {-64 * 1024}
+
+
+def test_drop_secondary_indexes_rejects_unknown_table(tmp_path):
+    import importer
+
+    conn = sqlite3.connect(tmp_path / "x.db")
+    try:
+        with pytest.raises(ValueError):
+            importer._drop_secondary_indexes(conn, "sqlite_master")
+    finally:
+        conn.close()

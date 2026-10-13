@@ -323,6 +323,12 @@ services:
       - DATA_DIR=/app/data
       - TMP_DIR=/app/data
       - MIN_VOTES_CHART=25000
+      # SQLite page cache for the import connection; the memory limit below
+      # leaves room for it on top of the web process.
+      - IMPORT_CACHE_MB=${IMPORT_CACHE_MB:-256}
+      # Index builds spill their sort to temp files; keep those on the data
+      # volume rather than the container's writable layer.
+      - SQLITE_TMPDIR=/app/data
       - IMDB_ADMIN_TOKEN=${IMDB_ADMIN_TOKEN:-}
       - MIN_FREE_DISK_GB=${MIN_FREE_DISK_GB:-30}
       - DELETE_DATASET_FILES_AFTER_IMPORT=${DELETE_DATASET_FILES_AFTER_IMPORT:-true}
@@ -371,7 +377,7 @@ services:
       resources:
         limits:
           cpus: "2.00"
-          memory: 1G
+          memory: 2G
           pids: 2048
         reservations:
           memory: 512M

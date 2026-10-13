@@ -329,6 +329,8 @@ services:
       # Index builds spill their sort to temp files; keep those on the data
       # volume rather than the container's writable layer.
       - SQLITE_TMPDIR=/app/data
+      # How often the IMDb-sourced charts are refetched, independent of the import.
+      - CHART_REFRESH_HOURS=${CHART_REFRESH_HOURS:-3}
       - IMDB_ADMIN_TOKEN=${IMDB_ADMIN_TOKEN:-}
       - MIN_FREE_DISK_GB=${MIN_FREE_DISK_GB:-30}
       - DELETE_DATASET_FILES_AFTER_IMPORT=${DELETE_DATASET_FILES_AFTER_IMPORT:-true}

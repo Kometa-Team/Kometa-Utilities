@@ -16,8 +16,8 @@ import aiosqlite
 import httpx
 from common import extract_seed_data
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 # --- CONFIG ---
 XML_DIR = Path(os.getenv("XML_DIR", "/app/data"))
@@ -34,7 +34,9 @@ REFRESH_UNKNOWN = timedelta(days=int(os.getenv("REFRESH_DAYS_UNKNOWN", "30")))  
 REFRESH_ENDED_UNDER_1Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_UNDER_1Y", "30")))
 REFRESH_ENDED_1_3Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_1_3Y", "90")))
 REFRESH_ENDED_3_10Y = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_3_10Y", "180")))
-REFRESH_NOT_FOUND = timedelta(days=int(os.getenv("REFRESH_DAYS_NOT_FOUND", "180")))  # AniDB: no such AID
+REFRESH_NOT_FOUND = timedelta(
+    days=int(os.getenv("REFRESH_DAYS_NOT_FOUND", "180"))
+)  # AniDB: no such AID
 REFRESH_ENDED_10Y_PLUS = timedelta(days=int(os.getenv("REFRESH_DAYS_ENDED_10Y_PLUS", "365")))
 ROOT_PATH = os.getenv("ROOT_PATH", "")  # Set to /anidb-service for path-based routing
 
@@ -328,7 +330,7 @@ def admit_new_lookup(request: Request, aid: int) -> None:
 
 
 def is_queued(aid: int) -> bool:
-    """True if the AID is waiting in either lane or is being fetched right now."""
+    """Return whether the AID is waiting in either lane or is being fetched now."""
     return aid in pending_aids or aid == in_flight_aid
 
 
@@ -990,19 +992,20 @@ async def get_stats() -> Dict[str, Any]:
 
 
 basic_auth = HTTPBasic(auto_error=False)
+limit_stats_auth_dependency = Depends(basic_auth)
 
 
 @app.get("/stats/limits", include_in_schema=False)
-async def get_limit_stats(credentials: Optional[HTTPBasicCredentials] = Depends(basic_auth)):
+async def get_limit_stats(
+    credentials: Optional[HTTPBasicCredentials] = limit_stats_auth_dependency,
+):
     """Operator view of why lookups were rejected. Not public, so probes can't read it."""
     if not API_USER or not API_PASS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
     # Compare as bytes: compare_digest rejects non-ASCII str
-    valid = (
-        credentials is not None
-        and secrets.compare_digest(credentials.username.encode(), API_USER.encode())
-        & secrets.compare_digest(credentials.password.encode(), API_PASS.encode())
-    )
+    valid = credentials is not None and secrets.compare_digest(
+        credentials.username.encode(), API_USER.encode()
+    ) & secrets.compare_digest(credentials.password.encode(), API_PASS.encode())
     if not valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

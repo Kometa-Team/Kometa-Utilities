@@ -51,7 +51,7 @@ async def test_fetch_constraint_ids_returns_ids(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.fetch_constraint_ids(
             {"keywordConstraint": {"anyKeywords": ["prison"]}}
         )
@@ -69,7 +69,7 @@ async def test_fetch_constraint_ids_paginates(tmp_path):
     ]
     mock_client = _mock_async_httpx_client(responses)
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.fetch_constraint_ids(
             {"keywordConstraint": {"anyKeywords": ["prison"]}}, page_size=1
         )
@@ -85,7 +85,7 @@ async def test_fetch_constraint_ids_respects_max_pages(tmp_path):
     responses = [MagicMock(json=lambda: page, raise_for_status=MagicMock())] * 5
     mock_client = _mock_async_httpx_client(responses)
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.fetch_constraint_ids(
             {"keywordConstraint": {"anyKeywords": ["prison"]}},
             page_size=1,
@@ -104,7 +104,7 @@ async def test_fetch_constraint_ids_stops_when_cursor_missing(tmp_path):
         [MagicMock(json=lambda: page, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.fetch_constraint_ids(
             {"keywordConstraint": {"anyKeywords": ["prison"]}}, page_size=1
         )
@@ -121,7 +121,7 @@ async def test_fetch_constraint_ids_raises_on_graphql_error(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         with pytest.raises(RuntimeError, match="Bad constraint"):
             await constraints.fetch_constraint_ids({"keywordConstraint": {"bad": True}})
 
@@ -168,7 +168,7 @@ async def test_get_constraint_ids_returns_cached_value_when_fresh(tmp_path):
     params = {"keywordConstraint": {"anyKeywords": ["prison"]}}
     await constraints.save_constraint_cache(db_path, "keyword", params, ["tt0111161"])
 
-    with patch("constraints.httpx.AsyncClient") as mock_client_class:
+    with patch("constraints.http_clients.get_graphql_client") as mock_client_class:
         ids = await constraints.get_constraint_ids(db_path, "keyword", params)
 
     assert ids == ["tt0111161"]
@@ -221,7 +221,7 @@ async def test_get_constraint_ids_fetches_when_missing(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.get_constraint_ids(db_path, "keyword", params)
 
     assert ids == ["tt0111161"]
@@ -243,7 +243,7 @@ async def test_get_constraint_ids_refreshes_stale_cache(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.get_constraint_ids(db_path, "keyword", params)
 
     assert ids == ["ttNEW"]
@@ -261,7 +261,7 @@ async def test_get_constraint_ids_ignore_cache_forces_refresh(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.get_constraint_ids(db_path, "keyword", params, ignore_cache=True)
 
     assert ids == ["ttNEW"]
@@ -277,7 +277,7 @@ async def test_fetch_search_ids_preserves_order_and_paginates(tmp_path):
     ]
     mock_client = _mock_async_httpx_client(responses)
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.fetch_search_ids(
             {"genreConstraint": {"allGenreIds": ["Drama"]}},
             sort={"sortBy": "POPULARITY", "sortOrder": "ASC"},
@@ -295,7 +295,7 @@ async def test_fetch_search_ids_honours_limit(tmp_path):
     responses = [MagicMock(json=lambda: page1, raise_for_status=MagicMock())]
     mock_client = _mock_async_httpx_client(responses)
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids = await constraints.fetch_search_ids(
             {"genreConstraint": {"allGenreIds": ["Drama"]}}, limit=1, page_size=250
         )
@@ -312,7 +312,7 @@ async def test_fetch_search_ids_raises_on_graphql_error(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         with pytest.raises(RuntimeError, match="Bad search"):
             await constraints.fetch_search_ids({"bad": True})
 
@@ -327,7 +327,7 @@ async def test_get_search_ids_caches_and_returns_hit(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids1, hit1 = await constraints.get_search_ids(db_path, search_constraints, limit=250)
 
     assert ids1 == ["tt0000001", "tt0000002"]
@@ -356,7 +356,7 @@ async def test_get_search_ids_ignore_cache_forces_refresh(tmp_path):
         [MagicMock(json=lambda: response, raise_for_status=MagicMock())]
     )
 
-    with patch("constraints.httpx.AsyncClient", return_value=mock_client):
+    with patch("constraints.http_clients.get_graphql_client", return_value=mock_client):
         ids, hit = await constraints.get_search_ids(db_path, search_constraints, ignore_cache=True)
 
     assert ids == ["ttNEW"]

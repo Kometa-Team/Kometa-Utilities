@@ -1,7 +1,9 @@
 """Pre-computed IMDB chart cache."""
 
 import json
+import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict, Union, cast
@@ -111,8 +113,17 @@ GRAPHQL_CHART_CONFIGS: dict[str, dict[str, Union[str, int]]] = {
 # GraphQL source and a local fallback appear once, in CHART_CONFIGS order.
 ALL_CHART_NAMES = list(dict.fromkeys(list(CHART_CONFIGS) + list(GRAPHQL_CHART_CONFIGS)))
 
-# GraphQL chart IDs are fetched at most once per day.
-GRAPHQL_CACHE_TTL_SECONDS = 86400
+# How often the IMDb-sourced chart IDs are refetched, and so how old a saved
+# set of IDs may be before it is refetched instead of reused.  IMDb reorders the
+# popularity, trending and box office charts through the day, so this is kept
+# well under a day and runs on its own timer rather than behind the dataset
+# import (see main._chart_refresh_worker).
+CHART_REFRESH_SECONDS = max(60, int(float(os.getenv("CHART_REFRESH_HOURS", "3")) * 3600))
+GRAPHQL_CACHE_TTL_SECONDS = CHART_REFRESH_SECONDS
+
+# Serializes writers of the module-level chart state: the full rebuild that
+# follows an import and the periodic IMDb refresh run on different threads.
+_chart_write_lock = threading.Lock()
 
 # Sidecar filename used to persist chart refresh timestamps.
 CHART_CACHE_REFRESHED_FILE = "chart_cache_refreshed.json"
@@ -536,8 +547,23 @@ def rebuild_all_charts(
     GraphQL-backed charts (popular_movies, box_office, trending_*, etc.) are
     only fetched from IMDb when fetch_graphql=True to keep tests deterministic
     and offline by default.  When fetch_graphql=True, graphql_cache_path may be
-    provided to cache the raw IMDb IDs for 24 hours.
+    provided to reuse raw IMDb IDs younger than GRAPHQL_CACHE_TTL_SECONDS.
     """
+    with _chart_write_lock:
+        _rebuild_all_charts_locked(
+            db_path, min_votes, on_progress, cache_path, fetch_graphql, graphql_cache_path
+        )
+
+
+def _rebuild_all_charts_locked(
+    db_path: Path,
+    min_votes: int,
+    on_progress: Optional[Callable[[str, int, int], None]],
+    cache_path: Optional[Path],
+    fetch_graphql: bool,
+    graphql_cache_path: Optional[Path],
+) -> None:
+    """Body of rebuild_all_charts; the caller holds _chart_write_lock."""
     global chart_cache, chart_refreshed_at, chart_source
 
     conn = _connect(db_path)
@@ -591,3 +617,69 @@ def rebuild_all_charts(
         conn.close()
         if client is not None:
             client.close()
+
+
+def fetch_imdb_chart_ids(
+    graphql_cache_path: Optional[Path],
+    ttl_seconds: int = GRAPHQL_CACHE_TTL_SECONDS,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Fetch the IMDb-sourced chart IDs, reusing saved ones younger than ttl_seconds.
+
+    Network only -- the dataset DB is not touched -- so this can run while an
+    import holds the DB.  Returns the IDs and when IMDb served each chart.
+    """
+    client = httpx.Client(timeout=30.0, headers=GRAPHQL_HEADERS)
+    try:
+        return _get_graphql_chart_ids(graphql_cache_path, client, ttl_seconds)
+    finally:
+        client.close()
+
+
+def apply_imdb_chart_ids(
+    db_path: Path,
+    ids: dict[str, list[str]],
+    fetched_at: dict[str, str],
+    cache_path: Optional[Path] = None,
+) -> list[str]:
+    """Replace the IMDb-sourced charts with the given IDs and return those changed.
+
+    Unlike rebuild_all_charts this never runs the local ranking: a chart IMDb
+    returned nothing for keeps whatever is currently served.  Charts already
+    built from the same fetch are left alone.
+    """
+    global chart_cache, chart_refreshed_at, chart_source
+
+    with _chart_write_lock:
+        new_cache = dict(chart_cache)
+        new_refreshed = dict(chart_refreshed_at)
+        new_source = dict(chart_source)
+        updated: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = _connect(db_path)
+        try:
+            for name in GRAPHQL_CHART_CONFIGS:
+                chart_ids = ids.get(name) or []
+                if not chart_ids:
+                    continue
+                refreshed = fetched_at.get(name, now)
+                if (
+                    name in new_cache
+                    and new_source.get(name) == "imdb"
+                    and new_refreshed.get(name) == refreshed
+                ):
+                    continue
+                new_cache[name] = _enrich_chart_ids(conn, chart_ids)
+                new_refreshed[name] = refreshed
+                new_source[name] = "imdb"
+                updated.append(name)
+        finally:
+            conn.close()
+
+        if updated:
+            chart_cache = new_cache
+            chart_refreshed_at = new_refreshed
+            chart_source = new_source
+            if cache_path:
+                save_chart_cache(cache_path)
+        return updated

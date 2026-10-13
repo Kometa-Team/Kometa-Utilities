@@ -323,6 +323,8 @@ services:
       - DATA_DIR=/app/data
       - TMP_DIR=/app/data
       - MIN_VOTES_CHART=25000
+      # How often the IMDb-sourced charts are refetched, independent of the import.
+      - CHART_REFRESH_HOURS=${CHART_REFRESH_HOURS:-3}
       - IMDB_ADMIN_TOKEN=${IMDB_ADMIN_TOKEN:-}
       - MIN_FREE_DISK_GB=${MIN_FREE_DISK_GB:-30}
       - DELETE_DATASET_FILES_AFTER_IMPORT=${DELETE_DATASET_FILES_AFTER_IMPORT:-true}

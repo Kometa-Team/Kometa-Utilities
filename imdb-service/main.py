@@ -122,6 +122,7 @@ ACCESS_LOG_BACKUPS = int(os.getenv("ACCESS_LOG_BACKUPS", "3"))
 # --- Global state ---
 last_refresh: Optional[str] = None  # ISO 8601 UTC string
 refresh_worker_task: Optional[asyncio.Task] = None
+chart_refresh_task: Optional[asyncio.Task] = None
 current_phase: str = "idle"  # idle | downloading | importing | building_charts
 download_progress: Dict[str, str] = {}  # dataset stem → pending|downloading|done
 import_progress: Dict[str, Any] = {}  # table → {status, rows}
@@ -220,8 +221,12 @@ async def _apply_sqlite_pragmas(db: aiosqlite.Connection) -> None:
 
 
 @asynccontextmanager
-async def _db_connect():
-    """Open the dataset DB, waiting out any in-progress import swap."""
+async def _db_read_slot():
+    """Hold a reader slot on the dataset DB, waiting out any in-progress import swap.
+
+    For code that opens its own connection (e.g. synchronous work in a thread):
+    while the slot is held the import will not swap the DB file.
+    """
     global _db_active_connections
     cond = _get_db_swap_cond()
     async with cond:
@@ -229,13 +234,20 @@ async def _db_connect():
             await cond.wait()
         _db_active_connections += 1
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await _apply_sqlite_pragmas(db)
-            yield db
+        yield
     finally:
         async with cond:
             _db_active_connections -= 1
             cond.notify_all()
+
+
+@asynccontextmanager
+async def _db_connect():
+    """Open the dataset DB, waiting out any in-progress import swap."""
+    async with _db_read_slot():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _apply_sqlite_pragmas(db)
+            yield db
 
 
 @asynccontextmanager
@@ -877,7 +889,7 @@ async def _migrate_cache_tables() -> None:
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown: load DB state, rebuild charts, start scheduler."""
     global last_refresh, refresh_worker_task, parental_prefetch_task, artifact_cleanup_task
-    global parental_browser_reaper_task
+    global parental_browser_reaper_task, chart_refresh_task
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -907,6 +919,7 @@ async def lifespan(app: FastAPI):
 
     artifact_cleanup_task = asyncio.create_task(_artifact_cleanup_worker())
     parental_browser_reaper_task = asyncio.create_task(_parental_browser_reaper_worker())
+    chart_refresh_task = asyncio.create_task(_chart_refresh_worker())
 
     if DB_PATH.exists():
         try:
@@ -948,6 +961,12 @@ async def lifespan(app: FastAPI):
         refresh_worker_task.cancel()
         try:
             await refresh_worker_task
+        except asyncio.CancelledError:
+            pass
+    if chart_refresh_task:
+        chart_refresh_task.cancel()
+        try:
+            await chart_refresh_task
         except asyncio.CancelledError:
             pass
     if parental_prefetch_task:
@@ -1264,6 +1283,45 @@ async def _rebuild_charts_then_schedule() -> None:
         chart_progress = None
         _set_phase("idle")
     await _refresh_scheduler()
+
+
+async def _refresh_imdb_charts_once(ttl_seconds: int) -> list[str]:
+    """Refetch the IMDb-sourced charts and return the names that changed.
+
+    Saved IDs younger than ttl_seconds are reused instead of refetched.
+    """
+    if not _db_is_ready():
+        return []
+    # The fetch is network only, so it stays outside the reader slot and cannot
+    # hold up an import's DB swap.
+    ids, fetched_at = await asyncio.to_thread(
+        charts.fetch_imdb_chart_ids, GRAPHQL_CHART_CACHE_PATH, ttl_seconds
+    )
+    async with _db_read_slot():
+        return await asyncio.to_thread(
+            charts.apply_imdb_chart_ids, DB_PATH, ids, fetched_at, CHART_CACHE_PATH
+        )
+
+
+async def _chart_refresh_worker() -> None:
+    """Keep the IMDb-sourced charts current on their own timer.
+
+    IMDb reorders its charts through the day, while the dataset import that
+    used to drive chart rebuilds runs once daily, takes hours, and is skipped
+    or aborted on some days.  This loop is independent of all that.
+    """
+    # At startup, IDs saved within the last interval are still good enough;
+    # after that every tick fetches.
+    ttl_seconds = charts.CHART_REFRESH_SECONDS
+    while True:
+        try:
+            updated = await _refresh_imdb_charts_once(ttl_seconds)
+            if updated:
+                print(f"📈 Refreshed IMDb charts: {', '.join(updated)}")
+        except Exception as e:
+            print(f"⚠️  IMDb chart refresh failed: {e}")
+        ttl_seconds = 0
+        await asyncio.sleep(charts.CHART_REFRESH_SECONDS)
 
 
 async def _refresh_scheduler() -> None:

@@ -5481,6 +5481,8 @@ def test_drop_secondary_indexes_rejects_unknown_table(tmp_path):
             importer._drop_secondary_indexes(conn, "sqlite_master")
     finally:
         conn.close()
+
+
 def _chart_titles_client(*imdb_ids):
     """Return a mock httpx client whose chartTitles queries return the given IDs."""
     mock_resp = MagicMock()
@@ -5657,3 +5659,135 @@ async def test_db_read_slot_holds_off_swap(monkeypatch):
         assert not swapped.is_set()
     await asyncio.wait_for(task, timeout=2)
     assert swapped.is_set()
+
+
+def test_ratings_batch_returns_found_and_not_found(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.post(
+        "/ratings",
+        json={"imdb_ids": ["tt0502973", "tt9999999", "TT0111161", "tt0111161"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["field"] == "ratings"
+    # IDs are normalized and de-duplicated, and results keep the caller's order.
+    assert data["requested"] == 3
+    assert data["found"] == 2
+    assert list(data["results"]) == ["tt0502973", "tt0111161"]
+    assert data["not_found"] == ["tt9999999"]
+    assert data["results"]["tt0111161"] == {
+        "tconst": "tt0111161",
+        "primaryTitle": "The Shawshank Redemption",
+        "titleType": "movie",
+        "averageRating": 9.3,
+        "numVotes": 2800000,
+    }
+    # Each entry matches what the single-title endpoint returns.
+    single = client.get("/ratings/tt0502973").json()["result"]
+    assert data["results"]["tt0502973"] == single
+
+
+def test_ratings_batch_returns_null_rating_for_unrated_title(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO title_basics VALUES "
+        "('tt7777777','movie','Unrated','Unrated',0,2027,NULL,NULL,'Drama')"
+    )
+    conn.commit()
+    conn.close()
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    response = TestClient(main.app).post("/ratings", json={"imdb_ids": ["tt7777777"]})
+    assert response.status_code == 200
+    result = response.json()["results"]["tt7777777"]
+    assert result["averageRating"] is None
+    assert result["numVotes"] is None
+
+
+def test_ratings_batch_queries_in_chunks(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "_RATINGS_BATCH_SQL_CHUNK", 2)
+    ids = ["tt0000010", "tt0111161", "tt0000011", "tt0096697", "tt0502973"]
+    response = TestClient(main.app).post("/ratings", json={"imdb_ids": ids})
+    assert response.status_code == 200
+    data = response.json()
+    assert list(data["results"]) == ["tt0111161", "tt0096697", "tt0502973"]
+    assert data["not_found"] == ["tt0000010", "tt0000011"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"imdb_ids": []},
+        {"imdb_ids": "tt0111161"},
+        {"imdb_ids": ["tt0111161", 42]},
+        {"imdb_ids": ["tt0111161", "nm0000209"]},
+        {"imdb_ids": ["tt0111161; DROP TABLE title_basics"]},
+    ],
+)
+def test_ratings_batch_rejects_bad_payload(tmp_path, monkeypatch, payload):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    response = TestClient(main.app).post("/ratings", json=payload)
+    assert response.status_code == 400
+
+
+def test_ratings_batch_enforces_max_ids(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "RATINGS_BATCH_MAX", 2)
+    client = TestClient(main.app)
+    ok = client.post("/ratings", json={"imdb_ids": ["tt0111161", "tt0096697"]})
+    assert ok.status_code == 200
+    too_many = client.post("/ratings", json={"imdb_ids": ["tt0111161", "tt0096697", "tt0502973"]})
+    assert too_many.status_code == 400
+    assert "at most 2" in too_many.json()["detail"]
+
+
+def test_ratings_batch_returns_503_when_no_db(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post("/ratings", json={"imdb_ids": ["tt0111161"]})
+    assert response.status_code == 503
+
+
+def test_ratings_batch_returns_500_on_db_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+
+    class BrokenConnection:
+        async def __aenter__(self):
+            raise RuntimeError("db error")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(main.aiosqlite, "connect", lambda *_args, **_kwargs: BrokenConnection())
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post("/ratings", json={"imdb_ids": ["tt0111161"]})
+    assert response.status_code == 500
+    assert "Ratings error" in response.json()["detail"]

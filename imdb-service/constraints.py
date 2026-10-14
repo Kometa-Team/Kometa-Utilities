@@ -52,7 +52,13 @@ def _canonical_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _canonical_value(value[k]) for k in sorted(value)}
     if isinstance(value, list):
-        return sorted(_canonical_value(item) for item in value)
+        items = [_canonical_value(item) for item in value]
+        try:
+            return sorted(items)
+        except TypeError:
+            # Objects (e.g. ranged constraints) and mixed types do not order
+            # with ``<``; sort those by their canonical JSON text instead.
+            return sorted(items, key=lambda item: json.dumps(item, sort_keys=True))
     return value
 
 

@@ -5121,6 +5121,91 @@ def test_refresh_starts_background_task(monkeypatch):
     assert data["table"] == "title_ratings"
 
 
+@pytest.fixture
+def import_log(tmp_path, monkeypatch):
+    """Point the import log at a temp file and detach its handler afterwards."""
+    import logging
+    import sys
+
+    import main
+
+    path = tmp_path / "import.log"
+    monkeypatch.setattr(main, "IMPORT_LOG_FILE", str(path))
+    monkeypatch.setattr(main, "_import_logger", None)
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    yield path
+    logger = logging.getLogger("imdb.import")
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+
+async def test_import_log_copies_task_and_worker_thread_output(import_log):
+    import main
+
+    with main._import_log_capture():
+        print("📦 Starting import of title_ratings...")
+        await asyncio.to_thread(print, "✅ Finished title_ratings: 5 rows total")
+        print("partial", end="")
+
+    text = import_log.read_text()
+    assert "📦 Starting import of title_ratings..." in text
+    assert "✅ Finished title_ratings: 5 rows total" in text
+    assert "partial" in text
+
+
+async def test_import_log_ignores_concurrent_request_output(import_log):
+    import main
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def importer_task():
+        with main._import_log_capture():
+            print("import line")
+            started.set()
+            await finish.wait()
+
+    task = asyncio.create_task(importer_task())
+    await started.wait()
+    print("[imdb-parental] request line")
+    finish.set()
+    await task
+    print("after import")
+
+    text = import_log.read_text()
+    assert "import line" in text
+    assert "request line" not in text
+    assert "after import" not in text
+
+
+async def test_import_log_can_be_disabled(tmp_path, monkeypatch, capsys):
+    import main
+
+    monkeypatch.setattr(main, "IMPORT_LOG_FILE", "")
+    monkeypatch.setattr(main, "_import_logger", None)
+    with main._import_log_capture():
+        print("still on stdout")
+
+    assert "still on stdout" in capsys.readouterr().out
+    assert not list(tmp_path.iterdir())
+
+
+async def test_manual_refresh_failure_is_logged(import_log, monkeypatch):
+    import main
+
+    async def failing_refresh(stem):
+        print(f"🔄 Manual refresh for {stem}...")
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(main, "_refresh_single_table", failing_refresh)
+    await main._logged_refresh_single_table("title.ratings")
+
+    text = import_log.read_text()
+    assert "🔄 Manual refresh for title.ratings..." in text
+    assert "❌ Manual refresh for title.ratings failed: disk full" in text
+
+
 async def test_refresh_single_table_pipeline(tmp_path, monkeypatch):
     import main
 

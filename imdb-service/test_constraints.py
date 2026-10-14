@@ -43,6 +43,24 @@ def test_constraint_cache_key_is_stable_and_order_independent():
     assert len(key1) > 0
 
 
+def test_constraint_cache_key_handles_lists_of_objects():
+    """Lists of objects (e.g. ranged constraints) key stably in any order."""
+    ranges = [{"start": 2000, "end": 2009}, {"start": 1990, "end": 1999}]
+    key1 = constraints._constraint_cache_key(
+        "search", {"constraints": {"releaseDateConstraint": {"ranges": ranges}}}
+    )
+    key2 = constraints._constraint_cache_key(
+        "search", {"constraints": {"releaseDateConstraint": {"ranges": ranges[::-1]}}}
+    )
+    assert key1 == key2
+
+
+def test_canonical_value_keeps_natural_order_for_scalars():
+    """Scalar lists still sort naturally, so existing cache keys are unchanged."""
+    assert constraints._canonical_value([10, 9, 100]) == [9, 10, 100]
+    assert constraints._canonical_value(["b", "a"]) == ["a", "b"]
+
+
 @pytest.mark.asyncio
 async def test_fetch_constraint_ids_returns_ids(tmp_path):
     """A single-page GraphQL response is parsed into a list of tconst IDs."""

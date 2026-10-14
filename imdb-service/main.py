@@ -1,6 +1,7 @@
 """IMDB Service - FastAPI caching service for IMDB public datasets."""
 
 import asyncio
+import contextvars
 import csv
 import hashlib
 import io
@@ -12,13 +13,15 @@ import random
 import re
 import secrets
 import shutil
+import sys
+import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, cast
+from typing import Any, Dict, Iterator, Mapping, Optional, cast
 from urllib.parse import unquote, urlsplit
 
 import aiosqlite
@@ -119,6 +122,13 @@ SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "15000"))
 ACCESS_LOG_FILE = os.getenv("ACCESS_LOG_FILE", "access.log")
 ACCESS_LOG_MAX_BYTES = int(os.getenv("ACCESS_LOG_MAX_BYTES", str(50 * 1024**2)))
 ACCESS_LOG_BACKUPS = int(os.getenv("ACCESS_LOG_BACKUPS", "3"))
+# Dataset imports also print to stdout, and the container log has usually been
+# rotated away by the time anyone looks at a 03:00 run. Everything printed while
+# an import runs is copied to this rotating file as well. Set IMPORT_LOG_FILE
+# empty to disable the copy.
+IMPORT_LOG_FILE = os.getenv("IMPORT_LOG_FILE", "import.log")
+IMPORT_LOG_MAX_BYTES = int(os.getenv("IMPORT_LOG_MAX_BYTES", str(5 * 1024**2)))
+IMPORT_LOG_BACKUPS = int(os.getenv("IMPORT_LOG_BACKUPS", "5"))
 
 # --- Global state ---
 last_refresh: Optional[str] = None  # ISO 8601 UTC string
@@ -157,6 +167,106 @@ PARENTAL_PAGE_READY_SELECTORS = (
     'section[data-testid^="advisory-"]',
     "li.ipc-metadata-list-item--link",
 )
+
+
+class _ImportLogSink:
+    """Collect written text into whole lines and log each one."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+        self._pending = ""
+        self._lock = threading.Lock()
+
+    def write(self, text: str) -> None:
+        with self._lock:
+            self._pending += text
+            *lines, self._pending = self._pending.split("\n")
+        for line in lines:
+            if line:
+                self._logger.info(line)
+
+    def flush(self) -> None:
+        with self._lock:
+            line, self._pending = self._pending, ""
+        if line:
+            self._logger.info(line)
+
+
+# Set only in the context of an import, so prints from request handlers that
+# run at the same time are not copied. asyncio.to_thread copies the context,
+# so the importer's worker threads inherit it.
+_import_log_sink: contextvars.ContextVar[Optional[_ImportLogSink]] = contextvars.ContextVar(
+    "_import_log_sink", default=None
+)
+_import_logger: Optional[logging.Logger] = None
+
+
+class _StdoutTee:
+    """Wrap stdout so text printed during an import is also sent to its log."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        sink = _import_log_sink.get()
+        if sink is not None:
+            try:
+                sink.write(text)
+            except Exception:  # nosec B110 - the log copy must never break a print
+                pass
+        return cast(int, self._stream.write(text))
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+def _get_import_logger() -> Optional[logging.Logger]:
+    """Return the import log, creating its rotating file handler on first use."""
+    global _import_logger
+    if not IMPORT_LOG_FILE:
+        return None
+    if _import_logger is None:
+        path = Path(IMPORT_LOG_FILE)
+        if not path.is_absolute():
+            path = DATA_DIR / path
+        handler = logging.handlers.RotatingFileHandler(
+            path,
+            maxBytes=IMPORT_LOG_MAX_BYTES,
+            backupCount=IMPORT_LOG_BACKUPS,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger = logging.getLogger("imdb.import")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        _import_logger = logger
+    return _import_logger
+
+
+@contextmanager
+def _import_log_capture() -> Iterator[None]:
+    """Copy everything this task (and its worker threads) prints to the import log."""
+    try:
+        logger = _get_import_logger()
+    except Exception as e:
+        print(f"⚠️  Could not open import log: {e}")
+        logger = None
+    if logger is None:
+        yield
+        return
+    if not isinstance(sys.stdout, _StdoutTee):
+        sys.stdout = _StdoutTee(sys.stdout)
+    sink = _ImportLogSink(logger)
+    token = _import_log_sink.set(sink)
+    try:
+        yield
+    finally:
+        sink.flush()
+        _import_log_sink.reset(token)
 
 
 def _configure_access_logging() -> Optional[Path]:
@@ -1231,14 +1341,24 @@ async def _refresh_single_table(stem: str) -> None:
         print(f"✅ Manual refresh for {stem} complete")
 
 
+async def _logged_refresh_single_table(stem: str) -> None:
+    """Run a manual single-table refresh with its output copied to the import log."""
+    with _import_log_capture():
+        try:
+            await _refresh_single_table(stem)
+        except Exception as e:
+            print(f"❌ Manual refresh for {stem} failed: {e}")
+
+
 async def _initial_import_then_schedule() -> None:
     """Run initial import immediately, then hand off to scheduler."""
     global parental_prefetch_task
 
-    try:
-        await _run_import_pipeline()
-    except Exception as e:
-        print(f"❌ Initial import failed: {e}")
+    with _import_log_capture():
+        try:
+            await _run_import_pipeline()
+        except Exception as e:
+            print(f"❌ Initial import failed: {e}")
 
     # The prefetch worker is only started in lifespan when a DB already exists.
     # If we just created the DB during initial import, start it now.
@@ -1335,10 +1455,11 @@ async def _refresh_scheduler() -> None:
         sleep_secs = (target - now).total_seconds()
         print(f"💤 Next refresh in {sleep_secs / 3600:.1f}h (at {target.isoformat()})")
         await asyncio.sleep(sleep_secs)
-        try:
-            await _run_import_pipeline()
-        except Exception as e:
-            print(f"❌ Scheduled refresh failed: {e}")
+        with _import_log_capture():
+            try:
+                await _run_import_pipeline()
+            except Exception as e:
+                print(f"❌ Scheduled refresh failed: {e}")
 
 
 app = FastAPI(
@@ -3510,7 +3631,7 @@ async def refresh_table(table: str, request: Request) -> Dict[str, str]:
         raise HTTPException(status_code=409, detail="A refresh is already in progress")
 
     stem = TABLE_TO_STEM[table]
-    asyncio.create_task(_refresh_single_table(stem))
+    asyncio.create_task(_logged_refresh_single_table(stem))
     return {"status": "started", "table": table}
 
 

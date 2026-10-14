@@ -47,6 +47,7 @@ DELETE_DATASET_FILES_AFTER_IMPORT = (
 CACHE_STATS_TTL_SECONDS = float(os.getenv("CACHE_STATS_TTL_SECONDS", "5"))
 REFRESH_HOUR = int(os.getenv("REFRESH_HOUR", "3"))
 MIN_VOTES_CHART = int(os.getenv("MIN_VOTES_CHART", "25000"))
+RATINGS_BATCH_MAX = int(os.getenv("RATINGS_BATCH_MAX", "1000"))
 PARENTAL_GUIDE_TTL_DAYS = int(os.getenv("PARENTAL_GUIDE_TTL_DAYS", "90"))
 KEYWORDS_TTL_DAYS = int(os.getenv("KEYWORDS_TTL_DAYS", "30"))
 KEYWORDS_MAX_PAGES = int(os.getenv("KEYWORDS_MAX_PAGES", "10"))
@@ -3443,6 +3444,11 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 
     <div class="endpoint">
+        <strong>POST /ratings</strong> - Return rating metadata for up to {RATINGS_BATCH_MAX} titles in one request<br>
+        <code>curl -X POST "{base}/ratings" -H "Content-Type: application/json" -d '{{"imdb_ids": ["tt0111161", "tt0068646"]}}'</code>
+    </div>
+
+    <div class="endpoint">
         <strong>GET /genre/{{imdb_id}}</strong> - Return genres for a title<br>
         <code>curl "{base}/genre/tt0111161"</code>
     </div>
@@ -4041,6 +4047,73 @@ async def get_ratings(imdb_id: str) -> Dict[str, Any]:
         "field": field,
         "imdb_id": imdb_id,
         "result": result,
+    }
+
+
+# Titles looked up per SQL statement in a batch; keeps each statement well under
+# SQLite's bound-parameter limit whatever RATINGS_BATCH_MAX is set to.
+_RATINGS_BATCH_SQL_CHUNK = 500
+
+
+@app.post("/ratings")
+async def get_ratings_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the IMDb rating metadata for many titles in one request.
+
+    Body::
+
+        {"imdb_ids": ["tt0111161", "tt0068646", ...]}
+
+    Up to RATINGS_BATCH_MAX IDs per request.  ``results`` is keyed by IMDb ID
+    and each value has the same shape as ``result`` from ``GET /ratings/{id}``.
+    IDs with no matching title are listed in ``not_found`` rather than failing
+    the request; a malformed ID fails the whole request with 400.
+    """
+    if not _db_is_ready():
+        raise HTTPException(status_code=503, detail="Service initializing")
+
+    raw_ids = payload.get("imdb_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(
+            status_code=400, detail="'imdb_ids' is required and must be a non-empty list"
+        )
+    if len(raw_ids) > RATINGS_BATCH_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'imdb_ids' may contain at most {RATINGS_BATCH_MAX} IDs",
+        )
+    if not all(isinstance(raw_id, str) for raw_id in raw_ids):
+        raise HTTPException(status_code=400, detail="'imdb_ids' must contain only strings")
+
+    # Normalize and de-duplicate, keeping the caller's order.
+    imdb_ids = list(dict.fromkeys(_validate_imdb_id(raw_id) for raw_id in raw_ids))
+
+    field = "ratings"
+    results: Dict[str, Any] = {}
+    try:
+        async with _db_connect() as db:
+            db.row_factory = aiosqlite.Row
+            for start in range(0, len(imdb_ids), _RATINGS_BATCH_SQL_CHUNK):
+                chunk = imdb_ids[start : start + _RATINGS_BATCH_SQL_CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                sql = f"""
+                    SELECT tb.tconst, tb.primaryTitle, tb.titleType,
+                           tr.averageRating, tr.numVotes
+                    FROM title_basics tb
+                    LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst
+                    WHERE tb.tconst IN ({placeholders})
+                """  # nosec B608 - only "?" placeholders are interpolated
+                cursor = await db.execute(sql, chunk)
+                for row in await cursor.fetchall():
+                    results[row["tconst"]] = _normalize_extract_row(field, row)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ratings error: {e}")
+
+    return {
+        "field": field,
+        "requested": len(imdb_ids),
+        "found": len(results),
+        "results": {imdb_id: results[imdb_id] for imdb_id in imdb_ids if imdb_id in results},
+        "not_found": [imdb_id for imdb_id in imdb_ids if imdb_id not in results],
     }
 
 

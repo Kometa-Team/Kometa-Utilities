@@ -9,7 +9,6 @@ on:
       - .github/workflows/docker-build.yml
       - docker-compose.yml
       - anidb-service/**
-      - plex-oauth/**
       - trakt-oauth/**
       - mal-oauth/**
       - simkl-service/**
@@ -29,9 +28,6 @@ jobs:
           - image: anidb-mirror
             context: ./anidb-service
             file: ./anidb-service/Dockerfile
-          - image: plex-oauth
-            context: ./plex-oauth
-            file: ./plex-oauth/Dockerfile
           - image: trakt-oauth
             context: ./trakt-oauth
             file: ./trakt-oauth/Dockerfile

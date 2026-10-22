@@ -7,7 +7,6 @@ x-default-logging: &default-logging
     max-file: "5"
 
 services:
-
   floppy:
     container_name: floppy
     # Image defaults to :latest tag (points to stable release branch)

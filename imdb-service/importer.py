@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS title_basics (
 CREATE INDEX IF NOT EXISTS idx_tb_type ON title_basics(titleType);
 CREATE INDEX IF NOT EXISTS idx_tb_year ON title_basics(startYear);
 CREATE INDEX IF NOT EXISTS idx_tb_genres ON title_basics(genres);
+-- Trigram index so /search?title= substring matches don't scan title_basics.
+-- External-content: it stores no copy of the titles, but is keyed by rowid, so
+-- it must be rebuilt whenever title_basics is reloaded (see run_direct_import).
+CREATE VIRTUAL TABLE IF NOT EXISTS title_basics_fts USING fts5(
+    primaryTitle, content='title_basics', tokenize='trigram'
+);
 
 CREATE TABLE IF NOT EXISTS title_ratings (
     tconst TEXT PRIMARY KEY,
@@ -572,6 +578,21 @@ def _rebuild_indexes(conn: sqlite3.Connection, table: str, index_sql: list[str])
         conn.execute(sql)
 
 
+# import_meta key marking title_basics_fts as built. Readers fall back to a
+# LIKE scan until it is set, e.g. on a DB from before the index existed.
+TITLE_FTS_READY_KEY = "title_fts_ready"
+
+
+def _rebuild_title_fts(conn: sqlite3.Connection) -> None:
+    """Rebuild title_basics_fts from title_basics and mark it ready."""
+    print("   🔧 title_basics: building title search index...")
+    conn.execute("INSERT INTO title_basics_fts(title_basics_fts) VALUES ('rebuild')")
+    conn.execute(
+        "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",
+        (TITLE_FTS_READY_KEY, datetime.now(timezone.utc).isoformat()),
+    )
+
+
 def staged_db_path(live_db: Path) -> Path:
     """Return the staging path used while an import is being built."""
     return live_db.with_name(live_db.name + ".staging")
@@ -701,6 +722,7 @@ def run_direct_import(
 
     row_counts: dict[str, int] = existing_counts.copy()
     table_updated: dict[str, str] = existing_updated.copy()
+    imported_tables: set[str] = set()
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -724,9 +746,18 @@ def run_direct_import(
             count = import_table(conn, gz_path, table, columns, min_rows, _progress_cb)
             _rebuild_indexes(conn, table, index_sql)
             row_counts[table] = count
+            imported_tables.add(table)
             table_updated[table] = datetime.now(timezone.utc).isoformat()
             if on_table_done:
                 on_table_done(table, count)
+
+        # Reloading title_basics renumbers its rowids, which invalidates the
+        # external-content index; a DB predating the index needs a first build.
+        fts_ready = conn.execute(
+            "SELECT 1 FROM import_meta WHERE key = ?", (TITLE_FTS_READY_KEY,)
+        ).fetchone()
+        if "title_basics" in imported_tables or not fts_ready:
+            _rebuild_title_fts(conn)
 
         conn.execute(
             "INSERT OR REPLACE INTO import_meta VALUES (?, ?)",

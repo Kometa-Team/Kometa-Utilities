@@ -32,7 +32,13 @@ import httpx
 import singleflight
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from importer import ALLOWED_TABLES, CACHE_SCHEMA_SQL, SCHEMA_SQL, TABLE_TO_STEM
+from importer import (
+    ALLOWED_TABLES,
+    CACHE_SCHEMA_SQL,
+    SCHEMA_SQL,
+    TABLE_TO_STEM,
+    TITLE_FTS_READY_KEY,
+)
 
 # --- Config ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
@@ -445,6 +451,16 @@ async def _safe_page_content(page: Any, max_retries: int = 3) -> str:
     raise last_error  # type: ignore[misc]
 
 
+# Matches the userinfo of a URL ("scheme://user:pass@") so proxy credentials
+# never reach the logs, e.g. via a proxy-URL browser context key.
+_URL_CREDENTIALS_RE = re.compile(r"(?<=://)[^/@\s]+@")
+
+
+def _redact_url_credentials(text: str) -> str:
+    """Replace URL userinfo (``user:pass@``) with ``***@``."""
+    return _URL_CREDENTIALS_RE.sub("***@", text)
+
+
 def _parental_log(event: str, imdb_id: Optional[str] = None, **fields: Any) -> None:
     """Emit structured logs for the parental-guide fetch flow."""
     if not PARENTAL_GUIDE_LOGGING_ENABLED:
@@ -452,7 +468,7 @@ def _parental_log(event: str, imdb_id: Optional[str] = None, **fields: Any) -> N
 
     payload = {"event": event, "imdb_id": imdb_id, **fields}
     detail = " ".join(f"{key}={value}" for key, value in payload.items() if value is not None)
-    print(f"[imdb-parental] {detail}")
+    print(f"[imdb-parental] {_redact_url_credentials(detail)}")
 
 
 async def _save_parental_failure_screenshot(
@@ -706,7 +722,11 @@ def _playwright_proxy_identity(proxy_url: Optional[str]) -> tuple[str, Optional[
 
     parsed = urlsplit(proxy_url)
     if not parsed.scheme or not parsed.hostname:
-        raise HTTPException(status_code=502, detail=f"Invalid parental proxy URL: {proxy_url!r}")
+        # Never echo the URL: without a scheme its credentials can't be located
+        # reliably, and this detail is returned to the API client.
+        raise HTTPException(
+            status_code=502, detail="Invalid parental proxy URL in PARENTAL_PROXY_URLS"
+        )
 
     server = f"{parsed.scheme}://{parsed.hostname}"
     if parsed.port is not None:
@@ -2875,6 +2895,32 @@ async def search_advanced(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# A title substring matching at most this many titles is searched outward from
+# the trigram index. Above it, walking titles in sort order and stopping at
+# LIMIT is faster, since a common substring ("the") matches millions of rows.
+TITLE_FTS_MAX_CANDIDATES = int(os.getenv("TITLE_FTS_MAX_CANDIDATES", "50000"))
+
+
+async def _title_fts_is_selective(title_pattern: str) -> bool:
+    """Whether the title index is built and narrows this LIKE pattern enough to drive a search."""
+    try:
+        async with _db_connect() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM import_meta WHERE key = ?", (TITLE_FTS_READY_KEY,)
+            )
+            if await cursor.fetchone() is None:
+                return False
+            cursor = await db.execute(
+                "SELECT count(*) FROM ("
+                "SELECT 1 FROM title_basics_fts WHERE primaryTitle LIKE ? LIMIT ?)",
+                (title_pattern, TITLE_FTS_MAX_CANDIDATES + 1),
+            )
+            row = await cursor.fetchone()
+    except aiosqlite.Error:
+        return False
+    return row is not None and row[0] <= TITLE_FTS_MAX_CANDIDATES
+
+
 @app.get("/search")
 async def search(
     type: Optional[str] = Query(None, alias="type"),  # noqa: B008
@@ -3026,9 +3072,16 @@ async def search(
         conditions.append("tb.startYear < ?")
         params.append(_year_from(release_before))
 
-    if title:
-        conditions.append("tb.primaryTitle LIKE ?")
-        params.append(f"%{title}%")
+    title_pattern = f"%{title}%" if title else None
+    title_via_fts = title_pattern is not None and await _title_fts_is_selective(title_pattern)
+    if title_pattern is not None:
+        if title_via_fts:
+            conditions.append(
+                "tb.rowid IN (SELECT rowid FROM title_basics_fts WHERE primaryTitle LIKE ?)"
+            )
+        else:
+            conditions.append("tb.primaryTitle LIKE ?")
+        params.append(title_pattern)
 
     if imdb_top is not None:
         top_chart = charts.chart_cache.get("top_movies", [])
@@ -3324,7 +3377,15 @@ async def search(
     # the index for ORDER BY and stop at LIMIT, instead of temp-sorting every
     # match. CROSS JOIN is safe here: tconst is the PK of both tables, so the
     # join is 1:1 and matches the LEFT JOIN result set.
-    if sort_col.startswith("tr."):
+    # The exception is a selective title: the index has already narrowed the
+    # match to a bounded set, so start from that set and sort it, rather than
+    # walking every rating looking for the few titles that match.
+    if sort_col.startswith("tr.") and title_via_fts:
+        from_clause = (
+            "FROM title_basics tb " "CROSS JOIN title_ratings tr ON tb.tconst = tr.tconst "
+        )
+        distinct = ""
+    elif sort_col.startswith("tr."):
         from_clause = (
             "FROM title_ratings tr " "CROSS JOIN title_basics tb ON tb.tconst = tr.tconst "
         )

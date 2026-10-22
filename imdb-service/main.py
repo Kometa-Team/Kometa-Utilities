@@ -3636,6 +3636,11 @@ async def endpoints(request: Request) -> HTMLResponse:
     </div>
 
     <div class="endpoint">
+        <strong>POST /genre</strong> - Return genres for up to {RATINGS_BATCH_MAX} titles in one request<br>
+        <code>curl -X POST "{base}/genre" -H "Content-Type: application/json" -d '{{"imdb_ids": ["tt0111161", "tt0068646"]}}'</code>
+    </div>
+
+    <div class="endpoint">
         <strong>GET /episode-rating/{{parent_imdb_id}}?season={{int}}&amp;episode={{int}}</strong> - Rating for one episode<br>
         <code>curl "{base}/episode-rating/tt0096697?season=5&amp;episode=12"</code>
     </div>
@@ -4234,21 +4239,18 @@ async def get_ratings(imdb_id: str) -> Dict[str, Any]:
 
 # Titles looked up per SQL statement in a batch; keeps each statement well under
 # SQLite's bound-parameter limit whatever RATINGS_BATCH_MAX is set to.
+# (RATINGS_BATCH_MAX caps POST /genre as well as POST /ratings.)
 _RATINGS_BATCH_SQL_CHUNK = 500
 
 
-@app.post("/ratings")
-async def get_ratings_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the IMDb rating metadata for many titles in one request.
+async def _extract_batch(payload: Dict[str, Any], field: str) -> Dict[str, Any]:
+    """Look up one EXTRACT_FIELD_SELECTS field for many titles (POST /ratings, POST /genre).
 
-    Body::
-
-        {"imdb_ids": ["tt0111161", "tt0068646", ...]}
-
-    Up to RATINGS_BATCH_MAX IDs per request.  ``results`` is keyed by IMDb ID
-    and each value has the same shape as ``result`` from ``GET /ratings/{id}``.
-    IDs with no matching title are listed in ``not_found`` rather than failing
-    the request; a malformed ID fails the whole request with 400.
+    Takes ``{"imdb_ids": [...]}`` with up to RATINGS_BATCH_MAX IDs.  ``results``
+    is keyed by IMDb ID and each value has the same shape as ``result`` from
+    the matching single-title GET endpoint.  IDs with no matching title are
+    listed in ``not_found`` rather than failing the request; a malformed ID
+    fails the whole request with 400.
     """
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
@@ -4269,7 +4271,7 @@ async def get_ratings_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Normalize and de-duplicate, keeping the caller's order.
     imdb_ids = list(dict.fromkeys(_validate_imdb_id(raw_id) for raw_id in raw_ids))
 
-    field = "ratings"
+    select_cols = EXTRACT_FIELD_SELECTS[field]
     results: Dict[str, Any] = {}
     try:
         async with _db_connect() as db:
@@ -4278,17 +4280,17 @@ async def get_ratings_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
                 chunk = imdb_ids[start : start + _RATINGS_BATCH_SQL_CHUNK]
                 placeholders = ",".join("?" * len(chunk))
                 sql = f"""
-                    SELECT tb.tconst, tb.primaryTitle, tb.titleType,
-                           tr.averageRating, tr.numVotes
+                    SELECT {select_cols}
                     FROM title_basics tb
                     LEFT JOIN title_ratings tr ON tb.tconst = tr.tconst
                     WHERE tb.tconst IN ({placeholders})
-                """  # nosec B608 - only "?" placeholders are interpolated
+                """  # nosec B608 - select_cols is a fixed constant; only "?" placeholders otherwise
                 cursor = await db.execute(sql, chunk)
                 for row in await cursor.fetchall():
                     results[row["tconst"]] = _normalize_extract_row(field, row)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ratings error: {e}")
+        label = "Ratings" if field == "ratings" else "Genre"
+        raise HTTPException(status_code=500, detail=f"{label} error: {e}")
 
     return {
         "field": field,
@@ -4297,6 +4299,30 @@ async def get_ratings_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
         "results": {imdb_id: results[imdb_id] for imdb_id in imdb_ids if imdb_id in results},
         "not_found": [imdb_id for imdb_id in imdb_ids if imdb_id not in results],
     }
+
+
+@app.post("/ratings")
+async def get_ratings_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the IMDb rating metadata for many titles in one request.
+
+    Body::
+
+        {"imdb_ids": ["tt0111161", "tt0068646", ...]}
+
+    See ``_extract_batch`` for limits and the response shape.
+    """
+    return await _extract_batch(payload, "ratings")
+
+
+@app.post("/genre")
+async def get_genres_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the IMDb genres for many titles in one request.
+
+    The batch counterpart of ``GET /genre/{id}``, so clients doing mass genre
+    lookups need not call ``GET /title/{id}`` once per item.  Same body and
+    limits as ``POST /ratings``; see ``_extract_batch``.
+    """
+    return await _extract_batch(payload, "genres")
 
 
 @app.get("/genre/{imdb_id}")

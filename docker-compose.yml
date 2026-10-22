@@ -290,6 +290,8 @@ services:
     image: getfider/fider:stable
     # PID 1 must reap orphaned healthcheck processes (see healthcheck below).
     init: true
+    labels:
+      - autoheal=true
     env_file:
       - ./features-fider/.env
     depends_on:
@@ -314,6 +316,29 @@ services:
           pids: 512
         reservations:
           memory: 128M
+
+  autoheal:
+    # Restarts containers labelled `autoheal=true` once Docker marks them
+    # unhealthy; Docker itself never restarts on health status. It does not
+    # alert, so Uptime Kuma must still cover anything opted in here.
+    image: willfarrell/autoheal:1.2.0
+    container_name: autoheal
+    restart: always
+    logging: *default-logging
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=120
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
+    volumes:
+      # Socket access is effectively root on the host; keep opt-in by label.
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 64M
+          pids: 64
 
   imdb-service:
     image: ghcr.io/kometa-team/imdb-service:latest

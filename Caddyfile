@@ -135,9 +135,11 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
     # 2026-10-22 to identify an unexpected ~115 req/s /title crawl). The
     # admin token header is dropped; Caddy only redacts its built-in list.
     log {
+        # ~135 req/s filled 50MiB every ~6 min, so 5 files held <1h. Rolled
+        # files gzip ~20:1: 48 x 250MiB keeps ~24h at that rate in ~600MB.
         output file /data/access/imdb-service.log {
-            roll_size 50MiB
-            roll_keep 5
+            roll_size 250MiB
+            roll_keep 48
             roll_keep_for 336h
         }
         format filter {

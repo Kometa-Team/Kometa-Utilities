@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict, Union, cast
 
-import httpx
 import http_clients
+import httpx
 from http_clients import GRAPHQL_HEADERS
 from importer import SQLITE_BUSY_TIMEOUT_MS
 

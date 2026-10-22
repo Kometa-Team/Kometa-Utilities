@@ -71,6 +71,7 @@ class ProxiedGraphQLClient:
     """
 
     async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """POST through a healthy proxy, retrying on another if it errors or is refused."""
         tried: set[str] = set()
         response: Optional[httpx.Response] = None
         error: Optional[httpx.TransportError] = None
@@ -99,6 +100,7 @@ class ProxiedGraphQLSyncClient:
     """Blocking counterpart of ProxiedGraphQLClient for chart refresh threads."""
 
     def __init__(self, timeout: float = 30.0) -> None:
+        """Create the wrapper; per-proxy clients are opened lazily on first use."""
         self._timeout = timeout
         self._clients: dict[Optional[str], httpx.Client] = {}
 
@@ -110,6 +112,7 @@ class ProxiedGraphQLSyncClient:
         return client
 
     def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """POST through a healthy proxy, retrying on another if it errors or is refused."""
         tried: set[str] = set()
         response: Optional[httpx.Response] = None
         error: Optional[httpx.TransportError] = None
@@ -134,6 +137,7 @@ class ProxiedGraphQLSyncClient:
         return self._client(None).post(url, **kwargs)
 
     def close(self) -> None:
+        """Close every per-proxy client opened by this wrapper."""
         for client in self._clients.values():
             client.close()
         self._clients.clear()

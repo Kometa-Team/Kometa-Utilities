@@ -645,9 +645,7 @@ def _title_fts_matches(db_path, pattern):
         "(SELECT rowid FROM title_basics_fts WHERE primaryTitle LIKE ?) ORDER BY tb.tconst",
         (pattern,),
     ).fetchall()
-    ready = conn.execute(
-        "SELECT value FROM import_meta WHERE key = 'title_fts_ready'"
-    ).fetchone()
+    ready = conn.execute("SELECT value FROM import_meta WHERE key = 'title_fts_ready'").fetchone()
     conn.close()
     return [r[0] for r in rows], ready[0] if ready else None
 

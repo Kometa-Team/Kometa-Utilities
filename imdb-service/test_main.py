@@ -3314,6 +3314,41 @@ async def test_fetch_parental_html_falls_back_to_graphql(monkeypatch):
     assert "kometa-parental-js" in html
 
 
+async def test_fetch_parental_html_skips_http_when_disabled(monkeypatch):
+    import main
+
+    async def no_http(_imdb_id, proxy_url=None):
+        raise AssertionError("HTTP scrape should not run when PARENTAL_HTTP_ENABLED is false")
+
+    async def fake_graphql(_imdb_id):
+        return '<!-- kometa-parental-js:{"Nudity":"Mild"} -->'
+
+    monkeypatch.setattr(main, "PARENTAL_HTTP_ENABLED", False)
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", no_http)
+    monkeypatch.setattr(main, "_fetch_parental_guide_via_graphql", fake_graphql)
+
+    html = await main._fetch_parental_guide_html("tt0111161")
+    assert "kometa-parental-js" in html
+
+
+async def test_fetch_parental_html_skips_http_and_still_404s(monkeypatch):
+    import main
+
+    async def no_http(_imdb_id, proxy_url=None):
+        raise AssertionError("HTTP scrape should not run when PARENTAL_HTTP_ENABLED is false")
+
+    async def no_results(_imdb_id):
+        raise main.HTTPException(status_code=404, detail="No parental guide found")
+
+    monkeypatch.setattr(main, "PARENTAL_HTTP_ENABLED", False)
+    monkeypatch.setattr(main, "_fetch_parental_guide_html_via_http", no_http)
+    monkeypatch.setattr(main, "_fetch_parental_guide_via_graphql", no_results)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main._fetch_parental_guide_html("tt0111161")
+    assert exc_info.value.status_code == 404
+
+
 def test_html_has_waf_challenge_detects_imdb_interstitial():
     import main
 

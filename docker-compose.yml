@@ -391,6 +391,9 @@ services:
       # Headless-Chromium fallback for parental guides; set false while IMDb's
       # WAF defeats it, so it stops burning CPU/memory on 120s timeouts.
       - PARENTAL_BROWSER_ENABLED=${PARENTAL_BROWSER_ENABLED:-true}
+      # Plain-HTTP parental page scrape; set false while IMDb's WAF challenges it,
+      # so cache misses go straight to GraphQL instead of spending a proxied fetch.
+      - PARENTAL_HTTP_ENABLED=${PARENTAL_HTTP_ENABLED:-true}
       - PARENTAL_DECODO_BROWSER_ENABLED=${PARENTAL_DECODO_BROWSER_ENABLED:-false}
       - PARENTAL_DECODO_BROWSER_HOST=${PARENTAL_DECODO_BROWSER_HOST:-gate.decodo.com}
       - PARENTAL_DECODO_BROWSER_PORT=${PARENTAL_DECODO_BROWSER_PORT:-7000}

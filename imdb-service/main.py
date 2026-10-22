@@ -96,6 +96,10 @@ PARENTAL_PROXY_BAN_TTL_MINUTES = int(os.getenv("PARENTAL_PROXY_BAN_TTL_MINUTES",
 IMDB_WEB_BASE_URL = "https://www.imdb.com"
 IMDB_GRAPHQL_URL = os.getenv("IMDB_GRAPHQL_URL", "https://api.graphql.imdb.com/")
 PARENTAL_GRAPHQL_ENABLED = os.getenv("PARENTAL_GRAPHQL_ENABLED", "true").lower() == "true"
+# Plain-HTTP scrape of the parental guide page. Set false while IMDb's WAF
+# answers every request with a challenge: each attempt spends a proxied page
+# fetch before falling through to GraphQL anyway.
+PARENTAL_HTTP_ENABLED = os.getenv("PARENTAL_HTTP_ENABLED", "true").lower() == "true"
 PARENTAL_GUIDE_LOGGING_ENABLED = (
     os.getenv("PARENTAL_GUIDE_LOGGING_ENABLED", "true").lower() == "true"
 )
@@ -2195,85 +2199,87 @@ async def _fetch_parental_guide_html(imdb_id: str) -> str:
         proxy_count_total=len(PARENTAL_PROXY_URLS),
         proxy_count_healthy=len(healthy_proxies),
         attempts=attempts,
+        http_enabled=PARENTAL_HTTP_ENABLED,
         graphql_enabled=PARENTAL_GRAPHQL_ENABLED,
         decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
     )
 
-    for attempt_index in range(attempts):
-        proxy_url = _choose_parental_proxy(attempted_proxies)
-        if proxy_url:
-            attempted_proxies.add(proxy_url)
-        elif PARENTAL_PROXY_ENABLED and PARENTAL_PROXY_URLS:
-            # All configured proxies are currently on cooldown; log details so the
-            # operator can see why we fell back to direct.
-            now = datetime.now(timezone.utc)
-            cooldowns = {
-                proxy: int(max(0, (proxy_health[proxy] - now).total_seconds()))
-                for proxy in PARENTAL_PROXY_URLS
-                if proxy in proxy_health and proxy_health[proxy] > now
-            }
+    if PARENTAL_HTTP_ENABLED:
+        for attempt_index in range(attempts):
+            proxy_url = _choose_parental_proxy(attempted_proxies)
+            if proxy_url:
+                attempted_proxies.add(proxy_url)
+            elif PARENTAL_PROXY_ENABLED and PARENTAL_PROXY_URLS:
+                # All configured proxies are currently on cooldown; log details so the
+                # operator can see why we fell back to direct.
+                now = datetime.now(timezone.utc)
+                cooldowns = {
+                    proxy: int(max(0, (proxy_health[proxy] - now).total_seconds()))
+                    for proxy in PARENTAL_PROXY_URLS
+                    if proxy in proxy_health and proxy_health[proxy] > now
+                }
+                _parental_log(
+                    "fetch_attempt_no_healthy_proxy",
+                    imdb_id,
+                    attempt=attempt_index + 1,
+                    cooldowns=cooldowns,
+                )
             _parental_log(
-                "fetch_attempt_no_healthy_proxy",
+                "fetch_attempt",
                 imdb_id,
                 attempt=attempt_index + 1,
-                cooldowns=cooldowns,
+                proxy=_proxy_log_label(proxy_url),
             )
-        _parental_log(
-            "fetch_attempt",
-            imdb_id,
-            attempt=attempt_index + 1,
-            proxy=_proxy_log_label(proxy_url),
-        )
-        try:
-            html_text = await _fetch_parental_guide_html_via_http(imdb_id, proxy_url)
-            if _html_has_parental_markers(html_text):
-                await _increment_parental_fetch_success("http")
+            try:
+                html_text = await _fetch_parental_guide_html_via_http(imdb_id, proxy_url)
+                if _html_has_parental_markers(html_text):
+                    await _increment_parental_fetch_success("http")
+                    _parental_log(
+                        "fetch_http_success",
+                        imdb_id,
+                        attempt=attempt_index + 1,
+                        proxy=_proxy_log_label(proxy_url),
+                    )
+                    return html_text
                 _parental_log(
-                    "fetch_http_success",
+                    "fetch_http_missing_markers",
                     imdb_id,
                     attempt=attempt_index + 1,
                     proxy=_proxy_log_label(proxy_url),
                 )
-                return html_text
-            _parental_log(
-                "fetch_http_missing_markers",
-                imdb_id,
-                attempt=attempt_index + 1,
-                proxy=_proxy_log_label(proxy_url),
-            )
-        except HTTPException as e:
-            if e.status_code == 404:
-                raise
-            last_error = e
-            if proxy_url:
-                _mark_proxy_failed(proxy_url)
-            _parental_log(
-                "fetch_http_failed",
-                imdb_id,
-                attempt=attempt_index + 1,
-                proxy=_proxy_log_label(proxy_url),
-                status_code=e.status_code,
-                detail=e.detail,
-            )
-            # Direct HTTP was blocked and we have no proxy/residential-browser bypass
-            # configured. The browser fallback uses the same egress IP, so it will
-            # almost certainly be blocked too. Fail fast instead of spinning.
-            if (
-                e.status_code == 403
-                and proxy_url is None
-                and not PARENTAL_PROXY_ENABLED
-                and not PARENTAL_DECODO_BROWSER_ENABLED
-            ):
+            except HTTPException as e:
+                if e.status_code == 404:
+                    raise
+                last_error = e
+                if proxy_url:
+                    _mark_proxy_failed(proxy_url)
                 _parental_log(
-                    "fetch_direct_blocked_no_bypass",
+                    "fetch_http_failed",
                     imdb_id,
-                    proxy_enabled=PARENTAL_PROXY_ENABLED,
-                    decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
+                    attempt=attempt_index + 1,
+                    proxy=_proxy_log_label(proxy_url),
+                    status_code=e.status_code,
+                    detail=e.detail,
                 )
-                raise HTTPException(
-                    status_code=403,
-                    detail="IMDb blocked the direct parental guide request and no proxy or Decodo browser is configured",
-                )
+                # Direct HTTP was blocked and we have no proxy/residential-browser bypass
+                # configured. The browser fallback uses the same egress IP, so it will
+                # almost certainly be blocked too. Fail fast instead of spinning.
+                if (
+                    e.status_code == 403
+                    and proxy_url is None
+                    and not PARENTAL_PROXY_ENABLED
+                    and not PARENTAL_DECODO_BROWSER_ENABLED
+                ):
+                    _parental_log(
+                        "fetch_direct_blocked_no_bypass",
+                        imdb_id,
+                        proxy_enabled=PARENTAL_PROXY_ENABLED,
+                        decodo_browser=PARENTAL_DECODO_BROWSER_ENABLED,
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail="IMDb blocked the direct parental guide request and no proxy or Decodo browser is configured",
+                    )
 
     # HTTP scraping failed or was blocked. Try IMDb's GraphQL API before the
     # heavier browser fallback. GraphQL is structured, not WAF-gated, and

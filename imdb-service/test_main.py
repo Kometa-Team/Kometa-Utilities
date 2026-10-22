@@ -6037,6 +6037,114 @@ def test_ratings_batch_returns_500_on_db_error(tmp_path, monkeypatch):
     assert "Ratings error" in response.json()["detail"]
 
 
+def test_genre_batch_returns_found_and_not_found(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.post(
+        "/genre",
+        json={"imdb_ids": ["tt0502973", "tt9999999", "TT0111161", "tt0111161"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["field"] == "genres"
+    assert data["requested"] == 3
+    assert data["found"] == 2
+    assert list(data["results"]) == ["tt0502973", "tt0111161"]
+    assert data["not_found"] == ["tt9999999"]
+    assert data["results"]["tt0111161"] == {
+        "tconst": "tt0111161",
+        "primaryTitle": "The Shawshank Redemption",
+        "titleType": "movie",
+        "genres": ["Drama", "Crime", "Thriller"],
+    }
+    # Each entry matches what the single-title endpoint returns.
+    single = client.get("/genre/tt0502973").json()["result"]
+    assert data["results"]["tt0502973"] == single
+
+
+def test_genre_batch_queries_in_chunks(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "_RATINGS_BATCH_SQL_CHUNK", 2)
+    ids = ["tt0000010", "tt0111161", "tt0000011", "tt0096697", "tt0502973"]
+    response = TestClient(main.app).post("/genre", json={"imdb_ids": ids})
+    assert response.status_code == 200
+    data = response.json()
+    assert list(data["results"]) == ["tt0111161", "tt0096697", "tt0502973"]
+    assert data["not_found"] == ["tt0000010", "tt0000011"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"imdb_ids": []},
+        {"imdb_ids": "tt0111161"},
+        {"imdb_ids": ["tt0111161", 42]},
+        {"imdb_ids": ["tt0111161; DROP TABLE title_basics"]},
+    ],
+)
+def test_genre_batch_rejects_bad_payload(tmp_path, monkeypatch, payload):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    response = TestClient(main.app).post("/genre", json=payload)
+    assert response.status_code == 400
+
+
+def test_genre_batch_enforces_max_ids(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "RATINGS_BATCH_MAX", 2)
+    response = TestClient(main.app).post(
+        "/genre", json={"imdb_ids": ["tt0111161", "tt0096697", "tt0502973"]}
+    )
+    assert response.status_code == 400
+    assert "at most 2" in response.json()["detail"]
+
+
+def test_genre_batch_returns_503_when_no_db(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "nonexistent.db")
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post("/genre", json={"imdb_ids": ["tt0111161"]})
+    assert response.status_code == 503
+
+
+def test_genre_batch_returns_500_on_db_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+
+    class BrokenConnection:
+        async def __aenter__(self):
+            raise RuntimeError("db error")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(main.aiosqlite, "connect", lambda *_args, **_kwargs: BrokenConnection())
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post("/genre", json={"imdb_ids": ["tt0111161"]})
+    assert response.status_code == 500
+    assert "Genre error" in response.json()["detail"]
+
+
 def test_parental_log_redacts_proxy_credentials(monkeypatch, capsys):
     import main
 

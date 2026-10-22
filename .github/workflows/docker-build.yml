@@ -8,7 +8,6 @@ on:
       - .github/workflows/docker-build.yml
       - docker-compose.yml
       - anidb-service/**
-      - plex-oauth/**
       - trakt-oauth/**
       - mal-oauth/**
       - simkl-service/**
@@ -90,9 +89,6 @@ jobs:
           - image: imdb-service
             context: ./imdb-service
             file: ./imdb-service/Dockerfile
-          - image: plex-oauth
-            context: ./plex-oauth
-            file: ./plex-oauth/Dockerfile
           - image: mal-oauth
             context: ./mal-oauth
             file: ./mal-oauth/Dockerfile

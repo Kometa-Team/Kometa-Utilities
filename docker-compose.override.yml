@@ -5,12 +5,6 @@ services:
       context: ./anidb-service
       dockerfile: Dockerfile
 
-  plex-oauth:
-    pull_policy: build
-    build:
-      context: ./plex-oauth
-      dockerfile: Dockerfile
-
   trakt-oauth:
     pull_policy: build
     build:

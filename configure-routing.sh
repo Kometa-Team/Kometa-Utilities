@@ -16,9 +16,10 @@ if [ ! -f .env ]; then
 fi
 
 # Create Caddyfile from example if it doesn't exist
-if [ ! -f Caddyfile ] && [ -f Caddyfile.example ]; then
-    echo "📄 Creating Caddyfile from Caddyfile.example..."
-    cp Caddyfile.example Caddyfile
+if [ ! -f caddy/Caddyfile ] && [ -f Caddyfile.example ]; then
+    echo "📄 Creating caddy/Caddyfile from Caddyfile.example..."
+    mkdir -p caddy
+    cp Caddyfile.example caddy/Caddyfile
 fi
 
 echo "Choose routing mode:"
@@ -45,7 +46,7 @@ case $choice in
         fi
 
         # Update Caddyfile
-        cat > Caddyfile <<EOF
+        cat > caddy/Caddyfile <<EOF
 ${DOMAIN} {
     # Handle errors (like when the backend is down)
     handle_errors {
@@ -97,7 +98,7 @@ EOF
         fi
 
         # Update Caddyfile
-        cat > Caddyfile <<EOF
+        cat > caddy/Caddyfile <<EOF
 ${SUBDOMAIN} {
     handle_errors {
         @maintenance expression {err.status_code} in [502, 503, 504]

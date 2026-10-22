@@ -92,7 +92,7 @@ echo "Archiving deployment configuration..."
 config_files=(
     docker-compose.yml
     docker-compose.override.yml
-    Caddyfile
+    caddy/Caddyfile
     clickhouse-logs.xml
     .env
 )

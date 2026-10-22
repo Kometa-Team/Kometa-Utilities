@@ -7,7 +7,6 @@ x-default-logging: &default-logging
     max-file: "5"
 
 services:
-
   floppy:
     container_name: floppy
     # Image defaults to :latest tag (points to stable release branch)
@@ -386,6 +385,9 @@ services:
       - PARENTAL_BROWSER_IDLE_CLOSE_SECONDS=${PARENTAL_BROWSER_IDLE_CLOSE_SECONDS:-1800}
       - PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS=${PARENTAL_BROWSER_REAPER_INTERVAL_SECONDS:-300}
 
+      # Headless-Chromium fallback for parental guides; set false while IMDb's
+      # WAF defeats it, so it stops burning CPU/memory on 120s timeouts.
+      - PARENTAL_BROWSER_ENABLED=${PARENTAL_BROWSER_ENABLED:-true}
       - PARENTAL_DECODO_BROWSER_ENABLED=${PARENTAL_DECODO_BROWSER_ENABLED:-false}
       - PARENTAL_DECODO_BROWSER_HOST=${PARENTAL_DECODO_BROWSER_HOST:-gate.decodo.com}
       - PARENTAL_DECODO_BROWSER_PORT=${PARENTAL_DECODO_BROWSER_PORT:-7000}

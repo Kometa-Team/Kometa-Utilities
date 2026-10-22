@@ -131,6 +131,25 @@ status.{$KOMETA_DOMAIN:kometa.wiki} {
 
 
 utilities.{$KOMETA_DOMAIN:kometa.wiki} {
+    # Access log for /imdb-service only, with real client IPs (added
+    # 2026-10-22 to identify an unexpected ~115 req/s /title crawl). The
+    # admin token header is dropped; Caddy only redacts its built-in list.
+    log {
+        output file /data/access/imdb-service.log {
+            roll_size 50MiB
+            roll_keep 5
+            roll_keep_for 336h
+        }
+        format filter {
+            wrap json
+            fields {
+                request>headers>X-Admin-Token delete
+            }
+        }
+    }
+    @not_imdb_service not path /imdb-service*
+    log_skip @not_imdb_service
+
     # Handle errors (like when the backend is down)
     handle_errors {
         @maintenance expression {err.status_code} in [502, 503, 504]

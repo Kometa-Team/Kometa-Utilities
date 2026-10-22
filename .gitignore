@@ -38,6 +38,13 @@ anidb-service/seed_data/*.xml
 # --- Credentials & Config ---
 # Even though we use Basic Auth in Caddy, don't track private env files.
 .env
+# Backups/variants of env files (e.g. .env.bak-20261022) carry the same secrets.
+.env.*
+!.env.example
+# Ad-hoc backups and DB dumps left in the working tree.
+*.bak-*
+*.nackup
+*_dump.sql
 .venv
 venv/
 .direnv

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, TypedDict, Union, cast
 
 import httpx
+import http_clients
 from http_clients import GRAPHQL_HEADERS
 from importer import SQLITE_BUSY_TIMEOUT_MS
 
@@ -247,6 +248,13 @@ def _extract_graphql_ids(name: str, payload: dict[str, Any]) -> list[str]:
     return []
 
 
+def _new_graphql_client() -> Any:
+    """Return a blocking GraphQL client, proxied when GraphQL proxying is enabled."""
+    if http_clients.graphql_proxy_enabled():
+        return http_clients.ProxiedGraphQLSyncClient()
+    return httpx.Client(timeout=30.0, headers=GRAPHQL_HEADERS)
+
+
 def fetch_graphql_chart_ids(name: str, client: Optional[httpx.Client] = None) -> list[str]:
     """Fetch IMDb IDs for a GraphQL-backed chart.
 
@@ -260,7 +268,7 @@ def fetch_graphql_chart_ids(name: str, client: Optional[httpx.Client] = None) ->
     query = _build_graphql_query(name)
     close_client = client is None
     if client is None:
-        client = httpx.Client(timeout=30.0, headers=GRAPHQL_HEADERS)
+        client = _new_graphql_client()
 
     try:
         response = client.post(
@@ -571,7 +579,7 @@ def _rebuild_all_charts_locked(
     graphql_ids: dict[str, list[str]] = {}
     graphql_times: dict[str, str] = {}
     if fetch_graphql:
-        client = httpx.Client(timeout=30.0, headers=GRAPHQL_HEADERS)
+        client = _new_graphql_client()
         graphql_ids, graphql_times = _get_graphql_chart_ids(graphql_cache_path, client)
 
     try:
@@ -628,7 +636,7 @@ def fetch_imdb_chart_ids(
     Network only -- the dataset DB is not touched -- so this can run while an
     import holds the DB.  Returns the IDs and when IMDb served each chart.
     """
-    client = httpx.Client(timeout=30.0, headers=GRAPHQL_HEADERS)
+    client = _new_graphql_client()
     try:
         return _get_graphql_chart_ids(graphql_cache_path, client, ttl_seconds)
     finally:

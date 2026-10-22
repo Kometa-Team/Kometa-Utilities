@@ -288,13 +288,19 @@ services:
     logging: *default-logging
     container_name: features-fider
     image: getfider/fider:stable
+    # PID 1 must reap orphaned healthcheck processes (see healthcheck below).
+    init: true
     env_file:
       - ./features-fider/.env
     depends_on:
       fider-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "./fider ping"]
+      # Docker abandons a timed-out healthcheck but does not kill it; a hung
+      # `fider ping` (e.g. when the DB pool wedges) lingers with ~9 threads
+      # and enough of them exhaust the pids limit, wedging the whole container
+      # (2026-10-21 outage). `timeout` kills the ping before Docker gives up.
+      test: ["CMD-SHELL", "timeout 4 ./fider ping"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -304,7 +310,8 @@ services:
         limits:
           cpus: "0.50"
           memory: 512M
-          pids: 128
+          # Go runtime threads count against this; 128 left little headroom.
+          pids: 512
         reservations:
           memory: 128M
 

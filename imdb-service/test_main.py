@@ -82,6 +82,12 @@ def test_create_schema_creates_all_tables():
             "title_principals",
             "name_basics",
             "import_meta",
+            # Title search index and its FTS5 shadow tables.
+            "title_basics_fts",
+            "title_basics_fts_config",
+            "title_basics_fts_data",
+            "title_basics_fts_docsize",
+            "title_basics_fts_idx",
         }
         conn.close()
     finally:
@@ -630,6 +636,76 @@ def test_run_direct_import_produces_populated_db(tmp_path):
     row = conn.execute("SELECT value FROM import_meta WHERE key='last_refresh'").fetchone()
     assert row is not None
     conn.close()
+
+
+def _title_fts_matches(db_path, pattern):
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT tb.tconst FROM title_basics tb WHERE tb.rowid IN "
+        "(SELECT rowid FROM title_basics_fts WHERE primaryTitle LIKE ?) ORDER BY tb.tconst",
+        (pattern,),
+    ).fetchall()
+    ready = conn.execute(
+        "SELECT value FROM import_meta WHERE key = 'title_fts_ready'"
+    ).fetchone()
+    conn.close()
+    return [r[0] for r in rows], ready[0] if ready else None
+
+
+def test_run_direct_import_builds_title_index(tmp_path):
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
+
+    matches, ready = _title_fts_matches(live_db, "%title 3%")
+    assert matches == ["tt0000003"]
+    assert ready is not None
+
+
+def test_run_direct_import_rebuilds_title_index_only_with_basics(tmp_path):
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
+    _, first_ready = _title_fts_matches(live_db, "%title%")
+
+    _import_and_publish(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
+    _, after_ratings = _title_fts_matches(live_db, "%title%")
+    assert after_ratings == first_ready
+
+    # Reloading basics renumbers rowids; a stale index would return wrong rows.
+    (tmp_path / "gz" / "title.basics.tsv.gz").write_bytes(
+        _make_tsv_gz(
+            "tconst\ttitleType\tprimaryTitle\toriginalTitle\tisAdult\tstartYear\tendYear\truntimeMinutes\tgenres",
+            [
+                f"tt{i:07d}\tmovie\tRenamed {i}\tRenamed {i}\t0\t2000\t\\N\t90\tAction"
+                for i in range(5, 0, -1)
+            ],
+        )
+    )
+    _import_and_publish(gz_paths, live_db, changed_stems=["title.basics"], min_rows_override=0)
+    matches, after_basics = _title_fts_matches(live_db, "%renamed 2%")
+    assert matches == ["tt0000002"]
+    assert _title_fts_matches(live_db, "%title%")[0] == []
+    assert after_basics != first_ready
+
+
+def test_run_direct_import_builds_missing_title_index_on_any_import(tmp_path):
+    gz_paths = _make_all_gz_files(tmp_path)
+    live_db = tmp_path / "imdb.db"
+    _import_and_publish(gz_paths, live_db, min_rows_override=0)
+    # Simulate a DB from before the index existed.
+    conn = sqlite3.connect(live_db)
+    conn.execute("DELETE FROM import_meta WHERE key = 'title_fts_ready'")
+    conn.execute("INSERT INTO title_basics_fts(title_basics_fts) VALUES ('delete-all')")
+    conn.commit()
+    conn.close()
+
+    _import_and_publish(gz_paths, live_db, changed_stems=["title.ratings"], min_rows_override=0)
+
+    matches, ready = _title_fts_matches(live_db, "%title 4%")
+    assert matches == ["tt0000004"]
+    assert ready is not None
 
 
 def test_run_direct_import_updates_only_changed_tables(tmp_path):
@@ -4077,6 +4153,89 @@ def test_search_filter_title(tmp_path, monkeypatch):
     assert "tt0000002" not in data["results"]
 
 
+def _build_title_fts(db_path):
+    """Build the title search index the way an import does."""
+    from importer import _rebuild_title_fts
+
+    conn = sqlite3.connect(db_path)
+    _rebuild_title_fts(conn)
+    conn.commit()
+    conn.close()
+
+
+def _spy_title_fts(monkeypatch, main):
+    """Record what _title_fts_is_selective decided for each search."""
+    decisions = []
+    original = main._title_fts_is_selective
+
+    async def spy(pattern):
+        decision = await original(pattern)
+        decisions.append(decision)
+        return decision
+
+    monkeypatch.setattr(main, "_title_fts_is_selective", spy)
+    return decisions
+
+
+def test_search_title_uses_index_when_built(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    _build_title_fts(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    decisions = _spy_title_fts(monkeypatch, main)
+    client = TestClient(main.app)
+    response = client.get("/search?title=film")
+    assert response.status_code == 200
+    # Case-insensitive substring match, rated-only, highest rating first.
+    assert response.json()["results"] == ["tt0000001", "tt0000002", "tt0000004"]
+    assert decisions == [True]
+
+
+def test_search_title_falls_back_to_like_before_index_is_built(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    decisions = _spy_title_fts(monkeypatch, main)
+    client = TestClient(main.app)
+    response = client.get("/search?title=film")
+    assert response.status_code == 200
+    assert response.json()["results"] == ["tt0000001", "tt0000002", "tt0000004"]
+    assert decisions == [False]
+
+
+def test_search_title_falls_back_to_like_when_too_unselective(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    _build_title_fts(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(main, "TITLE_FTS_MAX_CANDIDATES", 2)
+    decisions = _spy_title_fts(monkeypatch, main)
+    client = TestClient(main.app)
+    response = client.get("/search?title=film")
+    assert response.status_code == 200
+    assert response.json()["results"] == ["tt0000001", "tt0000002", "tt0000004"]
+    assert decisions == [False]
+
+
+def test_search_title_via_index_with_non_rating_sort(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    _build_title_fts(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    client = TestClient(main.app)
+    response = client.get("/search?title=Film&sort_by=year.asc")
+    assert response.status_code == 200
+    assert response.json()["results"] == ["tt0000001", "tt0000002", "tt0000004"]
+
+
 def test_search_invalid_sort_by_returns_400(tmp_path, monkeypatch):
     db_path = tmp_path / "imdb.db"
     _seed_search_db(db_path)
@@ -5876,3 +6035,27 @@ def test_ratings_batch_returns_500_on_db_error(tmp_path, monkeypatch):
     response = client.post("/ratings", json={"imdb_ids": ["tt0111161"]})
     assert response.status_code == 500
     assert "Ratings error" in response.json()["detail"]
+
+
+def test_parental_log_redacts_proxy_credentials(monkeypatch, capsys):
+    import main
+
+    monkeypatch.setattr(main, "PARENTAL_GUIDE_LOGGING_ENABLED", True)
+    main._parental_log(
+        "browser_context_ready",
+        context_key="http://someuser:s3cret+pw@gate.example.com:10001",
+        error="ProxyError('https://u:p@proxy.example.com:8080 refused')",
+    )
+    out = capsys.readouterr().out
+    assert "s3cret" not in out and "someuser" not in out and "u:p@" not in out
+    assert "context_key=http://***@gate.example.com:10001" in out
+    assert "https://***@proxy.example.com:8080" in out
+
+
+def test_invalid_proxy_url_error_does_not_echo_url(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "PARENTAL_DECODO_BROWSER_ENABLED", False)
+    with pytest.raises(main.HTTPException) as exc_info:
+        main._playwright_proxy_identity("someuser:s3cret@gate.example.com:10001")
+    assert "s3cret" not in exc_info.value.detail

@@ -29,14 +29,15 @@ nano .env
 
 ### 2. Update Domain
 
-Copy and edit `Caddyfile`:
+Copy and edit `caddy/Caddyfile` (the `caddy/` directory is mounted at `/etc/caddy`):
 
 ```bash
 # Copy example configuration
-cp Caddyfile.example Caddyfile
+mkdir -p caddy
+cp Caddyfile.example caddy/Caddyfile
 
 # Edit with your domain
-nano Caddyfile
+nano caddy/Caddyfile
 # Change: yourdomain.com
 # To: your-actual-domain.com
 ```

@@ -442,7 +442,10 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
+      # Mount the directory, not the file: a single-file bind mount pins the
+      # original inode, so after `git pull` replaces the Caddyfile the
+      # container keeps reading the old one and `caddy reload` is a no-op.
+      - ./caddy:/etc/caddy
       - ./index.html:/var/www/html/index.html
       - ./maintenance.html:/var/www/html/maintenance.html
       - ./floppy-maintenance.html:/var/www/html/floppy-maintenance.html

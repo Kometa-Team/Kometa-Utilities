@@ -4265,8 +4265,10 @@ async def _extract_batch(payload: Dict[str, Any], field: str) -> Dict[str, Any]:
     Takes ``{"imdb_ids": [...]}`` with up to RATINGS_BATCH_MAX IDs.  ``results``
     is keyed by IMDb ID and each value has the same shape as ``result`` from
     the matching single-title GET endpoint.  IDs with no matching title are
-    listed in ``not_found`` rather than failing the request; a malformed ID
-    fails the whole request with 400.
+    listed in ``not_found`` and malformed ones (e.g. ``t16311056``) in
+    ``invalid``, as sent, rather than failing the request: one bad ID in a
+    client's library must not cost it the other 999 lookups.  Only a malformed
+    payload (not a list of strings, empty, or over the limit) is a 400.
     """
     if not _db_is_ready():
         raise HTTPException(status_code=503, detail="Service initializing")
@@ -4284,8 +4286,15 @@ async def _extract_batch(payload: Dict[str, Any], field: str) -> Dict[str, Any]:
     if not all(isinstance(raw_id, str) for raw_id in raw_ids):
         raise HTTPException(status_code=400, detail="'imdb_ids' must contain only strings")
 
-    # Normalize and de-duplicate, keeping the caller's order.
-    imdb_ids = list(dict.fromkeys(_validate_imdb_id(raw_id) for raw_id in raw_ids))
+    # Normalize and de-duplicate, keeping the caller's order; set aside bad IDs.
+    imdb_ids: list[str] = []
+    invalid: list[str] = []
+    for raw_id in dict.fromkeys(raw_ids):
+        try:
+            imdb_ids.append(_validate_imdb_id(raw_id))
+        except HTTPException:
+            invalid.append(raw_id)
+    imdb_ids = list(dict.fromkeys(imdb_ids))
 
     select_cols = EXTRACT_FIELD_SELECTS[field]
     results: Dict[str, Any] = {}
@@ -4314,6 +4323,7 @@ async def _extract_batch(payload: Dict[str, Any], field: str) -> Dict[str, Any]:
         "found": len(results),
         "results": {imdb_id: results[imdb_id] for imdb_id in imdb_ids if imdb_id in results},
         "not_found": [imdb_id for imdb_id in imdb_ids if imdb_id not in results],
+        "invalid": invalid,
     }
 
 

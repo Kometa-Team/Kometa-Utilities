@@ -6035,8 +6035,6 @@ def test_ratings_batch_queries_in_chunks(tmp_path, monkeypatch):
         {"imdb_ids": []},
         {"imdb_ids": "tt0111161"},
         {"imdb_ids": ["tt0111161", 42]},
-        {"imdb_ids": ["tt0111161", "nm0000209"]},
-        {"imdb_ids": ["tt0111161; DROP TABLE title_basics"]},
     ],
 )
 def test_ratings_batch_rejects_bad_payload(tmp_path, monkeypatch, payload):
@@ -6047,6 +6045,42 @@ def test_ratings_batch_rejects_bad_payload(tmp_path, monkeypatch, payload):
     monkeypatch.setattr(main, "DB_PATH", db_path)
     response = TestClient(main.app).post("/ratings", json=payload)
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("endpoint, field", [("/ratings", "ratings"), ("/genre", "genres")])
+def test_batch_skips_malformed_ids_instead_of_failing(tmp_path, monkeypatch, endpoint, field):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    bad = ["t16311056", "nm0000209", "tt0111161; DROP TABLE title_basics"]
+    response = TestClient(main.app).post(
+        endpoint, json={"imdb_ids": ["tt0111161", bad[0], "tt9999999", bad[1], bad[2], bad[0]]}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["field"] == field
+    # The valid IDs are still answered; bad ones come back once each, as sent.
+    assert list(data["results"]) == ["tt0111161"]
+    assert data["not_found"] == ["tt9999999"]
+    assert data["invalid"] == bad
+    assert data["requested"] == 2
+
+
+def test_batch_with_only_malformed_ids_returns_empty_results(tmp_path, monkeypatch):
+    db_path = tmp_path / "imdb.db"
+    _seed_full_test_db(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    response = TestClient(main.app).post("/ratings", json={"imdb_ids": ["t16311056"]})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["results"] == {}
+    assert data["not_found"] == []
+    assert data["invalid"] == ["t16311056"]
+    assert data["requested"] == 0
 
 
 def test_ratings_batch_enforces_max_ids(tmp_path, monkeypatch):
@@ -6145,7 +6179,6 @@ def test_genre_batch_queries_in_chunks(tmp_path, monkeypatch):
         {"imdb_ids": []},
         {"imdb_ids": "tt0111161"},
         {"imdb_ids": ["tt0111161", 42]},
-        {"imdb_ids": ["tt0111161; DROP TABLE title_basics"]},
     ],
 )
 def test_genre_batch_rejects_bad_payload(tmp_path, monkeypatch, payload):

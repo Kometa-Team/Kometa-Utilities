@@ -2907,8 +2907,18 @@ async def search_advanced(payload: Dict[str, Any]) -> Dict[str, Any]:
 TITLE_FTS_MAX_CANDIDATES = int(os.getenv("TITLE_FTS_MAX_CANDIDATES", "50000"))
 
 
-async def _title_fts_is_selective(title_pattern: str) -> bool:
-    """Whether the title index is built and narrows this LIKE pattern enough to drive a search."""
+async def _title_fts_is_selective(title: str) -> bool:
+    """Whether the title index is built and narrows this title enough to drive a search.
+
+    Counts candidates with an FTS phrase MATCH, which reads only the index. A
+    LIKE probe would re-check every candidate against title_basics, costing up
+    to TITLE_FTS_MAX_CANDIDATES random reads (~7 s for "love" on the live DB).
+    Trigram phrases need 3+ characters and have no LIKE wildcards, so titles
+    shorter than that or containing % or _ keep the plain LIKE scan.
+    """
+    if len(title) < 3 or "%" in title or "_" in title:
+        return False
+    phrase = '"' + title.replace('"', '""') + '"'
     try:
         async with _db_connect() as db:
             cursor = await db.execute(
@@ -2918,8 +2928,8 @@ async def _title_fts_is_selective(title_pattern: str) -> bool:
                 return False
             cursor = await db.execute(
                 "SELECT count(*) FROM ("
-                "SELECT 1 FROM title_basics_fts WHERE primaryTitle LIKE ? LIMIT ?)",
-                (title_pattern, TITLE_FTS_MAX_CANDIDATES + 1),
+                "SELECT 1 FROM title_basics_fts WHERE title_basics_fts MATCH ? LIMIT ?)",
+                (phrase, TITLE_FTS_MAX_CANDIDATES + 1),
             )
             row = await cursor.fetchone()
     except aiosqlite.Error:
@@ -3079,7 +3089,7 @@ async def search(
         params.append(_year_from(release_before))
 
     title_pattern = f"%{title}%" if title else None
-    title_via_fts = title_pattern is not None and await _title_fts_is_selective(title_pattern)
+    title_via_fts = bool(title) and await _title_fts_is_selective(title or "")
     if title_pattern is not None:
         if title_via_fts:
             conditions.append(

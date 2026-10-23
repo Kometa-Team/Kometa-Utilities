@@ -4256,6 +4256,30 @@ def test_search_title_falls_back_to_like_when_too_unselective(tmp_path, monkeypa
     assert decisions == [False]
 
 
+@pytest.mark.parametrize(
+    "title, expected, via_index",
+    [
+        ("fi", ["tt0000001", "tt0000002", "tt0000004"], False),  # too short for a trigram
+        ("F_lm", ["tt0000001", "tt0000002", "tt0000004"], False),  # LIKE wildcard kept
+        ('Film"', [], True),  # a quote is escaped, not FTS phrase syntax
+    ],
+)
+def test_search_title_probe_skips_or_survives_awkward_titles(
+    tmp_path, monkeypatch, title, expected, via_index
+):
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    _build_title_fts(db_path)
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    decisions = _spy_title_fts(monkeypatch, main)
+    response = TestClient(main.app).get("/search", params={"title": title})
+    assert response.status_code == 200
+    assert response.json()["results"] == expected
+    assert decisions == [via_index]
+
+
 def test_search_title_via_index_with_non_rating_sort(tmp_path, monkeypatch):
     db_path = tmp_path / "imdb.db"
     _seed_search_db(db_path)

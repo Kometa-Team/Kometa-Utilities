@@ -1,0 +1,5 @@
+# /imdb-service upstream variant: LOCAL. The imdb-service container on this
+# box (the pre-trial setup, and the rollback target).
+reverse_proxy imdb-service:8000 {
+	header_up X-Script-Name /imdb-service
+}

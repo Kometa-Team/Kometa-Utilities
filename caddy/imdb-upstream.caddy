@@ -1,0 +1,7 @@
+# Active /imdb-service upstream (imported by caddy/Caddyfile). Swap with a
+# variant from deploy/oracle-imdb/caddy/ and `caddy reload` to switch.
+#
+# Current: the local imdb-service container.
+reverse_proxy imdb-service:8000 {
+	header_up X-Script-Name /imdb-service
+}

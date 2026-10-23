@@ -1,0 +1,6 @@
+# /imdb-service upstream variant: CUTOVER. Oracle VM only; use once the local
+# imdb-service container is stopped. Replace ORACLE_VM_TAILNET_IP with the
+# VM's Tailscale address (100.x.y.z).
+reverse_proxy ORACLE_VM_TAILNET_IP:8000 {
+	header_up X-Script-Name /imdb-service
+}

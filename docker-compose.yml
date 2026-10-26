@@ -90,7 +90,7 @@ services:
       - --purge-interval
       - "1"
       - --rate-limit
-      - "60"
+      - "180"
 #      - --web-path
 #      - /web/
     restart: unless-stopped

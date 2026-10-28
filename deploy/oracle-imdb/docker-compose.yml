@@ -1,0 +1,54 @@
+# imdb-service on an Oracle Cloud Always Free Ampere A1 VM (2 OCPU / 12 GB).
+# See README.md in this directory for VM setup, the trial, cutover and rollback.
+#
+# Usage on the VM:  cp .env.example .env && edit && docker compose up -d
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  imdb-service:
+    # Multi-arch (amd64 + arm64) since the CI build added linux/arm64.
+    image: ghcr.io/kometa-team/imdb-service:latest
+    container_name: imdb-service
+    restart: unless-stopped
+    # PID 1 must reap Chromium/Playwright children (see the main compose file).
+    init: true
+    logging: *default-logging
+    env_file:
+      - .env
+    environment:
+      - ROOT_PATH=/imdb-service
+      - REFRESH_HOUR=3
+      - DATA_DIR=/app/data
+      - TMP_DIR=/app/data
+      - SQLITE_TMPDIR=/app/data
+      - MIN_VOTES_CHART=25000
+      # 12 GB host: give the import connection a bigger page cache than the
+      # 256 MB used on the shared box.
+      - IMPORT_CACHE_MB=${IMPORT_CACHE_MB:-1024}
+    volumes:
+      # The block volume, mounted on the host (see README "Block volume").
+      - ${IMDB_DATA_DIR:-/mnt/imdb-data}:/app/data
+    ports:
+      # Only on the Tailscale interface; nothing is exposed publicly.
+      - "${BIND_ADDR:?set BIND_ADDR to the VM's Tailscale IP}:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # A first start with no database runs a full import (hours) before ready.
+      start_period: 8h
+    deploy:
+      resources:
+        limits:
+          # Both Always Free OCPUs (same CPU budget it has on the shared box).
+          cpus: "2.0"
+          # Leave ~3 GB of the 12 GB for the OS page cache, which SQLite reads
+          # through; that cache is the main gain over the shared box.
+          memory: 9G
+          pids: 2048

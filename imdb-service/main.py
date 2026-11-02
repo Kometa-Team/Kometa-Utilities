@@ -1493,6 +1493,14 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(httpx.HTTPError)
+async def imdb_upstream_error(request: Request, error: httpx.HTTPError) -> JSONResponse:
+    """Report an upstream IMDb failure no route handled itself as a 502, not a 500."""
+    detail = f"IMDb request failed: {http_clients.describe_error(error)}"
+    print(f"⚠️  {request.url.path}: {detail}")
+    return JSONResponse({"detail": detail}, status_code=502)
+
+
 @app.get("/health/live")
 async def health_live() -> Dict[str, str]:
     """Return process liveness without touching storage or upstream services."""
@@ -1963,7 +1971,8 @@ async def _fetch_parental_guide_via_graphql(imdb_id: str) -> str:
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
         raise HTTPException(
-            status_code=502, detail=f"IMDb GraphQL parental guide request failed: {e}"
+            status_code=502,
+            detail=f"IMDb GraphQL parental guide request failed: {http_clients.describe_error(e)}",
         )
 
     title = (data.get("data") or {}).get("title") or {}
@@ -2517,7 +2526,8 @@ async def _fetch_keywords_via_graphql(imdb_id: str) -> Dict[str, list[int]]:
         ) from e
     except httpx.HTTPError as e:
         raise HTTPException(
-            status_code=502, detail=f"IMDb GraphQL keywords request failed: {e}"
+            status_code=502,
+            detail=f"IMDb GraphQL keywords request failed: {http_clients.describe_error(e)}",
         ) from e
 
     return keywords
@@ -2892,7 +2902,9 @@ async def search_advanced(payload: Dict[str, Any]) -> Dict[str, Any]:
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"IMDb GraphQL request failed: {e}")
+        detail = f"IMDb GraphQL request failed: {http_clients.describe_error(e)}"
+        print(f"⚠️  /search/advanced: {detail}")
+        raise HTTPException(status_code=502, detail=detail)
 
     return {
         "results": ids,
@@ -4644,7 +4656,10 @@ async def _fetch_interests_via_graphql(imdb_id: str) -> list[Dict[str, str]]:
         return interests_list
 
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"IMDb GraphQL interests request failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"IMDb GraphQL interests request failed: {http_clients.describe_error(e)}",
+        )
 
 
 @app.get("/interests/{imdb_id}")

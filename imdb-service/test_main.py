@@ -5084,6 +5084,42 @@ def test_search_advanced_surfaces_graphql_error(tmp_path, monkeypatch):
     assert "boom" in response.json()["detail"]
 
 
+def test_search_advanced_names_transport_errors_with_no_message(tmp_path, monkeypatch):
+    """An httpx error with an empty message still says what went wrong."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import httpx
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_search_ids", AsyncMock(side_effect=httpx.PoolTimeout(""))
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/search/advanced", json={"constraints": {"keywordConstraint": {"allKeywords": ["a"]}}}
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "IMDb GraphQL request failed: PoolTimeout"
+
+
+def test_unhandled_upstream_error_is_a_502_not_a_500(tmp_path, monkeypatch):
+    """Routes that don't catch httpx errors themselves still report them as upstream failures."""
+    db_path = tmp_path / "imdb.db"
+    _seed_search_db(db_path)
+    import httpx
+    import main
+
+    monkeypatch.setattr(main, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        main.constraints, "get_constraint_ids", AsyncMock(side_effect=httpx.PoolTimeout(""))
+    )
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.get("/search?keyword=prison")
+    assert response.status_code == 502
+    assert response.json()["detail"] == "IMDb request failed: PoolTimeout"
+
+
 @pytest.mark.asyncio
 async def test_refresh_scheduler_calls_pipeline_at_correct_time():
     """Scheduler sleeps until REFRESH_HOUR, then calls _run_import_pipeline."""

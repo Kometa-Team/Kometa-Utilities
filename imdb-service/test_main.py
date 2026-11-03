@@ -5089,6 +5089,7 @@ def test_search_advanced_names_transport_errors_with_no_message(tmp_path, monkey
     db_path = tmp_path / "imdb.db"
     _seed_search_db(db_path)
     import httpx
+
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)
@@ -5108,6 +5109,7 @@ def test_unhandled_upstream_error_is_a_502_not_a_500(tmp_path, monkeypatch):
     db_path = tmp_path / "imdb.db"
     _seed_search_db(db_path)
     import httpx
+
     import main
 
     monkeypatch.setattr(main, "DB_PATH", db_path)

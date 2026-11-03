@@ -1186,18 +1186,27 @@ def test_load_chart_cache_returns_false_for_missing_file(tmp_path):
     assert loaded is False
 
 
+def _seed_cache_freshness_files(tmp_path, refresh_offset: timedelta):
+    """Write a chart cache and a DB refreshed ``refresh_offset`` after the cache's mtime."""
+    db_path = tmp_path / "imdb.db"
+    cache_path = tmp_path / "chart_cache.json"
+    cache_path.write_text("cache")
+    cache_time = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=timezone.utc)
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE import_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "INSERT INTO import_meta VALUES ('last_refresh', ?)",
+        ((cache_time + refresh_offset).isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+    return cache_path, db_path
+
+
 def test_cache_is_fresh_when_cache_newer_than_db(tmp_path):
     import charts
 
-    db_path = tmp_path / "imdb.db"
-    cache_path = tmp_path / "chart_cache.json"
-    db_path.write_text("db")
-    cache_path.write_text("cache")
-    # Ensure cache mtime is strictly after DB mtime.
-    import time
-
-    time.sleep(0.01)
-    cache_path.touch()
+    cache_path, db_path = _seed_cache_freshness_files(tmp_path, timedelta(hours=-1))
 
     assert charts._cache_is_fresh(cache_path, db_path) is True
 
@@ -1205,13 +1214,7 @@ def test_cache_is_fresh_when_cache_newer_than_db(tmp_path):
 def test_cache_is_stale_when_db_newer_than_cache(tmp_path):
     import charts
 
-    db_path = tmp_path / "imdb.db"
-    cache_path = tmp_path / "chart_cache.json"
-    cache_path.write_text("cache")
-    import time
-
-    time.sleep(0.01)
-    db_path.write_text("db")
+    cache_path, db_path = _seed_cache_freshness_files(tmp_path, timedelta(hours=1))
 
     assert charts._cache_is_fresh(cache_path, db_path) is False
 

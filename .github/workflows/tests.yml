@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12"]
-        service: ["anidb-service", "plex-oauth", "trakt-oauth", "mal-oauth", "simkl-service"]
+        service: ["anidb-service", "plex-oauth", "trakt-oauth", "mal-oauth", "simkl-service", "imdb-service"]
 
     steps:
     - uses: actions/checkout@v6
@@ -27,7 +27,7 @@ jobs:
       uses: actions/cache@v6.1.0
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('anidb-service/requirements-dev.txt', 'plex-oauth/requirements.txt', 'trakt-oauth/requirements.txt', 'mal-oauth/requirements.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('anidb-service/requirements-dev.txt', 'plex-oauth/requirements.txt', 'trakt-oauth/requirements.txt', 'mal-oauth/requirements.txt', 'imdb-service/requirements.txt', 'imdb-service/requirements-dev.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
@@ -50,6 +50,13 @@ jobs:
             ;;
           simkl-service)
             pip install -r simkl-service/requirements.txt
+            ;;
+          imdb-service)
+            pip install -r imdb-service/requirements.txt -r imdb-service/requirements-dev.txt
+            # The default, /app/data, only exists in the container. Set here because
+            # other services in this matrix read DATA_DIR too.
+            mkdir -p /tmp/test_imdb/data
+            echo "DATA_DIR=/tmp/test_imdb/data" >> "$GITHUB_ENV"
             ;;
           *)
             echo "Unknown service ${{ matrix.service }}, skipping service-specific dependencies"

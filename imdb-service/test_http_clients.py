@@ -1,5 +1,7 @@
 """Tests for lifespan-managed IMDb HTTP clients."""
 
+import asyncio
+import ssl
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import http_clients
@@ -140,6 +142,83 @@ async def test_proxied_graphql_goes_direct_when_all_proxies_cooling(monkeypatch,
 
     assert response.status_code == 200
     assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_proxied_graphql_replaces_client_after_pool_timeout(monkeypatch, graphql_proxies):
+    monkeypatch.setattr(http_clients.secrets, "choice", lambda seq: seq[0])
+    monkeypatch.setattr(http_clients, "RETIRED_CLIENT_CLOSE_DELAY_SECONDS", 0)
+    wedged = MagicMock(aclose=AsyncMock())
+    wedged.post = AsyncMock(side_effect=http_clients.httpx.PoolTimeout(""))
+    healthy = MagicMock(aclose=AsyncMock())
+    healthy.post = AsyncMock(return_value=_response(200))
+    replacement = MagicMock(aclose=AsyncMock())
+    replacement.post = AsyncMock(return_value=_response(200))
+
+    with patch(
+        "http_clients.httpx.AsyncClient", side_effect=[wedged, healthy, replacement]
+    ) as constructor:
+        response = await http_clients.ProxiedGraphQLClient().post("u", json={})
+        assert response.status_code == 200
+        # A full pool is our problem, not the proxy's: p1 stays available on a new client.
+        assert http_clients._graphql_proxy_cooldown == {}
+        await http_clients.ProxiedGraphQLClient().post("u", json={})
+        replacement.post.assert_awaited_once()
+        assert constructor.call_count == 3
+        await asyncio.sleep(0.01)
+        wedged.aclose.assert_awaited_once()
+        await http_clients.close_clients()
+
+    wedged.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retired_client_stays_open_for_running_requests():
+    client = MagicMock(aclose=AsyncMock())
+
+    with patch("http_clients.httpx.AsyncClient", return_value=client):
+        http_clients._retire_client(
+            "graphql", "http://p1", http_clients._get_client("graphql", "http://p1")
+        )
+        await asyncio.sleep(0.01)
+        client.aclose.assert_not_awaited()
+        # Shutdown does not wait out the delay.
+        await http_clients.close_clients()
+
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retire_ignores_stale_client_and_keeps_replacement():
+    stale = MagicMock(aclose=AsyncMock())
+    current = MagicMock(aclose=AsyncMock())
+
+    with patch("http_clients.httpx.AsyncClient", return_value=current):
+        assert http_clients._get_client("graphql", "http://p1") is current
+        http_clients._retire_client("graphql", "http://p1", stale)
+        assert http_clients._get_client("graphql", "http://p1") is current
+        await http_clients.close_clients()
+
+    stale.aclose.assert_not_awaited()
+    current.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_proxied_graphql_surfaces_ssl_error_as_httpx_error(monkeypatch, graphql_proxies):
+    error = ssl.SSLError("record layer failure")
+    _fake_async_clients(monkeypatch, {"http://p1": error, "http://p2": error})
+
+    with pytest.raises(http_clients.httpx.HTTPError):
+        await http_clients.ProxiedGraphQLClient().post("u", json={})
+
+    assert set(http_clients._graphql_proxy_cooldown) == set(graphql_proxies)
+
+
+def test_describe_error_names_exceptions_with_empty_messages():
+    assert http_clients.describe_error(http_clients.httpx.PoolTimeout("")) == "PoolTimeout"
+    assert (
+        http_clients.describe_error(http_clients.httpx.ConnectError("down")) == "ConnectError: down"
+    )
 
 
 def test_proxied_graphql_sync_retries_and_closes(monkeypatch, graphql_proxies):

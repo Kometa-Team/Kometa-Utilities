@@ -3,6 +3,7 @@
 import asyncio
 import os
 import secrets
+import ssl
 import time
 from typing import Any, Optional
 from weakref import WeakKeyDictionary
@@ -36,6 +37,10 @@ GRAPHQL_PROXY_COOLDOWN_SECONDS = int(os.getenv("IMDB_GRAPHQL_PROXY_COOLDOWN_SECO
 # Statuses that say "this exit IP is refused or struggling", not "bad query".
 _GRAPHQL_PROXY_RETRY_STATUSES = {403, 407, 429}
 
+# How long a replaced client stays open so requests already running on it can
+# finish. Comfortably longer than one request's 30 s per-phase timeouts.
+RETIRED_CLIENT_CLOSE_DELAY_SECONDS = 120.0
+
 # proxy URL -> time.monotonic() until which it is skipped
 _graphql_proxy_cooldown: dict[str, float] = {}
 
@@ -63,6 +68,12 @@ def _should_retry_graphql(response: httpx.Response) -> bool:
     return response.status_code in _GRAPHQL_PROXY_RETRY_STATUSES or response.status_code >= 500
 
 
+def describe_error(error: Exception) -> str:
+    """Name an exception for logs and responses; many httpx errors have an empty str()."""
+    message = str(error)
+    return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
 class ProxiedGraphQLClient:
     """Async stand-in for the GraphQL client that sends each post through a proxy.
 
@@ -80,10 +91,23 @@ class ProxiedGraphQLClient:
             if proxy is None:
                 break
             tried.add(proxy)
+            client = _get_client("graphql", proxy)
             try:
-                response = await _get_client("graphql", proxy).post(url, **kwargs)
+                response = await client.post(url, **kwargs)
+            except httpx.PoolTimeout as e:
+                # Our pool is full, which says nothing about the proxy, so it is
+                # not benched. httpcore 1.0.9 never frees a slot when TLS fails
+                # inside a proxy tunnel, so a full pool may never drain by itself.
+                error = e
+                _retire_client("graphql", proxy, client)
+                continue
             except httpx.TransportError as e:
                 error = e
+                _mark_graphql_proxy_failed(proxy)
+                continue
+            except ssl.SSLError as e:
+                # httpcore lets these through unmapped, past callers' httpx.HTTPError handling.
+                error = httpx.ReadError(str(e))
                 _mark_graphql_proxy_failed(proxy)
                 continue
             if not _should_retry_graphql(response):
@@ -146,6 +170,9 @@ class ProxiedGraphQLSyncClient:
 _pools: WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[tuple[str, Optional[str]], httpx.AsyncClient]
 ] = WeakKeyDictionary()
+_retiring: WeakKeyDictionary[asyncio.AbstractEventLoop, set[asyncio.Task[None]]] = (
+    WeakKeyDictionary()
+)
 
 
 def get_graphql_client() -> Any:
@@ -203,9 +230,39 @@ def _get_client(kind: str, proxy_url: Optional[str] = None) -> httpx.AsyncClient
     return client
 
 
+async def _close_after_delay(client: httpx.AsyncClient) -> None:
+    try:
+        await asyncio.sleep(RETIRED_CLIENT_CLOSE_DELAY_SECONDS)
+    finally:
+        await client.aclose()
+
+
+def _retire_client(kind: str, proxy_url: Optional[str], client: httpx.AsyncClient) -> None:
+    """Replace a client for future requests, closing it once running requests have finished.
+
+    Requests waiting on the same full pool all land here, so this only acts if
+    ``client`` is still the current one and leaves any replacement alone.
+    """
+    loop = asyncio.get_running_loop()
+    pool = _pools.get(loop, {})
+    key = (kind, proxy_url)
+    if pool.get(key) is not client:
+        return
+    del pool[key]
+    tasks = _retiring.setdefault(loop, set())
+    task = loop.create_task(_close_after_delay(client))
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
 async def close_clients() -> None:
     """Close all clients owned by the current event loop."""
     loop = asyncio.get_running_loop()
+    retiring = _retiring.pop(loop, set())
+    for task in retiring:
+        task.cancel()
+    if retiring:
+        await asyncio.gather(*retiring, return_exceptions=True)
     pool = _pools.pop(loop, {})
     if pool:
         await asyncio.gather(*(client.aclose() for client in pool.values()))

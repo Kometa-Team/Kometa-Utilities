@@ -353,9 +353,10 @@ utilities.{$KOMETA_DOMAIN:kometa.wiki} {
     # FastAPI receives /stats instead of /imdb-service/stats
     handle /imdb-service* {
         uri strip_prefix /imdb-service
-        reverse_proxy imdb-service:8000 {
-            header_up X-Script-Name /imdb-service
-        }
+        # Upstream lives in its own file so it can be switched (local container,
+        # Oracle VM with local fallback, Oracle only) with a `caddy reload`.
+        # Variants: deploy/oracle-imdb/caddy/. See deploy/oracle-imdb/README.md.
+        import imdb-upstream.caddy
     }
 
     # Handle root path - serve static landing page

@@ -56,6 +56,8 @@ jobs:
         with:
           context: ./imdb-service
           file: ./imdb-service/Dockerfile.base
+          # arm64 for running imdb-service on an Ampere (Oracle A1) host.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -86,9 +88,6 @@ jobs:
           - image: flicklist-oauth
             context: ./flicklist-oauth
             file: ./flicklist-oauth/Dockerfile
-          - image: imdb-service
-            context: ./imdb-service
-            file: ./imdb-service/Dockerfile
           - image: mal-oauth
             context: ./mal-oauth
             file: ./mal-oauth/Dockerfile
@@ -179,6 +178,8 @@ jobs:
         with:
           context: ./imdb-service
           file: ./imdb-service/Dockerfile
+          # Must match the base image's platforms (see build-imdb-base).
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             BASE_IMAGE=ghcr.io/kometa-team/imdb-service-base:${{ needs.build-imdb-base.outputs.image_tag }}

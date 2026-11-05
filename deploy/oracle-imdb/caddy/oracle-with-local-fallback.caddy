@@ -1,0 +1,15 @@
+# /imdb-service upstream variant: TRIAL. Send traffic to the Oracle VM, and
+# fall back to the local container whenever the VM fails its health check.
+# Replace ORACLE_VM_TAILNET_IP with the VM's Tailscale address (100.x.y.z).
+reverse_proxy ORACLE_VM_TAILNET_IP:8000 imdb-service:8000 {
+	# Always prefer the first upstream that is healthy.
+	lb_policy first
+	health_uri /health/ready
+	health_interval 15s
+	health_timeout 5s
+	health_fails 2
+	# Retry a failed request on the other upstream for up to 10s.
+	lb_try_duration 10s
+	fail_duration 30s
+	header_up X-Script-Name /imdb-service
+}

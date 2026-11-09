@@ -8,14 +8,14 @@ bandit[toml]>=1.9.4
 black>=26.10.1
 
 # Linting
-flake8>=7.4.1
-flake8-bugbear>=26.9.30
+flake8>=7.5.0
+flake8-bugbear>=26.10.27
 flake8-docstrings>=1.7.0
 isort>=9.0.2
 
 # Type checking
-mypy>=2.4.0
+mypy>=2.4.1
 
 # Pre-commit hooks
-pre-commit>=4.6.2
-types-aiofiles>=25.1.0.20260518
+pre-commit>=4.7.0
+types-aiofiles>=25.1.0.20261107

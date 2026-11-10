@@ -9,7 +9,7 @@ black>=26.10.1
 
 # Linting
 flake8>=7.5.0
-flake8-bugbear>=26.10.27
+flake8-bugbear>=26.11.9
 flake8-docstrings>=1.7.0
 isort>=9.0.2
 

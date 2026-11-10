@@ -1,7 +1,7 @@
 aiosqlite==0.22.1
 fastapi==0.162.2
 httpx==0.28.1
-playwright==1.64.1
+playwright==1.65.0
 playwright-stealth==2.0.3
 python-multipart==0.0.33
 socksio>=1.0.0
